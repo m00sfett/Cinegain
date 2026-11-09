@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.so
+/tmp/
+.impeccable/
+*.deb
+*.rpm
+*.tar.gz

@@ -1,0 +1,37 @@
+# Maintainer: Tobias Moos <tobias@roteson.de>
+pkgname=cinegain
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Realtime volume booster, dialogue clarity optimizer & film audio processor for PipeWire"
+arch=('x86_64')
+url="https://roteson.de"
+license=('AGPL-3.0-or-later')
+depends=('pipewire' 'pipewire-pulse' 'python' 'python-pyqt6')
+makedepends=('gcc')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/m00sfett/cinegain/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cd "$pkgname-$pkgver"
+    gcc -O3 -fPIC -shared -Wall -Wextra src/cinegain.c -o src/cinegain.so -lm
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+    install -Dm755 src/cinegain.so "$pkgdir/usr/lib/ladspa/cinegain.so"
+    install -Dm755 bin/cinegain "$pkgdir/usr/bin/cinegain"
+    install -Dm755 bin/cinegain-gui "$pkgdir/usr/bin/cinegain-gui"
+
+    install -d "$pkgdir/usr/share/cinegain/ui"
+    install -Dm644 ui/*.py "$pkgdir/usr/share/cinegain/ui/"
+    install -d "$pkgdir/usr/share/cinegain/config"
+    install -Dm644 config/* "$pkgdir/usr/share/cinegain/config/"
+    install -d "$pkgdir/usr/share/cinegain/presets"
+    install -Dm644 presets/* "$pkgdir/usr/share/cinegain/presets/"
+    install -d "$pkgdir/usr/share/cinegain/assets/icons"
+    install -Dm644 assets/icons/* "$pkgdir/usr/share/cinegain/assets/icons/"
+
+    install -Dm644 assets/cinegain.desktop "$pkgdir/usr/share/applications/cinegain.desktop"
+    install -Dm644 assets/icons/cinegain.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/cinegain.png"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

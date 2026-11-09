@@ -1,0 +1,13 @@
+[Unit]
+Description=Cinegain Realtime Film Audio Processor (PipeWire Filter Chain)
+After=pipewire.service
+BindsTo=pipewire.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/pipewire -c /home/tobias/agent/projects/quick/cinegain/config/cinegain-standalone.conf
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

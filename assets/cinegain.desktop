@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Cinegain
+GenericName=Film Audio Processor & Volume Booster
+Comment=Realtime volume booster, dialogue clarity optimizer and film audio processor for PipeWire
+Exec=cinegain-gui
+Icon=cinegain
+Terminal=false
+Type=Application
+Categories=AudioVideo;Audio;Mixer;Player;
+Keywords=audio;sound;volume;boost;dialogue;movies;pipewire;ladspa;compressor;limiter;
+StartupNotify=true

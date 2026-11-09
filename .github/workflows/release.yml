@@ -1,0 +1,46 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc build-essential dpkg-dev
+
+      - name: Compile LADSPA DSP core
+        run: |
+          gcc -O3 -fPIC -shared -Wall -Wextra src/cinegain.c -o src/cinegain.so -lm
+
+      - name: Build Standalone Tarball
+        run: |
+          TAG_NAME="${{ github.ref_name }}"
+          VERSION="${TAG_NAME#v}"
+          TAR_DIR="cinegain-${VERSION}-linux-x86_64"
+          mkdir -p "${TAR_DIR}"
+          cp -r bin config presets src ui assets install.sh LICENSE README.md CHANGELOG.md "${TAR_DIR}/"
+          tar -czvf "cinegain-${VERSION}-linux-x86_64.tar.gz" "${TAR_DIR}"
+
+      - name: Build Debian Package
+        run: |
+          ./packaging/debian/build-deb.sh
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            cinegain-*-linux-x86_64.tar.gz
+            packaging/*.deb
+          generate_release_notes: true

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <rect x="4" y="4" width="120" height="120" rx="22" fill="#080604" stroke="#B11218" stroke-width="6"/>
+  <rect x="14" y="14" width="100" height="100" rx="16" fill="#B11218" stroke="#FFD21F" stroke-width="4"/>
+  <!-- Signal-yellow audio equalizer / boost bars -->
+  <rect x="28" y="54" width="10" height="20" rx="4" fill="#FFD21F"/>
+  <rect x="44" y="38" width="10" height="52" rx="4" fill="#FFD21F"/>
+  <rect x="60" y="24" width="10" height="80" rx="4" fill="#FFE15A"/>
+  <rect x="76" y="34" width="10" height="60" rx="4" fill="#FFD21F"/>
+  <rect x="92" y="48" width="10" height="32" rx="4" fill="#FFD21F"/>
+</svg>

@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Wrapper to launch Cinegain PyQt6 GUI
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -d "$SCRIPT_DIR/../ui" ]; then
+    UI_DIR="$(cd "$SCRIPT_DIR/../ui" && pwd)"
+elif [ -d "$SCRIPT_DIR/../share/cinegain/ui" ]; then
+    UI_DIR="$(cd "$SCRIPT_DIR/../share/cinegain/ui" && pwd)"
+elif [ -d "/usr/share/cinegain/ui" ]; then
+    UI_DIR="/usr/share/cinegain/ui"
+elif [ -d "$HOME/.local/share/cinegain/ui" ]; then
+    UI_DIR="$HOME/.local/share/cinegain/ui"
+else
+    echo "Error: Could not locate Cinegain UI modules directory." >&2
+    exit 1
+fi
+
+export PYTHONPATH="$UI_DIR:$PYTHONPATH"
+exec python3 "$UI_DIR/cinegain-gui.py" "$@"
