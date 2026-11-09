@@ -124,6 +124,7 @@ echo "==> Installing files..."
 install -m 755 "$SRC_DIR/src/cinegain.so" "$LIB_DIR/cinegain.so"
 install -m 755 "$SRC_DIR/bin/cinegain" "$BIN_DIR/cinegain"
 install -m 755 "$SRC_DIR/bin/cinegain-gui" "$BIN_DIR/cinegain-gui"
+install -m 755 "$SRC_DIR/install.sh" "$SHARE_DIR/install.sh"
 
 cp -r "$SRC_DIR/ui/"* "$SHARE_DIR/ui/"
 cp -r "$SRC_DIR/config/"* "$SHARE_DIR/config/"
