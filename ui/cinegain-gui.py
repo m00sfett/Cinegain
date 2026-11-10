@@ -26,7 +26,8 @@ APP_VERSION = "0.3.3"
 
 os.environ.setdefault("CINEGAIN_BASE_DIR", BASE_DIR)
 import cinegain_paths as paths  # noqa: E402
-from cinegain_profiles import DEFAULT_PARAMS, ProfileCatalog, full_params  # noqa: E402
+from cinegain_profiles import DEFAULT_PARAMS, PROFILE_STANDARD, ProfileCatalog, SinkProcesses, full_params, read_meter  # noqa: E402
+from cinegain_registry import profile_id_for  # noqa: E402
 from cinegain_router import Router  # noqa: E402
 from i18n import t, set_language, get_available_languages, get_current_language  # noqa: E402
 
@@ -38,6 +39,7 @@ BRAND_R2W2_PATH = os.path.join(BASE_DIR, "assets", "icons", "brand-r2w2.png")
 CONFIG_DIR = paths.CONFIG_DIR
 USER_PRESETS_FILE = paths.USER_PRESETS_FILE
 CONFIG_FILE = paths.CONFIG_FILE
+LEVELER_DEFAULT_CUT_DB = 6.0  # cut range given to a leveler the user switches on via the boost slider
 
 try:
     from PyQt6.QtWidgets import (
@@ -59,7 +61,7 @@ try:
         QInputDialog,
         QMessageBox,
     )
-    from PyQt6.QtGui import QIcon, QAction, QKeyEvent, QPainter, QPixmap, QDesktopServices
+    from PyQt6.QtGui import QIcon, QAction, QKeyEvent, QPainter, QColor, QPixmap, QDesktopServices
     from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QByteArray, QPoint, QUrl
     from PyQt6.QtSvg import QSvgRenderer
 except ImportError:
@@ -469,6 +471,50 @@ def run_cinegain(*args):
     return res.stdout.strip(), res.returncode
 
 
+class MeterStrip(QWidget):
+    """Four small live bars: input peak, leveler gain, compressor and limiter reduction."""
+
+    # label, low, high (dB); bars with a negative range grow from the right (reduction)
+    BARS = (("IN", -60.0, 0.0), ("LEVELER", -12.0, 24.0), ("COMP", -24.0, 0.0), ("LIMIT", -12.0, 0.0))
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(30)
+        self.values = None  # (level, leveler, gr, limit) or None when idle
+
+    def set_values(self, values):
+        if values != self.values:
+            self.values = values
+            self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        w, h = self.width(), self.height()
+        gap = 10
+        bw = (w - gap * (len(self.BARS) - 1)) / len(self.BARS)
+        for i, (name, lo, hi) in enumerate(self.BARS):
+            x = i * (bw + gap)
+            p.fillRect(int(x), 14, int(bw), 8, QColor("#14100D"))
+            p.setPen(QColor("#A79B8C"))
+            p.drawText(int(x), 0, int(bw), 12, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, name)
+            if self.values is None:
+                continue
+            v = self.values[i]
+            frac = max(0.0, min(1.0, (v - lo) / (hi - lo)))
+            if name in ("COMP", "LIMIT"):
+                frac = 1.0 - frac  # reduction grows with magnitude
+                color = QColor("#FFD21F") if v > -6 else QColor("#B11218")
+            elif name == "IN":
+                color = QColor("#6FBF8B") if v < -3 else QColor("#B11218")
+            else:
+                color = QColor("#FFD21F")
+            p.fillRect(int(x), 14, int(bw * frac), 8, color)
+            p.setPen(QColor("#EDE6DC"))
+            p.drawText(int(x), 0, int(bw), 12, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                       f"{v:+.0f} dB" if name == "LEVELER" else f"{max(v, -99):.0f} dB")
+        p.end()
+
+
 class KeyNavSlider(QSlider):
     """
     Custom QSlider that delegates Up/Down/Tab to the window's 12-slider focus ring
@@ -579,6 +625,14 @@ class CinegainMainWindow(QMainWindow):
         self.param_timer.timeout.connect(self.flush_pending_params)
 
         # Heartbeat timer for PipeWire status & stream tracking
+        self._meter_seq = {}
+        self._active_slot = None  # (slot_id, selected_key): slider moves are saved back to it
+        self._meter_idle = 0
+        self.meter_timer = QTimer(self)
+        self.meter_timer.setInterval(120)
+        self.meter_timer.timeout.connect(self.update_meters)
+        self.meter_timer.start()
+
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.on_heartbeat)
         self.timer.start(1500)
@@ -878,6 +932,10 @@ class CinegainMainWindow(QMainWindow):
 
         presets_vbox.addLayout(row2)
         editor.addWidget(self.grp_presets)
+
+        self.meter_strip = MeterStrip()
+        self.meter_strip.setToolTip(t('meter_tip'))
+        editor.addWidget(self.meter_strip)
 
         # 3. Side-by-Side Two-Column Controls (Left: Hero Direct Boost + Main Focus, Right: Fine-Tuning)
         cols_layout = QHBoxLayout()
@@ -1275,10 +1333,43 @@ class CinegainMainWindow(QMainWindow):
         val_lbl.setText(self._format_val(param_name, val, unit))
         if self.selected_key is STANDARD:
             self.pending_params[param_name] = val
+            if param_name == "lev_max_boost_db" and val > 0.05 and self.catalog.standard_params()["lev_max_cut_db"] <= 0.05:
+                # a leveler that can only boost never pulls loud scenes back
+                self.pending_params["lev_max_cut_db"] = LEVELER_DEFAULT_CUT_DB
         else:
             self._store_program_values(self.selected_key, self.get_current_slider_params())
+        if self._active_slot and self._active_slot[1] is self.selected_key:
+            self._slot_dirty = self._active_slot[0]
         self.update_preset_highlights()
         self.param_timer.start()
+
+    def meter_pid(self):
+        """PID of the filter process that currently shapes the selected target."""
+        profile = PROFILE_STANDARD
+        if self.selected_key is not STANDARD:
+            entry = self.router.registry.get(self.selected_key)
+            if entry and entry["params"] and entry["enabled"]:
+                profile = profile_id_for(self.selected_key)
+        return self.router.sinks.pid(profile)
+
+    def update_meters(self):
+        """Shows the plugin's live levels; bars go empty when no audio flows through the filter."""
+        values = None
+        try:
+            pid = self.meter_pid() if self.is_active else None
+            m = read_meter(pid) if pid else None
+            if m:
+                seq = m[0]
+                if seq != self._meter_seq.get(pid):
+                    self._meter_seq[pid] = seq
+                    self._meter_idle = 0
+                else:
+                    self._meter_idle += 1
+                if self._meter_idle < 4:
+                    values = m[1:]
+        except Exception:
+            values = None  # a timer slot must never raise (PyQt aborts the app)
+        self.meter_strip.set_values(values)
 
     def _store_program_values(self, key, values):
         """Gives the program its own setting (copied from Standard on first change)."""
@@ -1293,12 +1384,21 @@ class CinegainMainWindow(QMainWindow):
         if "lev_max_boost_db" in values and "leveler" not in values:
             # Same rule as `cinegain batch` for Standard: boost > 0 means leveler on.
             params["leveler"] = 1.0 if float(values["lev_max_boost_db"]) > 0.05 else 0.0
+            if params["leveler"] and params["lev_max_cut_db"] <= 0.05:
+                params["lev_max_cut_db"] = LEVELER_DEFAULT_CUT_DB
         self.router.registry.set_params(key, params, save=False)
         self._program_dirty = key
         if first_time:
             self.update_edit_header()
 
     def flush_pending_params(self):
+        if getattr(self, "_slot_dirty", None):
+            sid, self._slot_dirty = self._slot_dirty, None
+            slot = self.user_presets.get(sid)
+            if slot and slot.get("params") and self._active_slot and self._active_slot[0] == sid:
+                slot["params"] = self.get_current_slider_params()
+                self._save_user_presets()
+                self._refresh_user_preset_buttons_text()
         if self._program_dirty:
             key, self._program_dirty = self._program_dirty, None
             self.router.registry.save()
@@ -1326,6 +1426,7 @@ class CinegainMainWindow(QMainWindow):
 
     def apply_factory_preset(self, preset_name):
         """Loads a factory preset into whatever is selected in the sidebar."""
+        self._active_slot = None
         if self.selected_key is STANDARD:
             self.apply_standard_preset(preset_name)
             return
@@ -1362,6 +1463,7 @@ class CinegainMainWindow(QMainWindow):
             self._overwrite_user_slot(slot_id)
             return
         saved_p = dict(slot["params"])
+        self._active_slot = (slot_id, self.selected_key)
         if self.selected_key is STANDARD:
             self.pending_params.clear()
             self._set_sliders_silently(saved_p)
@@ -1392,6 +1494,7 @@ class CinegainMainWindow(QMainWindow):
         menu.exec(button.mapToGlobal(pos))
 
     def _overwrite_user_slot(self, slot_id):
+        self._active_slot = (slot_id, self.selected_key)
         self.user_presets[slot_id]["params"] = self.get_current_slider_params()
         self._save_user_presets()
         self._refresh_user_preset_buttons_text()
@@ -1412,6 +1515,8 @@ class CinegainMainWindow(QMainWindow):
             self.update_preset_highlights()
 
     def _clear_user_slot(self, slot_id):
+        if self._active_slot and self._active_slot[0] == slot_id:
+            self._active_slot = None
         idx_num = slot_id.split("_")[-1]
         self.user_presets[slot_id]["name"] = f"User {idx_num}"
         self.user_presets[slot_id]["params"] = None

@@ -70,6 +70,7 @@ class TestProgramEditing(unittest.TestCase):
         self.router = Router(registry=AppRegistry(), sinks=self.sinks, pulse=self.pulse)
         self.win = self.gui.CinegainMainWindow(self.router)
         self.win.timer.stop()
+        self.win.meter_timer.stop()
         self.app.processEvents()
 
     def tearDown(self):
@@ -120,6 +121,7 @@ class TestProgramEditing(unittest.TestCase):
         self.win.flush_pending_params()
         params = AppRegistry().get(CHROME)["params"]
         self.assertEqual((params["leveler"], params["lev_max_boost_db"]), (1.0, 15.0))
+        self.assertEqual(params["lev_max_cut_db"], 6.0)
         self.slider("lev_max_boost_db").setValue(0)
         self.win.flush_pending_params()
         self.assertEqual(AppRegistry().get(CHROME)["params"]["leveler"], 0.0)
@@ -139,6 +141,59 @@ class TestProgramEditing(unittest.TestCase):
             self.assertEqual(cli.cmd_route(None), 0)
         self.assertIn("Google Chrome", out.getvalue())
         self.assertIn("own", out.getvalue())
+
+    def test_loaded_user_slot_saves_slider_changes_back(self):
+        self.win.on_user_preset_clicked("user_1")  # filled slot: loads into Standard
+        self.slider("input_db").setValue(77)
+        self.win.flush_pending_params()
+        saved = paths.read_json(paths.USER_PRESETS_FILE)["user_1"]["params"]
+        self.assertAlmostEqual(saved["input_db"], 7.7)
+        self.assertEqual(self.win.user_presets["user_1"]["params"]["input_db"], 7.7)
+
+    def test_user_slot_stops_auto_saving_after_factory_preset_or_program_switch(self):
+        self.win.on_user_preset_clicked("user_1")
+        self.win.apply_factory_preset("boost_20db")
+        self.slider("input_db").setValue(33)
+        self.win.flush_pending_params()
+        self.assertEqual(paths.read_json(paths.USER_PRESETS_FILE)["user_1"]["params"]["input_db"], 1.0)
+        self.win.on_user_preset_clicked("user_1")
+        self.win.sidebar.select(CHROME)
+        self.slider("input_db").setValue(44)
+        self.win.flush_pending_params()
+        self.assertEqual(paths.read_json(paths.USER_PRESETS_FILE)["user_1"]["params"]["input_db"], 1.0)
+
+    def test_meter_strip_shows_live_values_and_goes_empty_when_idle(self):
+        import cinegain_profiles as cp
+        cp_read = self.gui.read_meter
+        seq = [0]
+
+        def fake(pid):
+            seq[0] += 1
+            return (seq[0], -12.0, 6.0, -3.0, -1.0)
+
+        self.gui.read_meter = fake
+        try:
+            self.win.is_active = True
+            self.win.sinks = None
+            self.win.router.sinks.live.add("standard")
+            self.win.update_meters()
+            self.assertEqual(self.win.meter_strip.values, (-12.0, 6.0, -3.0, -1.0))
+            self.gui.read_meter = lambda pid: (5, -12.0, 6.0, -3.0, -1.0)
+            for _ in range(6):
+                self.win.update_meters()
+            self.assertIsNone(self.win.meter_strip.values)
+        finally:
+            self.gui.read_meter = cp_read
+
+    def test_read_meter_parses_plugin_file(self):
+        import struct
+        import tempfile
+        import cinegain_profiles as cp
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "meter-42.bin"), "wb") as f:
+                f.write(struct.pack(cp.METER_FORMAT, cp.METER_MAGIC, 9, -10.0, 4.0, -2.0, -0.5))
+            self.assertEqual(cp.read_meter(42, d), (9, -10.0, 4.0, -2.0, -0.5))
+            self.assertIsNone(cp.read_meter(43, d))
 
     def test_tray_preset_always_targets_standard(self):
         self.win.sidebar.select(SPOTIFY)
@@ -174,12 +229,6 @@ class TestProgramEditing(unittest.TestCase):
         self.win.refresh_apps()
         self.assertFalse(AppRegistry().get(SPOTIFY)["enabled"])
         self.assertEqual(self.sink_of(self.spotify), tr.HW)
-
-    def test_user_slots_no_longer_save_in_the_background(self):
-        self.win.on_user_preset_clicked("user_1")  # load into Standard
-        self.slider().setValue(170)
-        self.win.flush_pending_params()
-        self.assertEqual(paths.read_json(paths.USER_PRESETS_FILE)["user_1"]["params"]["input_db"], 1.0)
 
     def test_brand_link_click_opens_url_and_does_not_crash(self):
         from unittest import mock
