@@ -17,6 +17,17 @@ Categories follow the standard Keep a Changelog taxonomy: `Added`, `Changed`, `D
 
 ## [0.3.3] - 2026-11-10
 
+### Added
+- **Live meter strip** under the presets: input peak, leveler gain, compressor and limiter reduction of the filter that shapes the selected program (README promised real-time feedback). PipeWire does not expose control output ports, so the plugin writes the four values to a small memory-mapped file (`$XDG_RUNTIME_DIR/cinegain/meter-<pid>.bin`) and the GUI polls it. Bars go empty when no audio flows.
+- **Auto-saving user slots:** a slot you loaded (or saved to) follows your slider changes until you pick a factory preset, another slot or another program. This reverses the 0.3.0 "slots are templates" behaviour to match the README.
+- **.rpm package:** the release workflow now builds `cinegain-<version>-1.x86_64.rpm` from `packaging/rpm/cinegain.spec` (installs the plugin to `/usr/lib/ladspa`, where Cinegain looks for it).
+- Tests: `tests/test_dsp_stages.py` (high-pass off, leveler cut speed, meter file) and GUI tests for auto-save and meters; 61 tests.
+
+### Changed
+- **Leveler** is now peak-sensing as documented: boosts still follow the slow RMS, but cuts react about 8x faster and to loud peaks directly. After a quiet-to-loud jump the output settles in about 2 s instead of over 10 s.
+- Switching the leveler on with the boost slider also gives it a 6 dB cut range (it could only boost before).
+- **High-pass at its minimum (10 Hz) is off** and Neutral/boost presets use it, so *Neutral (0 dB)* is now bit-transparent (it used to cut -3 dB at 20 Hz).
+
 ### Fixed
 - Per-program editing: moving *Leveler: max boost* now switches the program's leveler on (and off again at 0), exactly like it already did for Standard. Before, the slider stored a value but the leveler stayed off, so nothing changed in the sound.
 - `cinegain route` no longer crashes with `AttributeError: 'AppView' object has no attribute 'profile'`; it lists each playing program with `off`, `standard` or `own` and its sink.
