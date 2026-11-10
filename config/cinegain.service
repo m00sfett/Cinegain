@@ -1,11 +1,17 @@
+# Optional user service: runs Cinegain and keeps per-program routing applied
+# without the desktop window. Install with:
+#   cp config/cinegain.service ~/.config/systemd/user/ && systemctl --user enable --now cinegain
+# Do not combine with the tray GUI; both would route the same streams.
 [Unit]
-Description=Cinegain Realtime Film Audio Processor (PipeWire Filter Chain)
-After=pipewire.service
+Description=Cinegain Realtime Film Audio Processor (PipeWire filter chain + routing)
+After=pipewire.service pipewire-pulse.service
 BindsTo=pipewire.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/pipewire -c /home/tobias/agent/projects/quick/cinegain/config/cinegain-standalone.conf
+ExecStartPre=/usr/bin/env cinegain start
+ExecStart=/usr/bin/env cinegain watch
+ExecStopPost=/usr/bin/env cinegain stop
 Restart=on-failure
 RestartSec=2
 
