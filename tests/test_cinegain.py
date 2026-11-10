@@ -7,9 +7,14 @@ import unittest
 import os
 import subprocess
 import json
+import tempfile
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 BIN_PATH = os.path.join(BASE_DIR, "bin", "cinegain")
+
+# Keep saved user settings out of this live test. Note: the test still stops and
+# starts the real cinegain_sink, so do not run it while you are listening.
+os.environ.setdefault("CINEGAIN_CONFIG_DIR", tempfile.mkdtemp(prefix="cinegain-live-test-"))
 SO_PATH = os.path.join(BASE_DIR, "src", "cinegain.so")
 
 
