@@ -778,7 +778,10 @@ class CinegainMainWindow(QMainWindow):
             frame = meta["frame"]
             lbl_key = meta["label_key"]
             tip_key = meta["tip_key"]
-            lbl.setText(t(lbl_key) if lbl_key.startswith("lbl_") else lbl_key)
+            title = t(lbl_key) if lbl_key.startswith("lbl_") else lbl_key
+            self.sliders[param_name]["base_title"] = title
+            self.sliders[param_name]["slider"].setAccessibleName(title)
+            self._apply_row_focus_style(param_name, param_name == self.slider_order[self.focused_slider_idx])
             if tip_key:
                 tooltip = t(tip_key) if tip_key.startswith("tip_") else tip_key
                 lbl.setToolTip(tooltip)
@@ -1181,6 +1184,7 @@ class CinegainMainWindow(QMainWindow):
         hdr.addWidget(val_lbl)
 
         slider = KeyNavSlider(Qt.Orientation.Horizontal, param_name)
+        slider.setAccessibleName(label_text)
         if is_hero:
             slider.setObjectName("hero_slider")
         slider.setMinimum(int(round(min_val * 10)))
