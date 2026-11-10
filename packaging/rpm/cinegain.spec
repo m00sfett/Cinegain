@@ -17,7 +17,7 @@ Requires:       python3-pyqt6
 Cinegain is a dedicated realtime audio DSP processor designed for movies, TV
 shows, laptops, and stream media on Linux. Features an intelligent dialogue
 leveler, presence boost, center/side isolation, soft-knee compressor, and a
-true-peak look-ahead limiter preventing digital clipping.
+look-ahead peak limiter that keeps the output below full scale.
 
 %prep
 %autosetup

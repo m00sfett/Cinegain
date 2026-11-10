@@ -131,7 +131,7 @@ TRANSLATIONS = {
         "lbl_makeup_db": "Ausgangs-Verstärkung (Makeup Gain)",
         "tip_makeup_db": "Zusätzliche Verstärkung nach dem Kompressor.",
         "lbl_lim_ceiling_db": "Limiter-Decke (Schutzgrenze)",
-        "tip_lim_ceiling_db": "Maximale Ausgangsspitze (verhindert Übersteuern zuverlässig).",
+        "tip_lim_ceiling_db": "Maximale Ausgangsspitze, auf die der Limiter Sample-Spitzen begrenzt.",
         "preset_clean_linear": "Neutral (0 dB)",
         "preset_boost_5db": "+5 dB",
         "preset_boost_10db": "+10 dB",
