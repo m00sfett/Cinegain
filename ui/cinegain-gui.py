@@ -22,14 +22,20 @@ elif os.path.exists(os.path.expanduser("~/.local/bin/cinegain")):
 else:
     BIN_PATH = "cinegain"
 
+APP_VERSION = "0.2.0"
+
+os.environ.setdefault("CINEGAIN_BASE_DIR", BASE_DIR)
+import cinegain_paths as paths  # noqa: E402
+from cinegain_profiles import USER_SLOTS, find_node_id, push_params, sink_name  # noqa: E402
+from cinegain_registry import PROFILE_STANDARD  # noqa: E402
+from cinegain_router import Router  # noqa: E402
+from i18n import t, set_language, get_available_languages, get_current_language  # noqa: E402
+
 PRESETS_PATH = os.path.join(BASE_DIR, "presets", "presets.json")
 ICON_PATH = os.path.join(BASE_DIR, "assets", "icons", "cinegain.png")
-CONFIG_DIR = os.path.expanduser("~/.config/cinegain")
-USER_PRESETS_FILE = os.path.join(CONFIG_DIR, "user_presets.json")
-CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
-
-from stream_manager import StreamManager
-from i18n import t, set_language, get_available_languages, get_current_language, CURRENT_LANG
+CONFIG_DIR = paths.CONFIG_DIR
+USER_PRESETS_FILE = paths.USER_PRESETS_FILE
+CONFIG_FILE = paths.CONFIG_FILE
 
 try:
     from PyQt6.QtWidgets import (
@@ -49,6 +55,7 @@ try:
         QSizePolicy,
         QFrame,
         QInputDialog,
+        QMessageBox,
     )
     from PyQt6.QtGui import QIcon, QAction, QKeyEvent, QPainter, QPixmap
     from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QByteArray, QPoint
@@ -56,6 +63,8 @@ try:
 except ImportError:
     print("Error: PyQt6 is required to run the Cinegain desktop interface.")
     sys.exit(1)
+
+from apps_panel import AppsPanel  # noqa: E402
 
 
 def create_translate_icon(color="#FFD21F", size=18):
@@ -397,6 +406,11 @@ QMenu::separator {
 """
 
 
+def amp(text):
+    """Escapes '&' so Qt shows it instead of turning it into a keyboard mnemonic."""
+    return text.replace("&", "&&")
+
+
 def run_cinegain(*args):
     cmd = [BIN_PATH] + list(args)
     res = subprocess.run(cmd, capture_output=True, text=True)
@@ -470,15 +484,17 @@ class SliderRowWidget(QFrame):
 
 
 class CinegainMainWindow(QMainWindow):
-    def __init__(self, stream_manager):
+    def __init__(self, router):
         super().__init__()
-        self.stream_mgr = stream_manager
+        self.router = router
         self.is_active = False
         self.active_user_slot = None  # "user_1" .. "user_8" when editing a user slot live
         self.sliders = {}  # param_name -> dict(slider, val_lbl, title_lbl, row_frame, base_title, unit, is_hero)
         self.slider_order = []  # ordered list of param_names for Up/Down keyboard navigation
         self.slider_ui_elements = {}  # param_name -> dict(label, frame, label_key, tip_key)
         self.focused_slider_idx = 0
+        self._slot_sync_pending = None
+        self._profile_nodes = {}  # profile id -> PipeWire node id (cache for live slot edits)
 
         self._load_config()
         self.factory_presets = self._load_factory_presets()
@@ -488,8 +504,8 @@ class CinegainMainWindow(QMainWindow):
 
         self.setWindowTitle(t("app_title"))
         self.setStyleSheet(CI_STYLESHEET)
-        self.setMinimumSize(1040, 870)
-        self.resize(1080, 890)
+        self.setMinimumSize(1040, 940)
+        self.resize(1100, 980)
 
         if os.path.exists(ICON_PATH):
             self.setWindowIcon(QIcon(ICON_PATH))
@@ -558,13 +574,28 @@ class CinegainMainWindow(QMainWindow):
                 pass
         return slots
 
-    def _save_user_presets(self):
+    def _save_user_presets(self, changed_slot=None):
         try:
-            os.makedirs(CONFIG_DIR, exist_ok=True)
-            with open(USER_PRESETS_FILE, "w", encoding="utf-8") as f:
-                json.dump(self.user_presets, f, indent=2, ensure_ascii=False)
-        except Exception:
-            pass
+            paths.write_json_atomic(USER_PRESETS_FILE, self.user_presets)
+        except OSError:
+            return
+        if changed_slot:
+            self._sync_profile_sink(changed_slot)
+
+    def _sync_profile_sink(self, slot_id):
+        """Keeps a running per-app profile sink in step with its edited user slot."""
+        if self.user_presets.get(slot_id, {}).get("params") is None:
+            # Slot cleared: its programs fall back to the standard profile.
+            self.router.registry.replace_profile(slot_id, PROFILE_STANDARD)
+            self.router.sinks.stop(slot_id)
+            return
+        if slot_id in self.router.sinks.running():
+            params = self.router.catalog.params(slot_id)
+            node_id = self._profile_nodes.get(slot_id) or find_node_id(sink_name(slot_id))
+            if push_params(node_id, params):
+                self._profile_nodes[slot_id] = node_id
+            else:
+                self._profile_nodes.pop(slot_id, None)
 
     def _load_config(self):
         if os.path.exists(CONFIG_FILE):
@@ -626,16 +657,20 @@ class CinegainMainWindow(QMainWindow):
         self.lbl_status.setText(t("status_active") if self.is_active else t("status_inactive"))
 
         if hasattr(self, "grp_presets"):
-            self.grp_presets.setTitle(t("presets_group"))
+            self.grp_presets.setTitle(amp(t("presets_group")))
         if hasattr(self, "grp_main"):
-            self.grp_main.setTitle(t("main_group"))
+            self.grp_main.setTitle(amp(t("main_group")))
         if hasattr(self, "grp_adv"):
-            self.grp_adv.setTitle(t("adv_group"))
+            self.grp_adv.setTitle(amp(t("adv_group")))
         if hasattr(self, "grp_apps"):
-            self.grp_apps.setTitle(t("apps_group"))
+            self.grp_apps.setTitle(amp(t("apps_group")))
+            self.apps_panel.retranslate()
+        if hasattr(self, "btn_reset"):
+            self.btn_reset.setText(t("btn_reset"))
+            self.btn_reset.setToolTip(t("btn_reset_tip"))
 
         for pid, b in self.preset_buttons.items():
-            b.setText(t(f"preset_{pid}"))
+            b.setText(amp(t(f"preset_{pid}")))
 
         for param_name, meta in self.slider_ui_elements.items():
             lbl = meta["label"]
@@ -721,7 +756,7 @@ class CinegainMainWindow(QMainWindow):
         layout.addWidget(banner)
 
         # 2. Presets Section (Row 1: Pure Boost + Cinema Profiles | Row 2: 8 Auto-Saving User Presets)
-        self.grp_presets = QGroupBox(t("presets_group"))
+        self.grp_presets = QGroupBox(amp(t("presets_group")))
         presets_vbox = QVBoxLayout(self.grp_presets)
         presets_vbox.setSpacing(8)
         presets_vbox.setContentsMargins(10, 12, 10, 8)
@@ -750,7 +785,7 @@ class CinegainMainWindow(QMainWindow):
                 sep.setStyleSheet("background-color: #7F1718; max-width: 2px; margin: 2px 4px;")
                 row1.addWidget(sep)
                 continue
-            b = QPushButton(text)
+            b = QPushButton(amp(text))
             b.setToolTip(tip)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -786,7 +821,7 @@ class CinegainMainWindow(QMainWindow):
         cols_layout.setSpacing(14)
 
         # Left Column: Main Volume & Speech Focus (No numbering!)
-        self.grp_main = QGroupBox(t("main_group"))
+        self.grp_main = QGroupBox(amp(t("main_group")))
         gm_layout = QVBoxLayout(self.grp_main)
         gm_layout.setSpacing(8)
         gm_layout.setContentsMargins(10, 14, 10, 10)
@@ -850,7 +885,7 @@ class CinegainMainWindow(QMainWindow):
         gm_layout.addStretch()
 
         # Right Column: Fine-Tuning (EQ, Compressor & Limiter)
-        self.grp_adv = QGroupBox(t("adv_group"))
+        self.grp_adv = QGroupBox(amp(t("adv_group")))
         adv_layout = QVBoxLayout(self.grp_adv)
         adv_layout.setSpacing(6)
         adv_layout.setContentsMargins(10, 14, 10, 10)
@@ -932,29 +967,32 @@ class CinegainMainWindow(QMainWindow):
         layout.addLayout(cols_layout, 1)
 
         # 4. Applications Section in a fixed-height ScrollArea
-        self.grp_apps = QGroupBox(t("apps_group"))
-        self.grp_apps.setFixedHeight(118)
+        self.grp_apps = QGroupBox(amp(t("apps_group")))
+        self.grp_apps.setFixedHeight(196)
         grp_apps_outer = QVBoxLayout(self.grp_apps)
         grp_apps_outer.setContentsMargins(8, 6, 8, 6)
-
-        self.apps_scroll = QScrollArea()
-        self.apps_scroll.setWidgetResizable(True)
-        self.apps_scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.apps_scroll_widget = QWidget()
-        self.apps_scroll_widget.setObjectName("apps_scroll_content")
-        self.apps_layout = QVBoxLayout(self.apps_scroll_widget)
-        self.apps_layout.setContentsMargins(4, 2, 4, 2)
-        self.apps_layout.setSpacing(5)
-        self.apps_scroll.setWidget(self.apps_scroll_widget)
-
-        grp_apps_outer.addWidget(self.apps_scroll)
+        self.apps_panel = AppsPanel(self.router)
+        self.apps_panel.changed.connect(self.refresh_apps)
+        grp_apps_outer.addWidget(self.apps_panel)
         layout.addWidget(self.grp_apps)
 
         # 5. Footer with Version, AGPLv3, and roteson.de link
         footer_layout = QHBoxLayout()
         footer_layout.setContentsMargins(4, 2, 4, 0)
+        self.btn_reset = QPushButton(t("btn_reset"))
+        self.btn_reset.setObjectName("btn_reset")
+        self.btn_reset.setToolTip(t("btn_reset_tip"))
+        self.btn_reset.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_reset.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_reset.setStyleSheet(
+            "QPushButton#btn_reset { background: transparent; color: #A79B8C; border: 1px solid #3A2A22; "
+            "border-radius: 5px; padding: 3px 10px; font-size: 11px; font-weight: 700; }"
+            "QPushButton#btn_reset:hover { color: #FFD21F; border-color: #B11218; background: #2A0E0E; }"
+        )
+        self.btn_reset.clicked.connect(self.reset_everything)
+        footer_layout.addWidget(self.btn_reset)
         self.lbl_footer = QLabel(
-            f'<span style="color:#A79B8C;">Cinegain v0.1.1 · AGPLv3 · </span>'
+            f'<span style="color:#A79B8C;">Cinegain v{APP_VERSION} · AGPLv3 · </span>'
             f'<a href="https://roteson.de" style="color:#FFD21F; text-decoration:none; font-weight:700;">roteson.de</a>'
         )
         self.lbl_footer.setOpenExternalLinks(True)
@@ -1141,11 +1179,11 @@ class CinegainMainWindow(QMainWindow):
             if params:
                 in_db = params.get("input_db", 0.0)
                 sign = "+" if in_db > 0 else ""
-                btn.setText(t("user_slot_saved", name=name, sign=sign, db=in_db))
+                btn.setText(amp(t("user_slot_saved", name=name, sign=sign, db=in_db)))
                 btn.setToolTip(t("user_slot_saved_tip", name=name, sign=sign, db=in_db))
                 btn.setProperty("userSaved", "true")
             else:
-                btn.setText(t("user_slot_free", name=name))
+                btn.setText(amp(t("user_slot_free", name=name)))
                 btn.setToolTip(t("user_slot_free_tip", name=name))
                 btn.setProperty("userSaved", "false")
             btn.style().unpolish(btn)
@@ -1183,11 +1221,15 @@ class CinegainMainWindow(QMainWindow):
             self.user_presets[self.active_user_slot]["params"] = self.get_current_slider_params()
             self._save_user_presets()
             self._refresh_user_preset_buttons_text()
+            self._slot_sync_pending = self.active_user_slot
 
         self.update_preset_highlights()
         self.param_timer.start()
 
     def flush_pending_params(self):
+        if self._slot_sync_pending:
+            slot, self._slot_sync_pending = self._slot_sync_pending, None
+            self._sync_profile_sink(slot)
         if not self.pending_params:
             return
         to_send = dict(self.pending_params)
@@ -1239,7 +1281,7 @@ class CinegainMainWindow(QMainWindow):
             # Empty slot -> store current slider positions immediately
             current = self.get_current_slider_params()
             slot["params"] = current
-            self._save_user_presets()
+            self._save_user_presets(changed_slot=slot_id)
             self._refresh_user_preset_buttons_text()
             run_cinegain("batch", json.dumps(current), "--preset-id", slot_id)
         else:
@@ -1275,7 +1317,7 @@ class CinegainMainWindow(QMainWindow):
         self.active_user_slot = slot_id
         current = self.get_current_slider_params()
         self.user_presets[slot_id]["params"] = current
-        self._save_user_presets()
+        self._save_user_presets(changed_slot=slot_id)
         self._refresh_user_preset_buttons_text()
         self.update_preset_highlights()
 
@@ -1299,14 +1341,14 @@ class CinegainMainWindow(QMainWindow):
         self.user_presets[slot_id]["params"] = None
         if self.active_user_slot == slot_id:
             self.active_user_slot = None
-        self._save_user_presets()
+        self._save_user_presets(changed_slot=slot_id)
         self._refresh_user_preset_buttons_text()
         self.update_preset_highlights()
 
     def toggle_power(self):
         if self.is_active:
             self.pending_params.clear()
-            self.stream_mgr.release_all()
+            self.router.release_all()
             run_cinegain("stop")
         else:
             run_cinegain("start")
@@ -1366,63 +1408,42 @@ class CinegainMainWindow(QMainWindow):
 
         self.update_preset_highlights()
 
-        # Update per-application stream routing list (with 5-min memory)
-        self.stream_mgr.scan()
-        if self.is_active:
-            self.stream_mgr.enforce_routing()
-        apps = self.stream_mgr.get_tracked_apps()
-        self.rebuild_apps_list(apps)
+        self.refresh_apps()
 
-    def rebuild_apps_list(self, apps):
-        while self.apps_layout.count():
-            item = self.apps_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+    def refresh_apps(self):
+        """Scans streams, enforces per-app routing and updates the programs panel."""
+        views = self.router.tick(active=self.is_active)
+        self.apps_panel.update_views(views, self.is_active)
 
-        if not apps:
-            empty_lbl = QLabel(t("apps_empty"))
-            empty_lbl.setStyleSheet("color: #A79B8C; font-style: italic; padding: 6px 2px;")
-            self.apps_layout.addWidget(empty_lbl)
+    def reset_everything(self):
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(t("reset_confirm_title"))
+        box.setText(t("reset_confirm_title"))
+        box.setInformativeText(t("reset_confirm_text"))
+        box.setStandardButtons(QMessageBox.StandardButton.Reset | QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        if box.exec() != QMessageBox.StandardButton.Reset:
             return
-
-        for app_info in apps:
-            row = QWidget()
-            row.setStyleSheet("background-color: transparent;")
-            rl = QHBoxLayout(row)
-            rl.setContentsMargins(2, 1, 6, 1)
-
-            cb = QCheckBox(app_info["name"])
-            cb.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            cb.setChecked(app_info["enabled"])
-            cb.toggled.connect(
-                lambda checked, n=app_info["name"]: self.on_app_toggled(n, checked)
-            )
-
-            status_lbl = QLabel()
-            if app_info["active"]:
-                if app_info["enabled"] and self.is_active:
-                    status_lbl.setText(t("routed_cinegain"))
-                    status_lbl.setStyleSheet("color: #6FBF8B; font-size: 12px; font-weight: 700;")
-                else:
-                    status_lbl.setText(t("routed_direct"))
-                    status_lbl.setStyleSheet("color: #A2968A; font-size: 12px;")
-            else:
-                idle_sec = app_info.get("idle_seconds", 0)
-                mins = idle_sec // 60
-                secs = idle_sec % 60
-                time_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
-                status_lbl.setText(t("paused_ago", time_str=time_str))
-                status_lbl.setStyleSheet("color: #E8C462; font-size: 12px;")
-
-            rl.addWidget(cb)
-            rl.addStretch()
-            rl.addWidget(status_lbl)
-            self.apps_layout.addWidget(row)
-        self.apps_layout.addStretch()
-
-    def on_app_toggled(self, app_name, checked):
-        self.stream_mgr.set_app_enabled(app_name, checked, service_active=self.is_active)
-        self.on_heartbeat(sync_sliders=False)
+        self.timer.stop()
+        self.param_timer.stop()
+        self.pending_params.clear()
+        out, code = run_cinegain("reset", "--yes", "--json")
+        try:
+            report = json.loads(out.splitlines()[-1]) if out else {}
+        except (ValueError, IndexError):
+            report = {}
+        if code != 0:
+            QMessageBox.critical(self, t("reset_confirm_title"), t("reset_failed"))
+            self.timer.start(1500)
+            return
+        QMessageBox.information(
+            self, t("reset_done_title"), t("reset_done_text", backup=report.get("backup") or "—")
+        )
+        # Start over with a fresh process so every widget, language and preset is pristine.
+        if hasattr(self, "tray"):
+            self.tray.hide()
+        os.execv(sys.executable, [sys.executable] + sys.argv)
 
     def init_tray(self):
         self.tray = QSystemTrayIcon(self)
@@ -1492,7 +1513,7 @@ class CinegainMainWindow(QMainWindow):
 
     def quit_app(self):
         self.pending_params.clear()
-        self.stream_mgr.release_all()
+        self.router.release_all()
         run_cinegain("stop")
         if hasattr(self, "tray"):
             self.tray.hide()
@@ -1505,8 +1526,7 @@ def main():
     app.setQuitOnLastWindowClosed(False)
     app.setStyleSheet(CI_STYLESHEET)
 
-    sm = StreamManager()
-    win = CinegainMainWindow(sm)
+    win = CinegainMainWindow(Router())
     win.show()
     sys.exit(app.exec())
 

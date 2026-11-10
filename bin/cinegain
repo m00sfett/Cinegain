@@ -1,204 +1,107 @@
 #!/usr/bin/env python3
 """
 cinegain - CLI tool for Cinegain Realtime Film Audio Processor.
-Control the PipeWire filter-chain node, live-adjust parameters, load presets, and route streams.
-Persists user parameters in ~/.config/cinegain/state.json across restarts and filter toggles.
-"""
-import sys
-import os
-import re
-import json
-import subprocess
-import argparse
-import time
-import signal
 
-__version__ = "0.1.1"
+Controls the PipeWire filter-chain, live-adjusts parameters, loads presets,
+routes applications (each with its own profile) and resets everything.
+User state lives in ~/.config/cinegain/ (state.json, user_presets.json,
+apps.json, config.json).
+"""
+import argparse
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+
+__version__ = "0.2.0"
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if os.path.exists(os.path.join(SCRIPT_DIR, "..", "share", "cinegain")):
     BASE_DIR = os.path.join(SCRIPT_DIR, "..", "share", "cinegain")
 elif os.path.exists("/usr/share/cinegain"):
     BASE_DIR = "/usr/share/cinegain"
-elif os.path.exists(os.path.expanduser("~/.local/share/cinegain")):
+elif os.path.exists(os.path.expanduser("~/.local/share/cinegain/ui")):
     BASE_DIR = os.path.expanduser("~/.local/share/cinegain")
 else:
     BASE_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
+# A source checkout next to this script always wins over installed copies.
+if os.path.exists(os.path.join(SCRIPT_DIR, "..", "ui", "cinegain_paths.py")):
+    BASE_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 
-PRESETS_PATH = os.path.join(BASE_DIR, "presets", "presets.json")
-CONF_PATH = os.path.join(BASE_DIR, "config", "cinegain-standalone.conf")
-PID_FILE = "/tmp/cinegain.pid"
-STATE_DIR = os.path.expanduser("~/.config/cinegain")
-STATE_FILE = os.path.join(STATE_DIR, "state.json")
+os.environ.setdefault("CINEGAIN_BASE_DIR", os.path.abspath(BASE_DIR))
+sys.path.insert(0, os.path.join(os.path.abspath(BASE_DIR), "ui"))
 
+import cinegain_paths as paths  # noqa: E402
+from cinegain_profiles import (  # noqa: E402
+    DEFAULT_PARAMS,
+    STANDARD_SINK,
+    ProfileCatalog,
+    SinkProcesses,
+    cinegain_pipewire_pids,
+    find_node_id,
+    normalize_params,
+    push_params,
+    sink_name,
+    wait_for_node,
+)
+from cinegain_pulse import PulseControl, clean_wireplumber_targets  # noqa: E402
+from cinegain_registry import PROFILE_OFF, PROFILE_STANDARD, AppRegistry  # noqa: E402
+from cinegain_reset import reset_everything  # noqa: E402
+from cinegain_router import Router  # noqa: E402
 
-def get_plugin_so_path():
-    candidates = [
-        os.path.join(BASE_DIR, "src", "cinegain.so"),
-        os.path.join(BASE_DIR, "lib", "cinegain.so"),
-        os.path.expanduser("~/.local/lib/ladspa/cinegain.so"),
-        "/usr/local/lib/ladspa/cinegain.so",
-        "/usr/lib/ladspa/cinegain.so",
-    ]
-    for c in candidates:
-        if os.path.exists(c):
-            return c
-    return "cinegain.so"
+LEGACY_PID_FILE = "/tmp/cinegain.pid"
+STANDARD_DESCRIPTION = "Cinegain (Filmton Dialog & Dynamik)"
 
-
-def prepare_runtime_conf():
-    plugin_so = get_plugin_so_path()
-    if not os.path.exists(CONF_PATH):
-        raise FileNotFoundError(f"Cinegain configuration template not found at {CONF_PATH}")
-    with open(CONF_PATH, "r", encoding="utf-8") as f:
-        content = f.read()
-    content = re.sub(r'plugin\s*=\s*"[^"]+"', f'plugin = "{plugin_so}"', content)
-    runtime_path = f"/tmp/cinegain-runtime-{os.getuid()}.conf"
-    with open(runtime_path, "w", encoding="utf-8") as f:
-        f.write(content)
-    return runtime_path
-
-
-BOOL_PARAMS = {"cinegain:bypass", "cinegain:leveler"}
-
-DEFAULT_PARAMS = {
-    "bypass": 0.0,
-    "input_db": 8.0,
-    "highpass_hz": 40.0,
-    "bass_db": -3.0,
-    "dialog_db": 6.5,
-    "dialog_hz": 2500.0,
-    "dialog_q": 1.0,
-    "treble_db": 1.5,
-    "mid_db": 2.0,
-    "side_db": -3.0,
-    "leveler": 1.0,
-    "lev_target_db": -16.0,
-    "lev_max_boost_db": 15.0,
-    "lev_max_cut_db": 6.0,
-    "lev_speed_s": 1.5,
-    "lev_gate_db": -55.0,
-    "comp_thresh_db": -12.0,
-    "comp_ratio": 3.5,
-    "comp_knee_db": 6.0,
-    "comp_attack_ms": 10.0,
-    "comp_release_ms": 180.0,
-    "makeup_db": 2.0,
-    "lim_ceiling_db": -0.5,
-    "lim_release_ms": 70.0,
+PRESET_ALIASES = {
+    "neutral": "clean_linear",
+    "0db": "clean_linear",
+    "+5db": "boost_5db",
+    "+10db": "boost_10db",
+    "+15db": "boost_15db",
+    "+20db": "boost_20db",
+    "+25db": "boost_25db",
+    "movie_boost": "dialog_boost",
 }
 
 
+# -- persisted standard-profile state ------------------------------------------
+
 def load_saved_state():
-    """Loads persisted parameters and active preset from ~/.config/cinegain/state.json."""
+    """Loads persisted parameters and active preset of the standard profile."""
     state = {"preset": "dialog_boost", "params": dict(DEFAULT_PARAMS)}
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data.get("params"), dict):
-                for k, v in data["params"].items():
-                    short_k = k.replace("cinegain:", "")
-                    state["params"][short_k] = float(v)
-            if "preset" in data:
-                state["preset"] = data["preset"]
-        except Exception:
-            pass
+    data = paths.read_json(paths.STATE_FILE, default={}) or {}
+    if isinstance(data.get("params"), dict):
+        state["params"].update(normalize_params(data["params"]))
+    if "preset" in data:
+        state["preset"] = data["preset"]
     return state
 
 
 def save_state(params=None, preset=None):
-    """Persists parameters and preset choice to ~/.config/cinegain/state.json."""
     state = load_saved_state()
     if params:
-        for k, v in params.items():
-            short_k = k.replace("cinegain:", "")
-            state["params"][short_k] = float(v)
+        state["params"].update(normalize_params(params))
     if preset is not None:
         state["preset"] = preset
     try:
-        os.makedirs(STATE_DIR, exist_ok=True)
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(state, f, indent=2)
-    except Exception:
-        pass
+        paths.write_json_atomic(paths.STATE_FILE, state)
+    except OSError as e:
+        print(f"Warning: could not save state: {e}", file=sys.stderr)
     return state
 
 
 def get_cinegain_node_id():
-    try:
-        out = subprocess.check_output(["pw-dump"], stderr=subprocess.DEVNULL)
-        data = json.loads(out)
-        for obj in data:
-            if obj.get("type") == "PipeWire:Interface:Node":
-                props = obj.get("info", {}).get("props", {})
-                if props.get("node.name") == "cinegain_sink":
-                    return obj["id"]
-    except Exception:
-        pass
-    return None
-
-
-def get_hardware_sink():
-    try:
-        default_sink = subprocess.check_output(
-            ["pactl", "get-default-sink"], stderr=subprocess.DEVNULL, text=True
-        ).strip()
-        if default_sink and "cinegain" not in default_sink.lower():
-            return default_sink
-    except Exception:
-        pass
-    try:
-        out = subprocess.check_output(
-            ["pactl", "list", "sinks", "short"], stderr=subprocess.DEVNULL, text=True
-        )
-        for line in out.splitlines():
-            parts = line.split("\t")
-            if len(parts) >= 2 and "cinegain" not in parts[1].lower():
-                return parts[1].strip()
-    except Exception:
-        pass
-    return "@DEFAULT_SINK@"
-
-
-def get_cinegain_sink_ids():
-    ids = {"cinegain_sink"}
-    try:
-        out = subprocess.check_output(
-            ["pactl", "list", "sinks", "short"], stderr=subprocess.DEVNULL, text=True
-        )
-        for line in out.splitlines():
-            parts = line.split("\t")
-            if len(parts) >= 2 and "cinegain" in parts[1].lower():
-                ids.add(parts[0].strip())
-                ids.add(parts[1].strip())
-    except Exception:
-        pass
-    return ids
+    return find_node_id(STANDARD_SINK)
 
 
 def set_params_batch(node_id, param_dict, preset=None):
-    """Persists parameters and applies them to cinegain_sink if running."""
+    """Persists parameters of the standard profile and applies them live if running."""
     save_state(params=param_dict, preset=preset)
     if not node_id:
         return True
-    flat = []
-    for k, v in param_dict.items():
-        key = k if k.startswith("cinegain:") else f"cinegain:{k}"
-        if key in BOOL_PARAMS:
-            val = float(1.0 if (v is True or float(v) > 0.5) else 0.0)
-        else:
-            val = float(v)
-        flat.extend([key, val])
-    if not flat:
-        return True
-    cmd = ["pw-cli", "s", str(node_id), "Props", json.dumps({"params": flat})]
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    return res.returncode == 0
-
-
-def set_param(node_id, param_name, value):
-    return set_params_batch(node_id, {param_name: value}, preset="custom")
+    return push_params(node_id, normalize_params(param_dict))
 
 
 def get_params(node_id):
@@ -207,79 +110,33 @@ def get_params(node_id):
         return load_saved_state()["params"]
     try:
         out = subprocess.check_output(["pw-dump", str(node_id)], stderr=subprocess.DEVNULL)
-        data = json.loads(out)
-        for obj in data:
-            props_list = obj.get("info", {}).get("params", {}).get("Props", [])
-            for p in props_list:
+        for obj in json.loads(out):
+            for p in obj.get("info", {}).get("params", {}).get("Props", []):
                 if isinstance(p, dict) and isinstance(p.get("params"), list):
-                    arr = p["params"]
-                    it = iter(arr)
-                    d = dict(zip(it, it))
-                    k_props = {}
-                    for k, v in d.items():
+                    it = iter(p["params"])
+                    found = {}
+                    for k, v in zip(it, it):
                         if isinstance(k, str) and k.startswith("cinegain:"):
-                            short_k = k.replace("cinegain:", "")
                             if isinstance(v, bool):
-                                k_props[short_k] = 1.0 if v else 0.0
-                            elif isinstance(v, (int, float)):
-                                k_props[short_k] = round(float(v), 3)
-                            else:
-                                k_props[short_k] = v
-                    if k_props:
-                        return k_props
-    except Exception:
+                                v = 1.0 if v else 0.0
+                            if isinstance(v, (int, float)):
+                                found[k[len("cinegain:"):]] = round(float(v), 3)
+                    if found:
+                        return found
+    except (subprocess.CalledProcessError, ValueError, OSError):
         pass
     return load_saved_state()["params"]
 
 
-def route_chrome():
-    try:
-        out = subprocess.check_output(
-            ["pactl", "list", "sink-inputs"], stderr=subprocess.DEVNULL, text=True
-        )
-        blocks = out.split("Sink Input #")
-        routed = 0
-        for b in blocks[1:]:
-            lines = b.splitlines()
-            if not lines:
-                continue
-            sid = lines[0].strip()
-            if any(
-                x in b
-                for x in ("Google Chrome", "Chromium", "Firefox", "Brave", "vlc", "mpv")
-            ):
-                subprocess.run(
-                    ["pactl", "move-sink-input", sid, "cinegain_sink"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                routed += 1
-        return routed
-    except Exception as e:
-        print(f"Routing error: {e}", file=sys.stderr)
-        return 0
+def make_router():
+    return Router()
 
 
-def evict_streams_from_cinegain():
-    hw_sink = get_hardware_sink()
-    cg_sinks = get_cinegain_sink_ids()
-    try:
-        out = subprocess.check_output(
-            ["pactl", "list", "sink-inputs", "short"], stderr=subprocess.DEVNULL, text=True
-        )
-        for line in out.splitlines():
-            parts = line.split("\t")
-            if len(parts) >= 2:
-                sid, sink_id = parts[0].strip(), parts[1].strip()
-                if sink_id in cg_sinks:
-                    subprocess.run(
-                        ["pactl", "move-sink-input", sid, hw_sink],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-    except Exception:
-        pass
+def standard_sinks():
+    return SinkProcesses(ProfileCatalog())
 
+
+# -- commands ----------------------------------------------------------------------
 
 def cmd_start(args):
     node_id = get_cinegain_node_id()
@@ -287,93 +144,51 @@ def cmd_start(args):
     if node_id:
         set_params_batch(node_id, saved["params"], preset=saved.get("preset"))
         print(f"Cinegain is already running (Node ID: {node_id}).")
-        if getattr(args, "route", False):
-            route_chrome()
-        return 0
-
-    print("Starting Cinegain PipeWire filter chain...")
-    try:
-        runtime_conf = prepare_runtime_conf()
-    except Exception:
-        runtime_conf = CONF_PATH
-
-    p = subprocess.Popen(
-        ["/usr/bin/pipewire", "-c", runtime_conf],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    with open(PID_FILE, "w") as f:
-        f.write(str(p.pid))
-
-    for _ in range(20):
-        time.sleep(0.15)
-        node_id = get_cinegain_node_id()
-        if node_id:
-            break
-
-    if node_id:
-        subprocess.run(
-            ["pactl", "set-sink-volume", "cinegain_sink", "100%"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        subprocess.run(
-            ["pactl", "set-sink-mute", "cinegain_sink", "0"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        # Immediately restore the user's saved slider/preset values instead of config defaults!
+    else:
+        print("Starting Cinegain PipeWire filter chain...")
+        standard_sinks().start(PROFILE_STANDARD, params=saved["params"],
+                               description=STANDARD_DESCRIPTION)
+        node_id = wait_for_node(STANDARD_SINK)
+        if not node_id:
+            print("Failed to start Cinegain.", file=sys.stderr)
+            return 1
+        PulseControl().set_sink_volume_100(STANDARD_SINK)
         set_params_batch(node_id, saved["params"], preset=saved.get("preset"))
         print(f"Cinegain started successfully (Node ID: {node_id}).")
-        if getattr(args, "route", False):
-            n = route_chrome()
-            print(f"Routed {n} media stream(s) to Cinegain.")
-        return 0
-    else:
-        print("Failed to start Cinegain.", file=sys.stderr)
-        return 1
+    if getattr(args, "route", False):
+        apps = make_router().tick(active=True)
+        n = sum(1 for a in apps if a.streams and a.profile != PROFILE_OFF)
+        print(f"Routing applied to {n} playing application(s).")
+    return 0
+
+
+def _kill_legacy_processes():
+    """Stops Cinegain filter chains started by older versions (or left behind)."""
+    try:
+        os.remove(LEGACY_PID_FILE)
+    except OSError:
+        pass
+    for pid in cinegain_pipewire_pids():
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
 
 
 def cmd_stop(args):
-    # Save current live parameters before stopping so nothing is lost
     node_id = get_cinegain_node_id()
     if node_id:
-        live_params = get_params(node_id)
-        if live_params:
-            save_state(params=live_params)
-
-    evict_streams_from_cinegain()
-
-    if os.path.exists(PID_FILE):
-        try:
-            with open(PID_FILE) as f:
-                pid = int(f.read().strip())
-            os.kill(pid, signal.SIGTERM)
-        except Exception:
-            pass
-        try:
-            os.remove(PID_FILE)
-        except Exception:
-            pass
-
-    try:
-        out = subprocess.check_output(["ps", "-eo", "pid,args"], text=True)
-        for line in out.splitlines():
-            if "pipewire -c" in line and ("cinegain" in line or "kinoton" in line):
-                pid = int(line.strip().split()[0])
-                try:
-                    os.kill(pid, signal.SIGTERM)
-                except Exception:
-                    pass
-    except Exception:
-        pass
-
-    for _ in range(10):
+        live = get_params(node_id)
+        if live:
+            save_state(params=live)
+    make_router().release_all()
+    standard_sinks().stop(PROFILE_STANDARD)
+    _kill_legacy_processes()
+    clean_wireplumber_targets(paths.WIREPLUMBER_STREAM_PROPS)
+    for _ in range(15):
         if get_cinegain_node_id() is None:
             break
         time.sleep(0.1)
-
     print("Cinegain stopped.")
     return 0
 
@@ -381,56 +196,44 @@ def cmd_stop(args):
 def cmd_status(args):
     node_id = get_cinegain_node_id()
     saved = load_saved_state()
-    if not node_id:
-        if getattr(args, "json", False):
-            print(
-                json.dumps(
-                    {
-                        "active": False,
-                        "node_id": None,
-                        "preset": saved.get("preset"),
-                        "params": saved["params"],
-                    }
-                )
-            )
-        else:
-            print("Cinegain status: INACTIVE")
-            print("\nSaved Parameters (will be applied on start):")
-            for k, v in sorted(saved["params"].items()):
-                print(f"  {k:18} = {v}")
-        return 1
-
-    params = get_params(node_id)
+    params = get_params(node_id) if node_id else saved["params"]
+    running_profiles = sorted(standard_sinks().running() - {PROFILE_STANDARD})
     if getattr(args, "json", False):
-        print(
-            json.dumps(
-                {
-                    "active": True,
-                    "node_id": node_id,
-                    "preset": saved.get("preset"),
-                    "params": params,
-                }
-            )
-        )
-        return 0
-
-    print(f"Cinegain status: ACTIVE (Node ID: {node_id})")
-    if params:
+        print(json.dumps({
+            "active": bool(node_id),
+            "node_id": node_id,
+            "preset": saved.get("preset"),
+            "params": params,
+            "profile_sinks": running_profiles,
+            "version": __version__,
+        }))
+        return 0 if node_id else 1
+    if node_id:
+        print(f"Cinegain status: ACTIVE (Node ID: {node_id})")
         print("\nCurrent Parameters:")
-        for k, v in sorted(params.items()):
-            print(f"  {k:18} = {v}")
-    return 0
+    else:
+        print("Cinegain status: INACTIVE")
+        print("\nSaved Parameters (will be applied on start):")
+    for k, v in sorted(params.items()):
+        print(f"  {k:18} = {v}")
+    if running_profiles:
+        print("\nProfile sinks running: " + ", ".join(running_profiles))
+    return 0 if node_id else 1
+
+
+def _set_and_report(updates, preset):
+    node_id = get_cinegain_node_id()
+    return set_params_batch(node_id, updates, preset=preset)
 
 
 def cmd_set(args):
-    node_id = get_cinegain_node_id()
     short_p = args.param.replace("cinegain:", "")
     updates = {short_p: args.value}
     if short_p != "bypass":
         updates["bypass"] = 0.0
     if short_p == "lev_max_boost_db":
         updates["leveler"] = 1.0 if float(args.value) > 0.05 else 0.0
-    ok = set_params_batch(node_id, updates, preset="custom")
+    ok = _set_and_report(updates, "custom")
     if ok:
         print(f"Set {args.param} = {args.value}")
     else:
@@ -439,122 +242,236 @@ def cmd_set(args):
 
 
 def cmd_batch(args):
-    node_id = get_cinegain_node_id()
     try:
         raw = json.loads(args.json_params)
-    except Exception as e:
+        updates = normalize_params(raw)
+    except (ValueError, AttributeError) as e:
         print(f"Invalid JSON for batch: {e}", file=sys.stderr)
         return 1
-    updates = {}
-    for k, v in raw.items():
-        short_k = k.replace("cinegain:", "")
-        updates[short_k] = float(v)
-    if "bypass" not in updates:
-        updates["bypass"] = 0.0
+    updates.setdefault("bypass", 0.0)
     if "lev_max_boost_db" in updates and "leveler" not in updates:
         updates["leveler"] = 1.0 if updates["lev_max_boost_db"] > 0.05 else 0.0
-    preset_id = getattr(args, "preset_id", None) or "custom"
-    ok = set_params_batch(node_id, updates, preset=preset_id)
-    return 0 if ok else 1
+    return 0 if _set_and_report(updates, args.preset_id or "custom") else 1
 
 
 def cmd_preset(args):
-    with open(PRESETS_PATH) as f:
-        presets = json.load(f)
-
-    aliases = {
-        "neutral": "clean_linear",
-        "0db": "clean_linear",
-        "+5db": "boost_5db",
-        "+10db": "boost_10db",
-        "+15db": "boost_15db",
-        "+20db": "boost_20db",
-        "+25db": "boost_25db",
-        "movie_boost": "dialog_boost",
-    }
-    preset_key = aliases.get(args.name.lower(), args.name)
-
-    if preset_key not in presets:
-        print(
-            f"Unknown preset '{args.name}'. Available: {', '.join(presets.keys())}",
-            file=sys.stderr,
-        )
+    presets = ProfileCatalog().factory()
+    key = PRESET_ALIASES.get(args.name.lower(), args.name)
+    if key not in presets:
+        print(f"Unknown preset '{args.name}'. Available: {', '.join(presets)}", file=sys.stderr)
         return 1
-
-    p = presets[preset_key]
-    node_id = get_cinegain_node_id()
-    print(f"Applying preset: {p.get('name', preset_key)}...")
-    ok = set_params_batch(node_id, p.get("params", {}), preset=preset_key)
-    if ok:
+    print(f"Applying preset: {presets[key]['name']}...")
+    if _set_and_report(presets[key]["params"], key):
         print("Preset applied successfully.")
         return 0
-    else:
-        print("Failed to apply preset.", file=sys.stderr)
-        return 1
+    print("Failed to apply preset.", file=sys.stderr)
+    return 1
 
 
 def cmd_route(args):
-    node_id = get_cinegain_node_id()
-    if not node_id:
+    if not get_cinegain_node_id():
         print("Cinegain is not active. Start it first with 'cinegain start'.", file=sys.stderr)
         return 1
-    n = route_chrome()
-    print(f"Routed {n} media audio stream(s) to Cinegain.")
+    apps = make_router().tick(active=True)
+    for a in apps:
+        if a.streams:
+            print(f"  {a.label:28} {a.profile:14} -> {a.sink}")
     return 0
 
 
-def main():
+def cmd_watch(args):
+    """Keeps routing applied without the GUI (Ctrl+C to stop)."""
+    router = make_router()
+    print("Watching audio streams (Ctrl+C to stop)...")
+    try:
+        while True:
+            router.tick(active=bool(get_cinegain_node_id()))
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        router.registry.flush(force=True)
+        print()
+    return 0
+
+
+def _resolve_app(registry, needle):
+    needle_l = needle.lower()
+    exact = [e for e in registry.entries() if needle_l in (e["key"], e["label"].lower(), e["name"].lower(), e["binary"].lower())]
+    if len(exact) == 1:
+        return exact[0]
+    partial = [e for e in registry.entries() if needle_l in e["label"].lower() or needle_l in e["key"]]
+    if len(partial) == 1:
+        return partial[0]
+    candidates = exact or partial
+    if candidates:
+        print("Ambiguous application, candidates: " + ", ".join(e["key"] for e in candidates), file=sys.stderr)
+    else:
+        print(f"Unknown application '{needle}'. See 'cinegain apps'.", file=sys.stderr)
+    return None
+
+
+def cmd_apps(args):
+    registry = AppRegistry()
+    catalog = ProfileCatalog()
+    action = args.action or "list"
+    if action == "list":
+        entries = sorted(registry.entries(), key=lambda e: -e["last_seen"])
+        if args.json:
+            print(json.dumps(entries, ensure_ascii=False))
+            return 0
+        if not entries:
+            print("No applications known yet. They appear as soon as they play audio.")
+            return 0
+        for e in entries:
+            seen = time.strftime("%Y-%m-%d %H:%M", time.localtime(e["last_seen"]))
+            print(f"  {e['label']:28} {e['profile']:14} last heard {seen}   [{e['key']}]")
+        return 0
+    if not args.app:
+        print(f"'cinegain apps {action}' needs an application name.", file=sys.stderr)
+        return 2
+    entry = _resolve_app(registry, args.app)
+    if entry is None:
+        return 1
+    if action == "set":
+        profile = PRESET_ALIASES.get((args.profile or "").lower(), args.profile)
+        if not profile or not catalog.exists(profile):
+            names = ", ".join(pid for pid, _ in catalog.choices())
+            print(f"Unknown profile '{args.profile}'. Available: {names}", file=sys.stderr)
+            return 1
+        registry.set_profile(entry["key"], profile)
+        print(f"{entry['label']}: {profile}")
+        if get_cinegain_node_id():
+            make_router().tick(active=True)
+        return 0
+    if action == "rename":
+        registry.rename(entry["key"], args.profile or "")
+        print(f"Renamed to: {registry.get(entry['key'])['label']}")
+        return 0
+    if action == "forget":
+        registry.forget(entry["key"])
+        print(f"Forgot {entry['label']}.")
+        return 0
+    return 2
+
+
+def cmd_profiles(args):
+    catalog = ProfileCatalog()
+    running = standard_sinks().running()
+    for pid, name in catalog.choices():
+        mark = ""
+        if pid == PROFILE_STANDARD and get_cinegain_node_id():
+            mark = "  (running)"
+        elif pid in running:
+            mark = f"  (running: {sink_name(pid)})"
+        print(f"  {pid:14} {name}{mark}")
+    return 0
+
+
+def cmd_profile_sync(args):
+    """Pushes the current parameters of a profile to its running sink."""
+    catalog = ProfileCatalog()
+    params = catalog.params(args.profile)
+    if params is None:
+        # The profile vanished (slot cleared): drop its apps back to standard.
+        AppRegistry().replace_profile(args.profile, PROFILE_STANDARD)
+        standard_sinks().stop(args.profile)
+        return 0
+    node_id = find_node_id(sink_name(args.profile))
+    if node_id:
+        push_params(node_id, params)
+    return 0
+
+
+def cmd_reset(args):
+    if not args.yes:
+        if not sys.stdin.isatty():
+            print("Refusing to reset without --yes in a non-interactive shell.", file=sys.stderr)
+            return 2
+        answer = input("Reset ALL Cinegain settings, presets and application rules? [y/N] ")
+        if answer.strip().lower() not in ("y", "yes", "j", "ja"):
+            print("Aborted.")
+            return 1
+    was_running = bool(get_cinegain_node_id())
+    report = reset_everything(sinks=standard_sinks(), backup=not args.no_backup)
+    if was_running:
+        cmd_stop(argparse.Namespace())
+        # cmd_stop saved the live parameters again; drop them before restarting.
+        try:
+            os.remove(paths.STATE_FILE)
+        except FileNotFoundError:
+            pass
+        cmd_start(argparse.Namespace(route=False))
+    if args.json:
+        print(json.dumps(report))
+        return 0
+    print("Cinegain has been reset to factory settings.")
+    if report["backup"]:
+        print(f"Backup of the previous state: {report['backup']}")
+    print(f"Streams moved back to hardware: {report['streams_moved']}, "
+          f"volumes restored: {report['volumes_restored']}")
+    return 0
+
+
+def main(argv=None):
     parser = argparse.ArgumentParser(description="Cinegain Film Audio Control CLI")
-    parser.add_argument(
-        "--version",
-        "-v",
-        action="version",
-        version=f"Cinegain {__version__}",
-    )
+    parser.add_argument("--version", "-v", action="version", version=f"Cinegain {__version__}")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p_start = sub.add_parser("start", help="Start Cinegain audio filter chain")
-    p_start.add_argument("--route", "-r", action="store_true", help="Auto-route media streams")
+    p_start = sub.add_parser("start", help="Start the Cinegain filter chain")
+    p_start.add_argument("--route", "-r", action="store_true", help="Apply application routing")
 
-    sub.add_parser("stop", help="Stop Cinegain audio filter chain")
+    sub.add_parser("stop", help="Stop Cinegain and release all streams")
 
-    p_status = sub.add_parser("status", help="Show Cinegain status and parameter values")
-    p_status.add_argument("--json", action="store_true", help="Output status and params as JSON")
+    p_status = sub.add_parser("status", help="Show status and parameter values")
+    p_status.add_argument("--json", action="store_true", help="Output as JSON")
 
-    sub.add_parser("route", help="Route running media streams to Cinegain")
+    sub.add_parser("route", help="Apply application routing once")
 
-    p_set = sub.add_parser("set", help="Live-adjust a parameter (also works while filter is off)")
-    p_set.add_argument("param", help="Parameter name (e.g. input_db, dialog_db, lev_max_boost_db)")
+    p_watch = sub.add_parser("watch", help="Keep applying application routing (no GUI needed)")
+    p_watch.add_argument("--interval", type=float, default=1.5, help="Seconds between scans")
+
+    p_set = sub.add_parser("set", help="Live-adjust a parameter of the standard profile")
+    p_set.add_argument("param", help="Parameter name (e.g. input_db, dialog_db)")
     p_set.add_argument("value", type=float, help="Value to set")
 
-    p_batch = sub.add_parser("batch", help="Batch-set multiple parameters as JSON dict")
-    p_batch.add_argument("json_params", help="JSON dictionary of parameter names to float values")
+    p_batch = sub.add_parser("batch", help="Batch-set parameters as JSON dict")
+    p_batch.add_argument("json_params", help="JSON dictionary of parameter names to values")
     p_batch.add_argument("--preset-id", dest="preset_id", default="custom", help="Preset identifier")
 
-    p_preset = sub.add_parser(
-        "preset", help="Load an EQ/dynamics preset (does not change on/off state)"
-    )
-    p_preset.add_argument(
-        "name",
-        help="Preset name (clean_linear, boost_5db..boost_25db, dialog_boost, night_mode, max_loudness)",
-    )
+    p_preset = sub.add_parser("preset", help="Load a factory preset into the standard profile")
+    p_preset.add_argument("name", help="Preset name (clean_linear, boost_5db..boost_25db, dialog_boost, ...)")
 
-    args = parser.parse_args()
+    p_apps = sub.add_parser("apps", help="List known applications or change their profile")
+    p_apps.add_argument("action", nargs="?", choices=["list", "set", "rename", "forget"])
+    p_apps.add_argument("app", nargs="?", help="Application (label, name, binary or key)")
+    p_apps.add_argument("profile", nargs="?", help="Profile id for 'set', new label for 'rename'")
+    p_apps.add_argument("--json", action="store_true", help="Output list as JSON")
 
-    if args.cmd == "start":
-        return cmd_start(args)
-    elif args.cmd == "stop":
-        return cmd_stop(args)
-    elif args.cmd == "status":
-        return cmd_status(args)
-    elif args.cmd == "set":
-        return cmd_set(args)
-    elif args.cmd == "batch":
-        return cmd_batch(args)
-    elif args.cmd == "preset":
-        return cmd_preset(args)
-    elif args.cmd == "route":
-        return cmd_route(args)
+    sub.add_parser("profiles", help="List usable profiles")
+
+    p_sync = sub.add_parser("profile-sync", help="Push a profile's parameters to its running sink")
+    p_sync.add_argument("profile")
+
+    p_reset = sub.add_parser("reset", help="Reset everything to factory settings (with backup)")
+    p_reset.add_argument("--yes", "-y", action="store_true", help="Do not ask for confirmation")
+    p_reset.add_argument("--no-backup", action="store_true", help="Skip the backup copy")
+    p_reset.add_argument("--json", action="store_true", help="Output report as JSON")
+
+    args = parser.parse_args(argv)
+    handlers = {
+        "start": cmd_start,
+        "stop": cmd_stop,
+        "status": cmd_status,
+        "route": cmd_route,
+        "watch": cmd_watch,
+        "set": cmd_set,
+        "batch": cmd_batch,
+        "preset": cmd_preset,
+        "apps": cmd_apps,
+        "profiles": cmd_profiles,
+        "profile-sync": cmd_profile_sync,
+        "reset": cmd_reset,
+    }
+    return handlers[args.cmd](args)
 
 
 if __name__ == "__main__":

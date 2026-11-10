@@ -15,6 +15,30 @@ Categories follow the standard Keep a Changelog taxonomy: `Added`, `Changed`, `D
 
 ---
 
+## [0.2.0] - 2026-11-10
+
+### Added
+- **Profiles per program:** Every program gets its own profile: *Off* (direct to the speakers), *Standard* (the main sliders) or any factory preset or filled user slot. Programs on a preset or user slot run through their own filter sink (`cinegain_<profile>`), started on demand and stopped after 45 s without use. Two programs can therefore play at the same time with different processing. Profile sinks never become the default output.
+- **Permanent program list:** Programs no longer vanish after five minutes of silence. Every program that ever played audio is kept in `~/.config/cinegain/apps.json` with its profile, across pauses, restarts and reboots. Right-click a program to rename it, restore its volume or forget it.
+- **Reset everything:** A button in the window footer and `cinegain reset` return sliders, user presets, program list and language to factory settings. Streams are moved off Cinegain, the volume of known programs is set back to 100 % and sticky Cinegain targets are removed from WirePlumber. The previous state is first backed up to `~/.local/share/cinegain/backups/<timestamp>/`.
+- **Low-volume badge:** A program whose own stream volume is turned down (or muted) shows a badge; one click sets it back to 100 %.
+- **CLI:** New commands `apps` (list, set, rename, forget), `profiles`, `profile-sync`, `watch` (routing without the GUI) and `reset`. `status --json` also reports running profile sinks and the version.
+- **Tests:** `tests/test_routing.py` covers the registry, profile routing, idle shutdown, config generation, pactl parsing and the reset (25 tests, no PipeWire needed).
+
+### Changed
+- **Programs are identified by name and binary:** Electron apps that report `application.name = "Chromium"`, such as the ChatGPT desktop client, get their own entry and label instead of being merged with the browser. They are no longer routed through Cinegain by default just because they claim to be Chromium.
+- **Routing only moves what is on the wrong sink:** Previously every stream was moved on every heartbeat. A program set to *Off* is only pulled off Cinegain; a manual choice of another hardware output (e.g. HDMI in pavucontrol) is left alone.
+- **Shared core:** CLI and GUI now use the same modules (`ui/cinegain_*.py`); the in-memory `stream_manager.py` was removed. Runtime files moved from `/tmp` to `$XDG_RUNTIME_DIR/cinegain/`; the old `/tmp/cinegain.pid` is still cleaned up on stop. Settings are written atomically.
+- **Program rows update in place:** The list is no longer rebuilt every 1.5 s, so an open profile drop-down stays open.
+- **Window:** Slightly taller so the program list shows more rows. The footer version comes from the app version instead of a hard-coded string.
+- **systemd user service:** `config/cinegain.service` pointed at a stale path. It now runs `cinegain start` and `cinegain watch`.
+
+### Fixed
+- **`&` in titles and preset names:** Qt turned it into a keyboard mnemonic, so "Film & Serie" showed as "Film _Serie". It is displayed correctly now.
+- **`cinegain stop` could kill unrelated processes:** It stopped every process whose command line contained "pipewire -c" and "cinegain", including shells that merely mentioned those words. Only PipeWire processes started with a Cinegain config are stopped now.
+
+---
+
 ## [0.1.1] - 2026-11-10
 
 ### Fixed
