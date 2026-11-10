@@ -15,6 +15,13 @@ Categories follow the standard Keep a Changelog taxonomy: `Added`, `Changed`, `D
 
 ---
 
+## [0.3.2] - 2026-11-10
+
+### Fixed
+- **Crash on the roteson.de logo:** clicking the logo in the title banner aborted the whole app, because the click handler returned a value to Qt. The link now opens through a proper handler and falls back to `xdg-open` if the desktop cannot open it directly. A failure to open the browser can no longer take the app down.
+
+---
+
 ## [0.3.1] - 2026-11-10
 
 ### Changed
