@@ -406,6 +406,11 @@ QMenu::separator {
 """
 
 
+def amp(text):
+    """Escapes '&' so Qt shows it instead of turning it into a keyboard mnemonic."""
+    return text.replace("&", "&&")
+
+
 def run_cinegain(*args):
     cmd = [BIN_PATH] + list(args)
     res = subprocess.run(cmd, capture_output=True, text=True)
@@ -652,20 +657,20 @@ class CinegainMainWindow(QMainWindow):
         self.lbl_status.setText(t("status_active") if self.is_active else t("status_inactive"))
 
         if hasattr(self, "grp_presets"):
-            self.grp_presets.setTitle(t("presets_group"))
+            self.grp_presets.setTitle(amp(t("presets_group")))
         if hasattr(self, "grp_main"):
-            self.grp_main.setTitle(t("main_group"))
+            self.grp_main.setTitle(amp(t("main_group")))
         if hasattr(self, "grp_adv"):
-            self.grp_adv.setTitle(t("adv_group"))
+            self.grp_adv.setTitle(amp(t("adv_group")))
         if hasattr(self, "grp_apps"):
-            self.grp_apps.setTitle(t("apps_group"))
+            self.grp_apps.setTitle(amp(t("apps_group")))
             self.apps_panel.retranslate()
         if hasattr(self, "btn_reset"):
             self.btn_reset.setText(t("btn_reset"))
             self.btn_reset.setToolTip(t("btn_reset_tip"))
 
         for pid, b in self.preset_buttons.items():
-            b.setText(t(f"preset_{pid}"))
+            b.setText(amp(t(f"preset_{pid}")))
 
         for param_name, meta in self.slider_ui_elements.items():
             lbl = meta["label"]
@@ -751,7 +756,7 @@ class CinegainMainWindow(QMainWindow):
         layout.addWidget(banner)
 
         # 2. Presets Section (Row 1: Pure Boost + Cinema Profiles | Row 2: 8 Auto-Saving User Presets)
-        self.grp_presets = QGroupBox(t("presets_group"))
+        self.grp_presets = QGroupBox(amp(t("presets_group")))
         presets_vbox = QVBoxLayout(self.grp_presets)
         presets_vbox.setSpacing(8)
         presets_vbox.setContentsMargins(10, 12, 10, 8)
@@ -780,7 +785,7 @@ class CinegainMainWindow(QMainWindow):
                 sep.setStyleSheet("background-color: #7F1718; max-width: 2px; margin: 2px 4px;")
                 row1.addWidget(sep)
                 continue
-            b = QPushButton(text)
+            b = QPushButton(amp(text))
             b.setToolTip(tip)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -816,7 +821,7 @@ class CinegainMainWindow(QMainWindow):
         cols_layout.setSpacing(14)
 
         # Left Column: Main Volume & Speech Focus (No numbering!)
-        self.grp_main = QGroupBox(t("main_group"))
+        self.grp_main = QGroupBox(amp(t("main_group")))
         gm_layout = QVBoxLayout(self.grp_main)
         gm_layout.setSpacing(8)
         gm_layout.setContentsMargins(10, 14, 10, 10)
@@ -880,7 +885,7 @@ class CinegainMainWindow(QMainWindow):
         gm_layout.addStretch()
 
         # Right Column: Fine-Tuning (EQ, Compressor & Limiter)
-        self.grp_adv = QGroupBox(t("adv_group"))
+        self.grp_adv = QGroupBox(amp(t("adv_group")))
         adv_layout = QVBoxLayout(self.grp_adv)
         adv_layout.setSpacing(6)
         adv_layout.setContentsMargins(10, 14, 10, 10)
@@ -962,7 +967,7 @@ class CinegainMainWindow(QMainWindow):
         layout.addLayout(cols_layout, 1)
 
         # 4. Applications Section in a fixed-height ScrollArea
-        self.grp_apps = QGroupBox(t("apps_group"))
+        self.grp_apps = QGroupBox(amp(t("apps_group")))
         self.grp_apps.setFixedHeight(196)
         grp_apps_outer = QVBoxLayout(self.grp_apps)
         grp_apps_outer.setContentsMargins(8, 6, 8, 6)
@@ -1174,11 +1179,11 @@ class CinegainMainWindow(QMainWindow):
             if params:
                 in_db = params.get("input_db", 0.0)
                 sign = "+" if in_db > 0 else ""
-                btn.setText(t("user_slot_saved", name=name, sign=sign, db=in_db))
+                btn.setText(amp(t("user_slot_saved", name=name, sign=sign, db=in_db)))
                 btn.setToolTip(t("user_slot_saved_tip", name=name, sign=sign, db=in_db))
                 btn.setProperty("userSaved", "true")
             else:
-                btn.setText(t("user_slot_free", name=name))
+                btn.setText(amp(t("user_slot_free", name=name)))
                 btn.setToolTip(t("user_slot_free_tip", name=name))
                 btn.setProperty("userSaved", "false")
             btn.style().unpolish(btn)
