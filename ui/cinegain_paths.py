@@ -29,13 +29,14 @@ STATE_FILE = os.path.join(CONFIG_DIR, "state.json")
 USER_PRESETS_FILE = os.path.join(CONFIG_DIR, "user_presets.json")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 APPS_FILE = os.path.join(CONFIG_DIR, "apps.json")
+APPS_V1_BACKUP = os.path.join(CONFIG_DIR, "apps.v1.json")
 BACKUP_DIR = os.path.join(DATA_DIR, "backups")
 
 PRESETS_PATH = os.path.join(BASE_DIR, "presets", "presets.json")
 CONF_TEMPLATE_PATH = os.path.join(BASE_DIR, "config", "cinegain-standalone.conf")
 
 # Files that make up the complete user state (used by reset and backup).
-USER_STATE_FILES = (STATE_FILE, USER_PRESETS_FILE, CONFIG_FILE, APPS_FILE)
+USER_STATE_FILES = (STATE_FILE, USER_PRESETS_FILE, CONFIG_FILE, APPS_FILE, APPS_V1_BACKUP)
 
 
 def read_json(path, default=None):

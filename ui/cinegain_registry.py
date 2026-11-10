@@ -1,24 +1,34 @@
 """
-Persistent registry of every application that has ever played audio.
+Persistent registry of every program that has ever played audio.
 
-Each application keeps its routing choice ("profile") across pauses, GUI
-restarts and reboots. Applications are identified by application name *and*
-process binary: Electron apps such as the ChatGPT desktop client report
-`application.name = "Chromium"` and would otherwise collapse into one entry.
+Each program has
+- an on/off switch ("enabled"): routed through Cinegain or straight to the speakers,
+- either its own parameter set ("params") or None, which means it follows the
+  shared "Standard" settings (the main sliders, state.json).
 
-File format (~/.config/cinegain/apps.json):
-    {"version": 1, "apps": {"<key>": {"name", "binary", "label", "profile",
-                                      "first_seen", "last_seen"}}}
+Programs are identified by application name *and* process binary: Electron apps
+such as the ChatGPT desktop client report `application.name = "Chromium"` and
+would otherwise collapse into one entry.
+
+File format (~/.config/cinegain/apps.json), version 2:
+    {"version": 2, "apps": {"<key>": {"name", "binary", "label", "enabled",
+                                      "params", "first_seen", "last_seen"}}}
+
+Version 1 files (0.2.0, a profile reference per program) are migrated on load:
+the programs are kept, their old profile choice is dropped (user decision for
+0.3.0), and the v1 file is backed up next to it as apps.v1.json.
 """
+import hashlib
 import os
+import re
+import shutil
 import time
 
 import cinegain_paths as paths
 
-PROFILE_OFF = "off"
-PROFILE_STANDARD = "standard"
+SCHEMA_VERSION = 2
 
-# Applications that are routed through Cinegain the first time they show up.
+# Programs that are routed through Cinegain the first time they show up.
 DEFAULT_MEDIA_APPS = (
     "google chrome", "chrome", "chromium", "firefox", "librewolf", "brave", "vivaldi",
     "opera", "vlc", "mpv", "celluloid", "totem", "kodi", "spotify", "jellyfin", "plex",
@@ -39,6 +49,13 @@ def make_key(app_name, binary):
     return f"{binary}::{name}"
 
 
+def profile_id_for(key):
+    """Stable, filesystem- and node-name-safe id for a program's own filter sink."""
+    slug = re.sub(r"[^a-z0-9]+", "_", key.lower()).strip("_")[:24] or "app"
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:6]
+    return f"app_{slug}_{digest}"
+
+
 def default_label(app_name, binary):
     name = (app_name or "").strip()
     binary = os.path.basename((binary or "").strip())
@@ -57,6 +74,18 @@ def is_media_app(app_name, binary):
     return any(m in hay for m in DEFAULT_MEDIA_APPS)
 
 
+def _clean_params(raw):
+    if not isinstance(raw, dict) or not raw:
+        return None
+    out = {}
+    for k, v in raw.items():
+        try:
+            out[str(k).replace("cinegain:", "")] = float(v)
+        except (TypeError, ValueError):
+            continue
+    return out or None
+
+
 class AppRegistry:
     def __init__(self, path=None, clock=time.time):
         self.path = path or paths.APPS_FILE
@@ -65,27 +94,48 @@ class AppRegistry:
         self._mtime = None
         self._dirty = False
         self._last_flush = 0.0
+        self.migrated_from = None
         self.load()
 
     # -- persistence -------------------------------------------------------
     def load(self):
         data = paths.read_json(self.path, default={}) or {}
         apps = data.get("apps") if isinstance(data, dict) else None
+        version = data.get("version", 1) if isinstance(data, dict) else 1
         self.apps = {}
         if isinstance(apps, dict):
             for key, entry in apps.items():
                 if not isinstance(entry, dict):
                     continue
+                name = str(entry.get("name", ""))
+                binary = str(entry.get("binary", ""))
+                if version >= 2:
+                    enabled = bool(entry.get("enabled", False))
+                    params = _clean_params(entry.get("params"))
+                else:
+                    # 0.2.0 profile choices are dropped; programs start fresh.
+                    enabled = is_media_app(name, binary)
+                    params = None
                 self.apps[key] = {
-                    "name": str(entry.get("name", "")),
-                    "binary": str(entry.get("binary", "")),
-                    "label": str(entry.get("label") or default_label(entry.get("name"), entry.get("binary"))),
-                    "profile": str(entry.get("profile") or PROFILE_OFF),
+                    "name": name,
+                    "binary": binary,
+                    "label": str(entry.get("label") or default_label(name, binary)),
+                    "enabled": enabled,
+                    "params": params,
                     "first_seen": float(entry.get("first_seen") or 0.0),
                     "last_seen": float(entry.get("last_seen") or 0.0),
                 }
         self._mtime = self._file_mtime()
         self._dirty = False
+        if apps and version < SCHEMA_VERSION:
+            self._migrate_from_v1()
+
+    def _migrate_from_v1(self):
+        backup = os.path.join(os.path.dirname(self.path), os.path.basename(paths.APPS_V1_BACKUP))
+        if not os.path.exists(backup):
+            shutil.copy2(self.path, backup)
+        self.migrated_from = backup
+        self.save()
 
     def _file_mtime(self):
         try:
@@ -106,7 +156,7 @@ class AppRegistry:
         return False
 
     def save(self):
-        paths.write_json_atomic(self.path, {"version": 1, "apps": self.apps})
+        paths.write_json_atomic(self.path, {"version": SCHEMA_VERSION, "apps": self.apps})
         self._mtime = self._file_mtime()
         self._dirty = False
         self._last_flush = self.clock()
@@ -123,12 +173,9 @@ class AppRegistry:
     def entries(self):
         return [dict(v, key=k) for k, v in self.apps.items()]
 
-    def profiles_in_use(self):
-        return {e["profile"] for e in self.apps.values()}
-
     # -- mutations -----------------------------------------------------------
     def observe(self, app_name, binary):
-        """Registers a playing application; returns its key. New apps are saved at once."""
+        """Registers a playing program; returns its key. New programs are saved at once."""
         key = make_key(app_name, binary)
         now = self.clock()
         entry = self.apps.get(key)
@@ -137,7 +184,8 @@ class AppRegistry:
                 "name": app_name or "",
                 "binary": os.path.basename(binary or ""),
                 "label": default_label(app_name, binary),
-                "profile": PROFILE_STANDARD if is_media_app(app_name, binary) else PROFILE_OFF,
+                "enabled": is_media_app(app_name, binary),
+                "params": None,
                 "first_seen": now,
                 "last_seen": now,
             }
@@ -147,10 +195,20 @@ class AppRegistry:
             self._dirty = True
         return key
 
-    def set_profile(self, key, profile):
-        if key in self.apps and self.apps[key]["profile"] != profile:
-            self.apps[key]["profile"] = profile
+    def set_enabled(self, key, enabled):
+        if key in self.apps and self.apps[key]["enabled"] != bool(enabled):
+            self.apps[key]["enabled"] = bool(enabled)
             self.save()
+
+    def set_params(self, key, params, save=True):
+        """Gives a program its own parameters (None: follow Standard again)."""
+        if key not in self.apps:
+            return
+        self.apps[key]["params"] = _clean_params(params)
+        if save:
+            self.save()
+        else:
+            self._dirty = True
 
     def rename(self, key, label):
         label = (label or "").strip()
@@ -162,14 +220,3 @@ class AppRegistry:
     def forget(self, key):
         if self.apps.pop(key, None) is not None:
             self.save()
-
-    def replace_profile(self, old, new):
-        """Moves every app using profile `old` to `new` (e.g. after a preset slot was cleared)."""
-        changed = False
-        for entry in self.apps.values():
-            if entry["profile"] == old:
-                entry["profile"] = new
-                changed = True
-        if changed:
-            self.save()
-        return changed

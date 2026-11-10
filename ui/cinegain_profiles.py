@@ -1,15 +1,15 @@
 """
-Profiles and their PipeWire sinks.
+Parameter sets, templates and their PipeWire sinks.
 
-A profile is a full parameter set. "standard" is the live profile controlled by
-the main sliders (sink `cinegain_sink`, parameters in state.json). Every factory
-preset and every filled user slot can also be used as a profile; an application
-assigned to such a profile is routed to its own sink `cinegain_<profile>`, which
-runs as a separate small PipeWire filter-chain process. That way two programs
-can play at the same time with different processing.
+"standard" is the shared parameter set (sink `cinegain_sink`, values in
+state.json) that every program without its own setting follows. A program with
+its own setting runs through its own sink `cinegain_app_<...>`, a separate small
+PipeWire filter-chain process, so two programs can play at the same time with
+different processing. Such sinks are started on demand and stopped again when
+nothing has used them for a while (see Router).
 
-Profile sinks are started on demand and stopped again when nothing has used them
-for a while (see Router).
+Factory presets (presets.json) and the 8 user slots (user_presets.json) are
+templates: loading one copies its values into the selected target.
 """
 import json
 import os
@@ -19,7 +19,8 @@ import subprocess
 import time
 
 import cinegain_paths as paths
-from cinegain_registry import PROFILE_OFF, PROFILE_STANDARD
+
+PROFILE_STANDARD = "standard"
 
 STANDARD_SINK = "cinegain_sink"
 STANDARD_OUTPUT = "cinegain_output"
@@ -112,15 +113,13 @@ class ProfileCatalog:
         params.update(normalize_params(state.get("params")))
         return params
 
-    def exists(self, profile_id):
-        if profile_id in (PROFILE_OFF, PROFILE_STANDARD):
-            return True
-        if profile_id in USER_SLOTS:
-            return self.user_slots()[profile_id]["params"] is not None
-        return profile_id in self.factory()
+    def is_template(self, template_id):
+        if template_id in USER_SLOTS:
+            return self.user_slots()[template_id]["params"] is not None
+        return template_id in self.factory()
 
     def params(self, profile_id):
-        """Complete parameter set for a profile (defaults filled in), or None."""
+        """Complete parameter set for "standard" or a template (defaults filled in), or None."""
         if profile_id == PROFILE_STANDARD:
             return self.standard_params()
         if profile_id in USER_SLOTS:
@@ -134,19 +133,25 @@ class ProfileCatalog:
         full["bypass"] = 0.0
         return full
 
-    def name(self, profile_id):
-        if profile_id == PROFILE_STANDARD:
+    def name(self, template_id):
+        if template_id == PROFILE_STANDARD:
             return "Standard"
-        if profile_id in USER_SLOTS:
-            return self.user_slots()[profile_id]["name"]
-        return self.factory().get(profile_id, {}).get("name", profile_id)
+        if template_id in USER_SLOTS:
+            return self.user_slots()[template_id]["name"]
+        return self.factory().get(template_id, {}).get("name", template_id)
 
-    def choices(self):
-        """Ordered list of (profile_id, name) for selectors; only usable profiles."""
-        items = [(PROFILE_OFF, "Off"), (PROFILE_STANDARD, "Standard")]
-        items += [(pid, p["name"]) for pid, p in self.factory().items()]
+    def templates(self):
+        """Ordered list of (template_id, name): factory presets, then filled user slots."""
+        items = [(pid, p["name"]) for pid, p in self.factory().items()]
         items += [(sid, s["name"]) for sid, s in self.user_slots().items() if s["params"]]
         return items
+
+
+def full_params(params):
+    """Fills missing keys with defaults so a filter always gets a complete set."""
+    full = dict(DEFAULT_PARAMS)
+    full.update(normalize_params(params))
+    return full
 
 
 def build_runtime_conf(template, plugin_so, profile_id, params, description):
@@ -228,8 +233,7 @@ def _pid_alive(pid):
 class SinkProcesses:
     """Starts and stops one PipeWire filter-chain process per profile."""
 
-    def __init__(self, catalog=None, runtime_dir=None, template_path=None, popen=subprocess.Popen):
-        self.catalog = catalog or ProfileCatalog()
+    def __init__(self, runtime_dir=None, template_path=None, popen=subprocess.Popen):
         self.runtime_dir = runtime_dir or paths.RUNTIME_DIR
         self.template_path = template_path or paths.CONF_TEMPLATE_PATH
         self.popen = popen
@@ -262,20 +266,15 @@ class SinkProcesses:
                     result.add(pid_id)
         return result
 
-    def start(self, profile_id, params=None, description=None):
+    def start(self, profile_id, params, description="Cinegain"):
         """Spawns the sink process (non-blocking). Returns the PID or None."""
         existing = self.pid(profile_id)
         if existing:
             return existing
-        if params is None:
-            params = self.catalog.params(profile_id)
-        if params is None:
+        if not params:
             return None
         with open(self.template_path, "r", encoding="utf-8") as f:
             template = f.read()
-        if description is None:
-            name = self.catalog.name(profile_id)
-            description = "Cinegain" if profile_id == PROFILE_STANDARD else f"Cinegain · {name}"
         conf = build_runtime_conf(template, paths.plugin_so_path(), profile_id, params, description)
         os.makedirs(self.runtime_dir, mode=0o700, exist_ok=True)
         conf_path = self._conf_file(profile_id)
@@ -306,7 +305,7 @@ class SinkProcesses:
         return pid is not None
 
     def stop_all_profiles(self):
-        """Stops every profile sink except the standard one."""
+        """Stops every per-program sink (everything except the standard one)."""
         stopped = []
         for pid_id in self.running():
             if pid_id != PROFILE_STANDARD:
