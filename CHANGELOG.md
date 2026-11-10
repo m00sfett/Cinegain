@@ -21,9 +21,6 @@ Categories follow the standard Keep a Changelog taxonomy: `Added`, `Changed`, `D
 - Per-program editing: moving *Leveler: max boost* now switches the program's leveler on (and off again at 0), exactly like it already did for Standard. Before, the slider stored a value but the leveler stayed off, so nothing changed in the sound.
 - `cinegain route` no longer crashes with `AttributeError: 'AppView' object has no attribute 'profile'`; it lists each playing program with `off`, `standard` or `own` and its sink.
 
-### Documentation
-- README corrected to match the app: no prebuilt `.rpm` is published, user slots are saved explicitly (not automatically), there is no level meter, the leveler is a slow RMS leveler without look-ahead, mid/side is a level balance, and the DSP diagram shows the real stage order and ranges.
-
 ---
 
 ## [0.3.2] - 2026-11-10
