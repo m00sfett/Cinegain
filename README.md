@@ -8,9 +8,9 @@
 
 > **Realtime Volume Booster, Dialogue Clarity Optimizer & Film Audio Processor for Linux (PipeWire).**
 
-Cinegain solves the classic movie audio problem on Linux: **quiet, mumbled dialogues drowned out by deafening explosions and loud background music**. It also serves as a clean, distortion-free **system volume booster** capable of pushing media audio up to **+25 dB** while keeping the output below full scale (0 dBFS).
+Cinegain solves the classic movie audio problem on Linux: **quiet, mumbled dialogues drowned out by deafening explosions and loud background music**. It also serves as a clean **system volume booster** capable of pushing media audio up to **+25 dB** while keeping the output below full scale (0 dBFS). Pushed into the limiter, material is of course compressed, not transparent.
 
-Unlike simple equalizers or aggressive compressors that distort the entire mix, Cinegain runs a dedicated low-latency C99 LADSPA DSP filter chain directly inside PipeWire. It isolates the center speech channel, elevates quiet whispers, softens harsh transients, and caps peaks with a look-ahead peak limiter.
+Unlike simple equalizers or aggressive compressors that distort the entire mix, Cinegain runs a dedicated low-latency C99 LADSPA DSP filter chain directly inside PipeWire. It favours the center (mid) channel where dialogue usually sits, slowly lifts quiet speech, tames loud peaks with a compressor, and caps them with a look-ahead peak limiter.
 
 ---
 
@@ -19,19 +19,19 @@ Unlike simple equalizers or aggressive compressors that distort the entire mix, 
 - **Direct Software Volume Booster (+25 dB):**
   Instantly amplifies quiet movie files, streams, or low-volume laptop speakers up to +25 dB.
 - **Intelligent Dialogue Leveler:**
-  Continuously monitors RMS dialogue levels with peak look-ahead, boosting quiet speech passages while gracefully pulling back during loud action scenes.
+  A slow RMS-based leveler (no look-ahead, glide time set by the preset) raises quiet passages up to a target level. Loud scenes are handled by the compressor and the limiter; the leveler itself needs seconds to react.
 - **Acoustic Presence Filter (2.5 kHz):**
   Selectively boosts the core consonant frequencies of human speech without making the audio sound harsh or tinny.
 - **Mid/Side Acoustic Separation:**
-  Separates center dialogue from stereo sound effects, music, and room reverberation.
+  Balances the mid (center) against the side (stereo width) signal with separate gains. This favours centered dialogue over wide effects and music, but it is a level balance, not a true separation.
 - **Look-Ahead Peak Limiter:**
-  A 5 ms look-ahead on sample peaks pulls the output down to the configured ceiling (default -0.5 dBFS) before the peak arrives. Measured overshoot above the ceiling stays around 0.2 dB. A soft safety clip with a hard stop keeps the output at or below 0 dBFS, even when pushed to maximum gain. The limiter works on sample peaks only and does not detect inter-sample (true-peak) overs.
+  A 5 ms look-ahead on sample peaks pulls the output down to the configured ceiling (default -0.5 dBFS) before the peak arrives. Measured overshoot above the ceiling stays around 0.2 dB. A soft safety clip with a hard stop keeps the output at or below 0 dBFS, even when pushed to maximum gain. The limiter works on sample peaks only and does not detect inter-sample (true-peak) overs; with hard-clipped broadband material at +25 dB the true peak can sit several dB above the ceiling.
 - **Red-Yellow-Black Desktop Interface:**
-  Modern two-column layout with high-contrast hero sliders, real-time feedback, and system tray integration.
+  Modern two-column layout with high-contrast hero sliders and system tray integration. There is no level or gain-reduction meter.
 - **Full Keyboard Navigation:**
   Control every parameter using the keyboard (`↑`/`↓` to switch sliders, `←`/`→` for 1.0 dB steps, `Shift + ←`/`→` for 0.1 dB fine tuning).
-- **8 Auto-Saving User Presets:**
-  Store and recall your own custom audio profiles with live change indicators and slot renaming.
+- **8 User Presets:**
+  Store and recall your own custom audio profiles. Click an empty slot to save, right-click to overwrite, rename or clear; the active slot is highlighted while the sliders match it. Later slider changes are not written back automatically.
 - **Settings per Program, Remembered Permanently:**
   Every program that ever played audio stays in the sidebar (`~/.config/cinegain/apps.json`). Select a program and the presets and sliders edit exactly that program; untouched programs follow *Standard*. A program with its own setting runs through its own filter sink, so a film in the browser and music in Spotify play at the same time with different processing. A switch per program decides whether it goes through Cinegain at all. Electron apps that pretend to be "Chromium" (e.g. the ChatGPT desktop client) are told apart by their binary.
 - **Reset Everything:**
@@ -53,7 +53,7 @@ All installation methods require:
 - Standard C math library (`libm`).
 
 ### Build Requirements
-*(Only required if installing via the curl one-liner, AUR/PKGBUILD, or compiling from source. Pre-built `.deb` and `.rpm` packages do **not** require any build tools.)*
+*(Only required if installing via the curl one-liner, AUR/PKGBUILD, or compiling from source. The pre-built `.deb` package does **not** require any build tools.)*
 - C99-compliant compiler (`gcc` or `clang`).
 - Standard development tools (`make`, `git`, `curl`).
 
@@ -117,13 +117,9 @@ sudo apt install ./packaging/cinegain_0.3.3_amd64.deb
 
 ---
 
-### Method 4: Fedora / RHEL (.rpm Package)
+### Method 4: Fedora / RHEL (build the .rpm yourself)
 
-Download the `.rpm` package from the [Releases page](https://github.com/m00sfett/cinegain/releases) or build it using the spec file:
-
-```bash
-sudo dnf install ./cinegain-0.3.3-1.x86_64.rpm
-```
+There is no prebuilt `.rpm` on the Releases page (only the tarball and the `.deb`). The spec file is `packaging/rpm/cinegain.spec`; build it with `rpmbuild`, or use Method 5 (tarball) or Method 1.
 
 ---
 
@@ -159,7 +155,7 @@ gcc -O3 -fPIC -shared -Wall -Wextra src/cinegain.c -o src/cinegain.so -lm
 | **Direct One-Liner (`curl | bash`)** | ❌ No | Re-run `curl -fsSL ... | bash` |
 | **Standalone Tarball** | ❌ No | Download newer archive and run `./install.sh` |
 | **Debian / Ubuntu (`.deb`)** | ❌ No (standalone package) | Download newer `.deb` from GitHub Releases |
-| **Fedora (`.rpm`)** | ❌ No (standalone package) | Download newer `.rpm` from GitHub Releases |
+| **Fedora (`.rpm`)** | ❌ No (build from spec) | Rebuild with `rpmbuild` from a newer source |
 
 ---
 
@@ -233,30 +229,27 @@ cinegain stop
 Audio Input (L / R)
        │
        ▼
- [ Direct Volume Boost Stage (-12 dB .. +25 dB) ]
+ [ Input Gain (-25 .. +25 dB in the DSP, -12 .. +25 dB in the GUI) ]
        │
        ▼
- [ 120 Hz Sub-Bass Shelf EQ ] ───► [ 8 kHz High-Shelf Brilliance EQ ]
+ [ High-Pass (default 20 Hz) ] ─► [ 120 Hz Bass Shelf ] ─► [ Presence Peaking EQ (default 2.5 kHz, adjustable) ] ─► [ 8 kHz Treble Shelf ]
        │
        ▼
- [ 2.5 kHz Speech Presence Peaking Bandpass ]
+ [ Mid/Side Matrix ]
+  ├── Mid  (center)  ──► gain (DSP -15 .. +15 dB, GUI -6 .. +12 dB)
+  └── Side (width)   ──► gain (DSP -30 .. +15 dB, GUI -15 .. +6 dB)
        │
        ▼
- [ Mid/Side Matrix Demux ]
-  ├── Mid  (Center Dialogue) ──► Dialogue Isolation Gain (+0 .. +12 dB)
-  └── Side (Ambience / Stereo) ──► Ambience Attenuation (-15 .. +6 dB)
+ [ Mid/Side Matrix back to L / R ]
        │
        ▼
- [ Mid/Side Matrix Mux ]
+ [ Slow RMS Leveler (gated, no look-ahead, boost and cut limits) ]
        │
        ▼
- [ Peak-Sensing Dialogue Leveler (Look-Ahead, Smooth RMS Ballistics) ]
+ [ Soft-Knee Feed-Forward Compressor + Makeup Gain ]
        │
        ▼
- [ Soft-Knee Feedforward Compressor (Threshold, Ratio, Makeup Gain) ]
-       │
-       ▼
- [ Look-Ahead Peak Limiter (-0.5 dBFS default ceiling) ]
+ [ 5 ms Look-Ahead Peak Limiter + safety soft clip / hard stop at 0 dBFS ]
        │
        ▼
  Audio Output (L / R to Speakers / Headphones)
