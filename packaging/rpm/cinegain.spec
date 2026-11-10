@@ -1,5 +1,5 @@
 Name:           cinegain
-Version:        0.3.2
+Version:        0.3.3
 Release:        1%{?dist}
 Summary:        Realtime volume booster, dialogue clarity optimizer & film audio processor for PipeWire
 
@@ -27,7 +27,7 @@ gcc -O3 -fPIC -shared -Wall -Wextra src/cinegain.c -o src/cinegain.so -lm
 
 %install
 rm -rf $RPM_BUILD_ROOT
-install -Dm755 src/cinegain.so %{buildroot}%{_libdir}/ladspa/cinegain.so
+install -Dm755 src/cinegain.so %{buildroot}/usr/lib/ladspa/cinegain.so
 install -Dm755 bin/cinegain %{buildroot}%{_bindir}/cinegain
 install -Dm755 bin/cinegain-gui %{buildroot}%{_bindir}/cinegain-gui
 
@@ -48,12 +48,15 @@ install -Dm644 assets/icons/cinegain.png %{buildroot}%{_datadir}/icons/hicolor/2
 %doc README.md CHANGELOG.md
 %{_bindir}/cinegain
 %{_bindir}/cinegain-gui
-%{_libdir}/ladspa/cinegain.so
+/usr/lib/ladspa/cinegain.so
 %{_datadir}/cinegain/
 %{_datadir}/applications/cinegain.desktop
 %{_datadir}/icons/hicolor/256x256/apps/cinegain.png
 
 %changelog
+* Tue Nov 10 2026 Tobias Moos <tobias@roteson.de> - 0.3.3-1
+- Fix per-program leveler slider and cinegain route crash
+
 * Tue Nov 10 2026 Tobias Moos <tobias@roteson.de> - 0.3.2-1
 - Fix crash when clicking the roteson.de logo
 

@@ -5,7 +5,7 @@
     "params": {
       "cinegain:bypass": 0.0,
       "cinegain:input_db": 0.0,
-      "cinegain:highpass_hz": 20.0,
+      "cinegain:highpass_hz": 10.0,
       "cinegain:bass_db": 0.0,
       "cinegain:dialog_db": 0.0,
       "cinegain:dialog_hz": 2500.0,
@@ -35,7 +35,7 @@
     "params": {
       "cinegain:bypass": 0.0,
       "cinegain:input_db": 5.0,
-      "cinegain:highpass_hz": 20.0,
+      "cinegain:highpass_hz": 10.0,
       "cinegain:bass_db": 0.0,
       "cinegain:dialog_db": 0.0,
       "cinegain:dialog_hz": 2500.0,
@@ -65,7 +65,7 @@
     "params": {
       "cinegain:bypass": 0.0,
       "cinegain:input_db": 10.0,
-      "cinegain:highpass_hz": 20.0,
+      "cinegain:highpass_hz": 10.0,
       "cinegain:bass_db": 0.0,
       "cinegain:dialog_db": 0.0,
       "cinegain:dialog_hz": 2500.0,
@@ -95,7 +95,7 @@
     "params": {
       "cinegain:bypass": 0.0,
       "cinegain:input_db": 15.0,
-      "cinegain:highpass_hz": 20.0,
+      "cinegain:highpass_hz": 10.0,
       "cinegain:bass_db": 0.0,
       "cinegain:dialog_db": 0.0,
       "cinegain:dialog_hz": 2500.0,
@@ -125,7 +125,7 @@
     "params": {
       "cinegain:bypass": 0.0,
       "cinegain:input_db": 20.0,
-      "cinegain:highpass_hz": 20.0,
+      "cinegain:highpass_hz": 10.0,
       "cinegain:bass_db": 0.0,
       "cinegain:dialog_db": 0.0,
       "cinegain:dialog_hz": 2500.0,
@@ -155,7 +155,7 @@
     "params": {
       "cinegain:bypass": 0.0,
       "cinegain:input_db": 25.0,
-      "cinegain:highpass_hz": 20.0,
+      "cinegain:highpass_hz": 10.0,
       "cinegain:bass_db": 0.0,
       "cinegain:dialog_db": 0.0,
       "cinegain:dialog_hz": 2500.0,

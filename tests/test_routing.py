@@ -106,6 +106,9 @@ class FakeSinks:
     def running(self):
         return set(self.live)
 
+    def pid(self, profile_id):
+        return 1234 if profile_id in self.live else None
+
     def stop_all_profiles(self):
         out = [p for p in self.live if p != "standard"]
         for p in out:

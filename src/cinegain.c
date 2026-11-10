@@ -3,8 +3,12 @@
  *
  * Signal flow (all stages stereo-linked, so the stereo image never shifts):
  *   input gain -> high-pass -> bass shelf -> dialog peak -> treble shelf
- *   -> mid/side balance -> leveler (slow AGC) -> compressor -> makeup
- *   -> look-ahead peak limiter -> soft safety clip
+ *   -> mid/side balance -> leveler (slow RMS boost, fast peak-sensing cut)
+ *   -> compressor -> makeup -> look-ahead peak limiter -> soft safety clip
+ *
+ * The four meter values are also written to a small memory-mapped file
+ * ($CINEGAIN_METER_DIR or $XDG_RUNTIME_DIR/cinegain/meter-<pid>.bin) because
+ * PipeWire does not expose control output ports; the GUI reads that file.
  *
  * Loaded by PipeWire's filter-chain (ladspa plugin type). Every control port
  * becomes a live-adjustable PipeWire Prop "<node>:<port name>".
@@ -13,8 +17,15 @@
  * no ladspa.h package is required to build.
  */
 #include <math.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 /* ---- minimal LADSPA 1.1 ABI ------------------------------------------- */
 typedef float LADSPA_Data;
@@ -214,9 +225,19 @@ static inline double bq_run(const biquad_coef *c, biquad_state *s, double x)
 
 enum { EQ_HP, EQ_BASS, EQ_DIALOG, EQ_TREBLE, EQ_N };
 
+#define METER_MAGIC 0x434E4D31u /* "CNM1" */
+typedef struct {
+	uint32_t magic;
+	uint32_t seq;
+	float level_db, leveler_db, gr_db, limit_db;
+} meter_shm;
+
 typedef struct {
 	LADSPA_Data *port[P_COUNT];
 	double rate;
+	meter_shm *shm;
+	char shm_path[512];
+	double lev_peak;     /* fast peak envelope for the leveler's cut path */
 
 	/* cached parameter values to detect changes */
 	float eq_cache[6];
@@ -251,6 +272,30 @@ static LADSPA_Handle instantiate(const LADSPA_Descriptor *d, unsigned long rate)
 	if (n < 1) n = 1;
 	if (n > MAX_LOOKAHEAD) n = MAX_LOOKAHEAD;
 	k->la_len = n;
+
+	/* Best-effort meter file; the plugin works fine without it. */
+	const char *dir = getenv("CINEGAIN_METER_DIR");
+	char buf[400];
+	if (!dir || !*dir) {
+		const char *xdg = getenv("XDG_RUNTIME_DIR");
+		if (xdg && *xdg) { snprintf(buf, sizeof buf, "%s/cinegain", xdg); dir = buf; }
+	}
+	if (dir && *dir) {
+		mkdir(dir, 0700);
+		snprintf(k->shm_path, sizeof k->shm_path, "%s/meter-%d.bin", dir, (int)getpid());
+		int fd = open(k->shm_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+		if (fd >= 0) {
+			if (ftruncate(fd, sizeof(meter_shm)) == 0) {
+				void *m = mmap(NULL, sizeof(meter_shm), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+				if (m != MAP_FAILED) {
+					k->shm = m;
+					k->shm->magic = METER_MAGIC;
+				}
+			}
+			close(fd);
+		}
+		if (!k->shm) k->shm_path[0] = 0;
+	}
 	return k;
 }
 
@@ -270,6 +315,7 @@ static void activate(LADSPA_Handle h)
 	k->lim_gain = 1.0;
 	k->lev_power = 0.0;
 	k->lev_gain_db = 0.0;
+	k->lev_peak = 0.0;
 	k->comp_env_db = -120.0;
 	k->eq_valid = 0;
 }
@@ -288,7 +334,14 @@ static void update_eq(Cinegain *k)
 	if (k->eq_valid && memcmp(v, k->eq_cache, sizeof(v)) == 0) return;
 	memcpy(k->eq_cache, v, sizeof(v));
 	k->eq_valid = 1;
-	bq_set(&k->eq[EQ_HP], 0, k->rate, v[0], 0.7071, 0);
+	/* The port's lower bound (10 Hz) means "off": a flat, transparent stage. */
+	if (v[0] <= 10.5f) {
+		k->eq[EQ_HP].b0 = 1.0;
+		k->eq[EQ_HP].b1 = k->eq[EQ_HP].b2 = 0.0;
+		k->eq[EQ_HP].a1 = k->eq[EQ_HP].a2 = 0.0;
+	} else {
+		bq_set(&k->eq[EQ_HP], 0, k->rate, v[0], 0.7071, 0);
+	}
 	bq_set(&k->eq[EQ_BASS], 1, k->rate, 120.0, 0.7071, v[1]);
 	bq_set(&k->eq[EQ_DIALOG], 2, k->rate, v[3], v[4] > 0.05f ? v[4] : 0.05f, v[2]);
 	bq_set(&k->eq[EQ_TREBLE], 3, k->rate, 8000.0, 0.7071, v[5]);
@@ -323,6 +376,10 @@ static void run(LADSPA_Handle h, unsigned long n)
 	/* power averaging ~ speed/4, gain glide ~ speed */
 	const double lev_pc = coef_ms(lev_speed * 250.0, rate);
 	const double lev_gc = coef_ms(lev_speed * 1000.0, rate);
+	/* Cuts follow loud material about 8x faster than boosts follow quiet material. */
+	const double lev_gc_cut = coef_ms(lev_speed * 125.0, rate);
+	const double peak_rel = coef_ms(150.0, rate);
+	const double peak_room_db = 9.0; /* allowed peak-over-target before the fast cut engages */
 
 	const double thr = ctl(k, P_COMP_THRESH_DB, -24);
 	const double ratio = ctl(k, P_COMP_RATIO, 3) < 1.0f ? 1.0 : ctl(k, P_COMP_RATIO, 3);
@@ -362,9 +419,17 @@ static void run(LADSPA_Handle h, unsigned long n)
 				k->lev_power = lev_pc * k->lev_power + (1.0 - lev_pc) * p;
 			double want = lev_target - lin2db(sqrt(k->lev_power + DENORM));
 			if (k->lev_power <= 0.0) want = 0.0;
+			/* peak sensing: a loud peak asks for a cut right away, not after the RMS settles */
+			double apk = fabs(l) > fabs(r) ? fabs(l) : fabs(r);
+			k->lev_peak = apk > k->lev_peak ? apk : peak_rel * k->lev_peak + (1.0 - peak_rel) * apk;
+			if (pdb > lev_gate) {
+				double want_pk = lev_target + peak_room_db - lin2db(k->lev_peak);
+				if (want_pk < want) want = want_pk;
+			}
 			if (want > lev_boost) want = lev_boost;
 			if (want < -lev_cut) want = -lev_cut;
-			k->lev_gain_db = lev_gc * k->lev_gain_db + (1.0 - lev_gc) * want;
+			double gc = want < k->lev_gain_db ? lev_gc_cut : lev_gc;
+			k->lev_gain_db = gc * k->lev_gain_db + (1.0 - gc) * want;
 		} else {
 			k->lev_gain_db *= lev_gc; /* glide back to 0 dB */
 		}
@@ -418,13 +483,26 @@ static void run(LADSPA_Handle h, unsigned long n)
 		outR[i] = (float)orr;
 	}
 
+	if (k->shm) {
+		k->shm->level_db = (float)lin2db(blk_peak);
+		k->shm->leveler_db = (float)k->lev_gain_db;
+		k->shm->gr_db = (float)blk_gr;
+		k->shm->limit_db = (float)lin2db(blk_lim);
+		__atomic_store_n(&k->shm->seq, k->shm->seq + 1, __ATOMIC_RELEASE);
+	}
 	if (k->port[P_METER_LEVEL_DB]) *k->port[P_METER_LEVEL_DB] = (float)lin2db(blk_peak);
 	if (k->port[P_METER_LEVELER_DB]) *k->port[P_METER_LEVELER_DB] = (float)k->lev_gain_db;
 	if (k->port[P_METER_GR_DB]) *k->port[P_METER_GR_DB] = (float)blk_gr;
 	if (k->port[P_METER_LIMIT_DB]) *k->port[P_METER_LIMIT_DB] = (float)lin2db(blk_lim);
 }
 
-static void cleanup(LADSPA_Handle h) { free(h); }
+static void cleanup(LADSPA_Handle h)
+{
+	Cinegain *k = h;
+	if (k->shm) munmap(k->shm, sizeof(meter_shm));
+	if (k->shm_path[0]) unlink(k->shm_path);
+	free(k);
+}
 
 static const LADSPA_Descriptor descriptor = {
 	.UniqueID = 0x4B4E5431, /* "KNT1", private range */

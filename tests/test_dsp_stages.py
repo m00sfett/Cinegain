@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+"""
+DSP stage tests for src/cinegain.c: high-pass off switch, fast leveler cut and the
+meter file the GUI reads. Builds the plugin into a temp dir; needs gcc only.
+"""
+import ctypes as C
+import math
+import os
+import shutil
+import struct
+import subprocess
+import tempfile
+import unittest
+
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+RATE = 48000
+BLOCK = 256
+
+
+class Desc(C.Structure):
+    _fields_ = [
+        ("UniqueID", C.c_ulong), ("Label", C.c_char_p), ("Properties", C.c_int),
+        ("Name", C.c_char_p), ("Maker", C.c_char_p), ("Copyright", C.c_char_p),
+        ("PortCount", C.c_ulong), ("PortDescriptors", C.c_void_p),
+        ("PortNames", C.POINTER(C.c_char_p)), ("PortRangeHints", C.c_void_p),
+        ("ImplementationData", C.c_void_p),
+        ("instantiate", C.CFUNCTYPE(C.c_void_p, C.c_void_p, C.c_ulong)),
+        ("connect_port", C.CFUNCTYPE(None, C.c_void_p, C.c_ulong, C.c_void_p)),
+        ("activate", C.CFUNCTYPE(None, C.c_void_p)),
+        ("run", C.CFUNCTYPE(None, C.c_void_p, C.c_ulong)),
+        ("run_adding", C.c_void_p), ("set_run_adding_gain", C.c_void_p),
+        ("deactivate", C.c_void_p),
+        ("cleanup", C.CFUNCTYPE(None, C.c_void_p)),
+    ]
+
+
+NEUTRAL = dict(
+    bypass=0, input_db=0, highpass_hz=10, bass_db=0, dialog_db=0, dialog_hz=2500, dialog_q=1,
+    treble_db=0, mid_db=0, side_db=0, leveler=0, lev_target_db=-18, lev_max_boost_db=0,
+    lev_max_cut_db=0, lev_speed_s=2, lev_gate_db=-55, comp_thresh_db=0, comp_ratio=1,
+    comp_knee_db=0, comp_attack_ms=20, comp_release_ms=250, makeup_db=0,
+    lim_ceiling_db=-0.2, lim_release_ms=80,
+)
+
+
+def rms_db(x):
+    return 20 * math.log10(max(math.sqrt(sum(v * v for v in x) / len(x)), 1e-12))
+
+
+class StageTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if shutil.which("gcc") is None:
+            raise unittest.SkipTest("gcc is required")
+        cls._tmp = tempfile.TemporaryDirectory()
+        so = os.path.join(cls._tmp.name, "cinegain.so")
+        subprocess.run(["gcc", "-O2", "-fPIC", "-shared", "-Wall", "-Wextra",
+                        os.path.join(BASE_DIR, "src", "cinegain.c"), "-o", so, "-lm"], check=True)
+        cls.lib = C.CDLL(so)
+        cls.lib.ladspa_descriptor.restype = C.POINTER(Desc)
+        cls.lib.ladspa_descriptor.argtypes = [C.c_ulong]
+        cls.dptr = cls.lib.ladspa_descriptor(0)
+        cls.desc = cls.dptr.contents
+        cls.names = [cls.desc.PortNames[i].decode() for i in range(cls.desc.PortCount)]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def _run(self, signal, cleanup=True, **params):
+        p = dict(NEUTRAL)
+        p.update(params)
+        n = len(signal)
+        inp = (C.c_float * n)(*signal)
+        out_l, out_r = (C.c_float * n)(), (C.c_float * n)()
+        ctl = {i: C.c_float(float(p.get(name, 0.0))) for i, name in enumerate(self.names) if i >= 4}
+        h = self.desc.instantiate(C.cast(self.dptr, C.c_void_p), RATE)
+        for i, c in ctl.items():
+            self.desc.connect_port(h, i, C.addressof(c))
+        self.desc.activate(h)
+        for pos in range(0, n, BLOCK):
+            cnt = min(BLOCK, n - pos)
+            for port, arr in ((0, inp), (1, inp), (2, out_l), (3, out_r)):
+                self.desc.connect_port(h, port, C.addressof(arr) + pos * 4)
+            self.desc.run(h, cnt)
+        if cleanup:
+            self.desc.cleanup(h)
+            return list(out_l)
+        return list(out_l), h
+
+    @staticmethod
+    def _sine(freq, level_db, seconds):
+        amp = 10 ** (level_db / 20)
+        return [amp * math.sin(2 * math.pi * freq * t / RATE) for t in range(int(RATE * seconds))]
+
+    def test_highpass_at_minimum_is_transparent(self):
+        x = self._sine(20, -30, 1.0)
+        off = self._run(x, highpass_hz=10)
+        on = self._run(x, highpass_hz=20)
+        self.assertAlmostEqual(rms_db(off[RATE // 2:]) - rms_db(x[RATE // 2:]), 0.0, delta=0.1)
+        self.assertLess(rms_db(on[RATE // 2:]) - rms_db(x[RATE // 2:]), -2.5)
+
+    def test_leveler_pulls_back_quickly_after_a_loud_jump(self):
+        quiet, loud = self._sine(1000, -40, 6), self._sine(1000, -10, 3)
+        out = self._run(quiet + loud, leveler=1, lev_target_db=-16, lev_max_boost_db=15,
+                        lev_max_cut_db=6, lev_speed_s=4)
+        start = len(quiet)
+        # 1.5 s after the jump the output must be close to the target, not +6 dB above input
+        seg = out[start + int(1.5 * RATE): start + int(1.75 * RATE)]
+        self.assertLess(rms_db(seg), -16 + 4.0)
+
+    def test_meter_file_is_written_and_removed(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.environ["CINEGAIN_METER_DIR"] = d
+            try:
+                _, h = self._run(self._sine(1000, -20, 0.5), cleanup=False)
+                path = os.path.join(d, f"meter-{os.getpid()}.bin")
+                with open(path, "rb") as f:
+                    magic, seq, level, leveler, gr, limit = struct.unpack("<IIffff", f.read(24))
+                self.assertEqual(magic, 0x434E4D31)
+                self.assertGreater(seq, 0)
+                self.assertAlmostEqual(level, -20.0, delta=0.5)
+                self.desc.cleanup(h)
+                self.assertFalse(os.path.exists(path))
+            finally:
+                del os.environ["CINEGAIN_METER_DIR"]
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -15,7 +15,7 @@ import subprocess
 import sys
 import time
 
-__version__ = "0.3.2"
+__version__ = "0.3.3"
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if os.path.exists(os.path.join(SCRIPT_DIR, "..", "share", "cinegain")):
@@ -276,7 +276,8 @@ def cmd_route(args):
     apps = make_router().tick(active=True)
     for a in apps:
         if a.streams:
-            print(f"  {a.label:28} {a.profile:14} -> {a.sink}")
+            mode = "off" if not a.enabled else ("own" if a.own else "standard")
+            print(f"  {a.label:28} {mode:10} -> {a.sink}")
     return 0
 
 

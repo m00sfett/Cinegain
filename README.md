@@ -4,7 +4,7 @@
 [![PipeWire](https://img.shields.io/badge/Audio-PipeWire-blue.svg)](https://pipewire.org)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow.svg)](https://www.python.org/)
 [![GUI: PyQt6](https://img.shields.io/badge/GUI-PyQt6-green.svg)](https://riverbankcomputing.com/software/pyqt/)
-[![Version](https://img.shields.io/badge/Release-v0.3.2-orange.svg)](https://github.com/m00sfett/cinegain/releases)
+[![Version](https://img.shields.io/badge/Release-v0.3.3-orange.svg)](https://github.com/m00sfett/cinegain/releases)
 
 > **Realtime Volume Booster, Dialogue Clarity Optimizer & Film Audio Processor for Linux (PipeWire).**
 
@@ -103,13 +103,13 @@ Download the `.deb` package from the [Releases page](https://github.com/m00sfett
 
 ```bash
 sudo apt update
-sudo apt install ./cinegain_0.3.2_amd64.deb
+sudo apt install ./cinegain_0.3.3_amd64.deb
 ```
 
 *Or build the `.deb` package yourself:*
 ```bash
 ./packaging/debian/build-deb.sh
-sudo apt install ./packaging/cinegain_0.3.2_amd64.deb
+sudo apt install ./packaging/cinegain_0.3.3_amd64.deb
 ```
 
 > [!NOTE]
@@ -122,18 +122,18 @@ sudo apt install ./packaging/cinegain_0.3.2_amd64.deb
 Download the `.rpm` package from the [Releases page](https://github.com/m00sfett/cinegain/releases) or build it using the spec file:
 
 ```bash
-sudo dnf install ./cinegain-0.3.2-1.x86_64.rpm
+sudo dnf install ./cinegain-0.3.3-1.x86_64.rpm
 ```
 
 ---
 
 ### Method 5: Standalone Release Archive (Universal Tarball)
 
-Download `cinegain-0.3.2-linux-x86_64.tar.gz` from [GitHub Releases](https://github.com/m00sfett/cinegain/releases):
+Download `cinegain-0.3.3-linux-x86_64.tar.gz` from [GitHub Releases](https://github.com/m00sfett/cinegain/releases):
 
 ```bash
-tar -xzvf cinegain-0.3.2-linux-x86_64.tar.gz
-cd cinegain-0.3.2-linux-x86_64
+tar -xzvf cinegain-0.3.3-linux-x86_64.tar.gz
+cd cinegain-0.3.3-linux-x86_64
 ./install.sh        # Installs for current user (~/.local)
 # or: sudo ./install.sh --system  # Installs system-wide (/usr/local)
 ```
@@ -174,10 +174,10 @@ cinegain-gui
 - **Filter Toggle:** Click the large red/green button in the banner to toggle Cinegain on or off without altering your slider positions.
 - **Language Switcher:** Click the `🌐` / `A / 文` button in the title banner to instantly switch between 19 languages.
 - **Factory Presets:** Click any preset button (`+5 dB`, `+10 dB`, `+15 dB`, `+20 dB`, `+25 dB`, `Film & Serie`, `Night Mode`, `Neutral 0 dB`).
-- **User Slots:** Click any empty slot (`User 1`–`8`) to save the current slider state. Left-click to recall; right-click to rename or clear.
+- **User Slots:** Click any empty slot (`User 1`–`8`) to save the current slider state. Left-click to recall (the slot then follows your slider changes); right-click to rename, overwrite or clear.
 - **Keyboard Controls:** Use `↑` / `↓` to select sliders. Press `←` / `→` for 1.0 dB steps, or hold `Shift` for fine 0.1 dB steps.
 - **Programs (sidebar):** Click *Standard* or a program; the header above the presets names what you are editing. The first slider move or preset gives a program its own setting, *Back to Standard* discards it. The switch in each row routes the program through Cinegain or straight to the speakers. Programs silent for more than a week fold away under *Silent for a while*. Right-click a program to rename it, set its own volume back to 100 % or forget it. A yellow volume badge (e.g. `40 %`) means the program itself is turned down; one click fixes it.
-- **Presets & user slots are templates:** A click loads the values into the selected program (or Standard). Right-click a user slot to store the current values in it, rename or clear it.
+- **Presets & user slots:** A click loads the values into the selected program (or Standard). A user slot you loaded is auto-saved: every slider move is written back to it until you pick a factory preset, another slot or another program. Right-click a slot to store the current values in it, rename or clear it.
 - **Keyboard:** `Page Up` / `Page Down` switch the program; arrows work as before.
 - **Reset everything:** The button in the bottom left asks for confirmation, backs up the current state and restarts the window in factory state.
 
@@ -250,7 +250,7 @@ Audio Input (L / R)
  [ Mid/Side Matrix Mux ]
        │
        ▼
- [ Peak-Sensing Dialogue Leveler (Look-Ahead, Smooth RMS Ballistics) ]
+ [ Peak-Sensing Dialogue Leveler (fast peak-sensing cut, slow RMS boost) ]
        │
        ▼
  [ Soft-Knee Feedforward Compressor (Threshold, Ratio, Makeup Gain) ]
