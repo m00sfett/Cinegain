@@ -22,12 +22,11 @@ elif os.path.exists(os.path.expanduser("~/.local/bin/cinegain")):
 else:
     BIN_PATH = "cinegain"
 
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
 
 os.environ.setdefault("CINEGAIN_BASE_DIR", BASE_DIR)
 import cinegain_paths as paths  # noqa: E402
-from cinegain_profiles import USER_SLOTS, find_node_id, push_params, sink_name  # noqa: E402
-from cinegain_registry import PROFILE_STANDARD  # noqa: E402
+from cinegain_profiles import ProfileCatalog, full_params  # noqa: E402
 from cinegain_router import Router  # noqa: E402
 from i18n import t, set_language, get_available_languages, get_current_language  # noqa: E402
 
@@ -64,7 +63,7 @@ except ImportError:
     print("Error: PyQt6 is required to run the Cinegain desktop interface.")
     sys.exit(1)
 
-from apps_panel import AppsPanel  # noqa: E402
+from program_sidebar import STANDARD, ProgramSidebar  # noqa: E402
 
 
 def create_translate_icon(color="#FFD21F", size=18):
@@ -424,6 +423,7 @@ class KeyNavSlider(QSlider):
     """
 
     navRequested = pyqtSignal(int)  # -1 = prev, +1 = next, 100 = switch column
+    programRequested = pyqtSignal(int)  # PageUp = -1, PageDown = +1 (program sidebar)
     focusedIn = pyqtSignal()
 
     def __init__(self, orientation, param_name, parent=None):
@@ -452,6 +452,10 @@ class KeyNavSlider(QSlider):
             return
         if key == Qt.Key.Key_Tab or key == Qt.Key.Key_Backtab:
             self.navRequested.emit(100)
+            event.accept()
+            return
+        if key in (Qt.Key.Key_PageUp, Qt.Key.Key_PageDown):
+            self.programRequested.emit(-1 if key == Qt.Key.Key_PageUp else 1)
             event.accept()
             return
         if key in (Qt.Key.Key_Left, Qt.Key.Key_Right):
@@ -488,13 +492,14 @@ class CinegainMainWindow(QMainWindow):
         super().__init__()
         self.router = router
         self.is_active = False
-        self.active_user_slot = None  # "user_1" .. "user_8" when editing a user slot live
+        self.catalog = ProfileCatalog()
+        self.selected_key = STANDARD  # None = Standard, otherwise a program key
+        self._program_dirty = None  # program key whose own values wait for the debounced flush
+        self._initial_selection_done = False
         self.sliders = {}  # param_name -> dict(slider, val_lbl, title_lbl, row_frame, base_title, unit, is_hero)
         self.slider_order = []  # ordered list of param_names for Up/Down keyboard navigation
         self.slider_ui_elements = {}  # param_name -> dict(label, frame, label_key, tip_key)
         self.focused_slider_idx = 0
-        self._slot_sync_pending = None
-        self._profile_nodes = {}  # profile id -> PipeWire node id (cache for live slot edits)
 
         self._load_config()
         self.factory_presets = self._load_factory_presets()
@@ -504,8 +509,8 @@ class CinegainMainWindow(QMainWindow):
 
         self.setWindowTitle(t("app_title"))
         self.setStyleSheet(CI_STYLESHEET)
-        self.setMinimumSize(1040, 940)
-        self.resize(1100, 980)
+        self.setMinimumSize(1340, 820)
+        self.resize(1400, 880)
 
         if os.path.exists(ICON_PATH):
             self.setWindowIcon(QIcon(ICON_PATH))
@@ -574,28 +579,11 @@ class CinegainMainWindow(QMainWindow):
                 pass
         return slots
 
-    def _save_user_presets(self, changed_slot=None):
+    def _save_user_presets(self):
         try:
             paths.write_json_atomic(USER_PRESETS_FILE, self.user_presets)
         except OSError:
-            return
-        if changed_slot:
-            self._sync_profile_sink(changed_slot)
-
-    def _sync_profile_sink(self, slot_id):
-        """Keeps a running per-app profile sink in step with its edited user slot."""
-        if self.user_presets.get(slot_id, {}).get("params") is None:
-            # Slot cleared: its programs fall back to the standard profile.
-            self.router.registry.replace_profile(slot_id, PROFILE_STANDARD)
-            self.router.sinks.stop(slot_id)
-            return
-        if slot_id in self.router.sinks.running():
-            params = self.router.catalog.params(slot_id)
-            node_id = self._profile_nodes.get(slot_id) or find_node_id(sink_name(slot_id))
-            if push_params(node_id, params):
-                self._profile_nodes[slot_id] = node_id
-            else:
-                self._profile_nodes.pop(slot_id, None)
+            pass
 
     def _load_config(self):
         if os.path.exists(CONFIG_FILE):
@@ -649,7 +637,7 @@ class CinegainMainWindow(QMainWindow):
 
     def retranslate_ui(self):
         self.setWindowTitle(t("app_title"))
-        self.lbl_subtitle.setText(t("app_subtitle"))
+        self.lbl_subtitle.setText(self._subtitle())
         self.btn_lang.setText(f" {get_current_language().upper()}")
         self.btn_quit.setText(t("btn_quit"))
         self.btn_quit.setToolTip(t("btn_quit_tip"))
@@ -662,9 +650,9 @@ class CinegainMainWindow(QMainWindow):
             self.grp_main.setTitle(amp(t("main_group")))
         if hasattr(self, "grp_adv"):
             self.grp_adv.setTitle(amp(t("adv_group")))
-        if hasattr(self, "grp_apps"):
-            self.grp_apps.setTitle(amp(t("apps_group")))
-            self.apps_panel.retranslate()
+        if hasattr(self, "sidebar"):
+            self.sidebar.retranslate()
+            self.update_edit_header()
         if hasattr(self, "btn_reset"):
             self.btn_reset.setText(t("btn_reset"))
             self.btn_reset.setToolTip(t("btn_reset_tip"))
@@ -713,7 +701,7 @@ class CinegainMainWindow(QMainWindow):
             'font-family: "Fira Sans Condensed", sans-serif; font-size: 22px; '
             "font-weight: 800; letter-spacing: 1.5px; color: #FFD21F;"
         )
-        self.lbl_subtitle = QLabel(t("app_subtitle"))
+        self.lbl_subtitle = QLabel(self._subtitle())
         self.lbl_subtitle.setStyleSheet("font-size: 12px; font-weight: 600; color: #FFF1D6;")
         title_box.addWidget(self.lbl_title)
         title_box.addWidget(self.lbl_subtitle)
@@ -754,6 +742,19 @@ class CinegainMainWindow(QMainWindow):
         hdr.addWidget(self.btn_lang)
         hdr.addWidget(self.btn_quit)
         layout.addWidget(banner)
+
+        # Body: program sidebar (left) selects what the editor (right) changes.
+        body = QHBoxLayout()
+        body.setSpacing(14)
+        self.sidebar = ProgramSidebar(self.router)
+        self.sidebar.selection_changed.connect(self.on_selection_changed)
+        self.sidebar.changed.connect(self.refresh_apps)
+        body.addWidget(self.sidebar)
+        editor = QVBoxLayout()
+        editor.setSpacing(10)
+        editor.addWidget(self._build_edit_header())
+        body.addLayout(editor, 1)
+        layout.addLayout(body, 1)
 
         # 2. Presets Section (Row 1: Pure Boost + Cinema Profiles | Row 2: 8 Auto-Saving User Presets)
         self.grp_presets = QGroupBox(amp(t("presets_group")))
@@ -814,7 +815,7 @@ class CinegainMainWindow(QMainWindow):
             self.user_preset_buttons[sid] = b
 
         presets_vbox.addLayout(row2)
-        layout.addWidget(self.grp_presets)
+        editor.addWidget(self.grp_presets)
 
         # 3. Side-by-Side Two-Column Controls (Left: Hero Direct Boost + Main Focus, Right: Fine-Tuning)
         cols_layout = QHBoxLayout()
@@ -964,17 +965,7 @@ class CinegainMainWindow(QMainWindow):
 
         cols_layout.addWidget(self.grp_main, 1)
         cols_layout.addWidget(self.grp_adv, 1)
-        layout.addLayout(cols_layout, 1)
-
-        # 4. Applications Section in a fixed-height ScrollArea
-        self.grp_apps = QGroupBox(amp(t("apps_group")))
-        self.grp_apps.setFixedHeight(196)
-        grp_apps_outer = QVBoxLayout(self.grp_apps)
-        grp_apps_outer.setContentsMargins(8, 6, 8, 6)
-        self.apps_panel = AppsPanel(self.router)
-        self.apps_panel.changed.connect(self.refresh_apps)
-        grp_apps_outer.addWidget(self.apps_panel)
-        layout.addWidget(self.grp_apps)
+        editor.addLayout(cols_layout, 1)
 
         # 5. Footer with Version, AGPLv3, and roteson.de link
         footer_layout = QHBoxLayout()
@@ -1069,6 +1060,7 @@ class CinegainMainWindow(QMainWindow):
             lambda v, p=param_name, vl=val_lbl, u=unit: self.on_slider_changed(p, v / 10.0, vl, u)
         )
         slider.focusedIn.connect(lambda i=idx: self.set_focused_slider(i, set_qt_focus=False))
+        slider.programRequested.connect(self.sidebar.select_step)
         slider.navRequested.connect(lambda delta, i=idx: self.navigate_slider(i, delta))
         row_frame.clicked.connect(lambda i=idx: self.set_focused_slider(i, set_qt_focus=True))
 
@@ -1142,6 +1134,9 @@ class CinegainMainWindow(QMainWindow):
     def keyPressEvent(self, event: QKeyEvent):
         """Fallback window-level arrow handling if no slider currently holds focus."""
         key = event.key()
+        if key in (Qt.Key.Key_PageUp, Qt.Key.Key_PageDown):
+            self.sidebar.select_step(-1 if key == Qt.Key.Key_PageUp else 1)
+            return
         if key in (Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_Left, Qt.Key.Key_Right):
             active_pname = self.slider_order[self.focused_slider_idx]
             active_slider = self.sliders[active_pname]["slider"]
@@ -1214,28 +1209,40 @@ class CinegainMainWindow(QMainWindow):
 
     def on_slider_changed(self, param_name, val, val_lbl, unit):
         val_lbl.setText(self._format_val(param_name, val, unit))
-        self.pending_params[param_name] = val
-
-        # Q1 = a: If a user preset slot is currently selected in live-save mode, auto-save into it!
-        if self.active_user_slot and self.active_user_slot in self.user_presets:
-            self.user_presets[self.active_user_slot]["params"] = self.get_current_slider_params()
-            self._save_user_presets()
-            self._refresh_user_preset_buttons_text()
-            self._slot_sync_pending = self.active_user_slot
-
+        if self.selected_key is STANDARD:
+            self.pending_params[param_name] = val
+        else:
+            self._store_program_values(self.selected_key, self.get_current_slider_params())
         self.update_preset_highlights()
         self.param_timer.start()
 
+    def _store_program_values(self, key, values):
+        """Gives the program its own setting (copied from Standard on first change)."""
+        entry = self.router.registry.get(key)
+        if entry is None:
+            return
+        first_time = entry["params"] is None
+        base = entry["params"] or self.catalog.standard_params()
+        params = full_params(base)
+        params.update(values)
+        params["bypass"] = 0.0
+        self.router.registry.set_params(key, params, save=False)
+        self._program_dirty = key
+        if first_time:
+            self.update_edit_header()
+
     def flush_pending_params(self):
-        if self._slot_sync_pending:
-            slot, self._slot_sync_pending = self._slot_sync_pending, None
-            self._sync_profile_sink(slot)
+        if self._program_dirty:
+            key, self._program_dirty = self._program_dirty, None
+            self.router.registry.save()
+            if not self.router.push_program_params(key):
+                # No own sink yet (first change): route now instead of on the next heartbeat.
+                self.refresh_apps()
         if not self.pending_params:
             return
         to_send = dict(self.pending_params)
         self.pending_params.clear()
-        preset_tag = self.active_user_slot if self.active_user_slot else "custom"
-        run_cinegain("batch", json.dumps(to_send), "--preset-id", preset_tag)
+        run_cinegain("batch", json.dumps(to_send), "--preset-id", "custom")
 
     def _set_sliders_silently(self, params_dict):
         for k, v in params_dict.items():
@@ -1251,45 +1258,49 @@ class CinegainMainWindow(QMainWindow):
                 s.blockSignals(False)
 
     def apply_factory_preset(self, preset_name):
-        """
-        Applies a factory preset without changing filter on/off state.
-        Leaves user preset live-edit mode so subsequent manual tweaks don't overwrite a user slot.
-        """
-        self.active_user_slot = None
+        """Loads a factory preset into whatever is selected in the sidebar."""
+        if self.selected_key is STANDARD:
+            self.apply_standard_preset(preset_name)
+            return
+        params = self.catalog.params(preset_name)
+        if params:
+            self._load_into_program(self.selected_key, params)
+
+    def apply_standard_preset(self, preset_name):
+        """Loads a factory preset into Standard (used by the tray, which has no selection)."""
         self.pending_params.clear()
         run_cinegain("preset", preset_name)
-        f_params = self.factory_presets.get(preset_name, {}).get("params")
-        if f_params:
-            self._set_sliders_silently(f_params)
-        self.on_heartbeat(sync_sliders=True)
+        if self.selected_key is STANDARD:
+            f_params = self.factory_presets.get(preset_name, {}).get("params")
+            if f_params:
+                self._set_sliders_silently(f_params)
+            self.on_heartbeat(sync_sliders=True)
+        self.update_preset_highlights()
+
+    def _load_into_program(self, key, params):
+        self._set_sliders_silently(params)
+        self._store_program_values(key, params)
+        self.flush_pending_params()
         self.update_preset_highlights()
 
     def on_user_preset_clicked(self, slot_id):
         """
-        Q1 = a:
-        - If the user slot is empty, immediately save the current slider values into it and activate it.
-        - If the user slot already has values, load those values into the sliders/engine and activate it
-          so any subsequent slider adjustments auto-save into this slot.
+        User slots are templates. An empty slot stores the current values; a filled
+        slot loads its values into whatever is selected in the sidebar.
         """
         slot = self.user_presets.get(slot_id)
         if not slot:
             return
-        self.active_user_slot = slot_id
-        self.pending_params.clear()
-
         if not slot.get("params"):
-            # Empty slot -> store current slider positions immediately
-            current = self.get_current_slider_params()
-            slot["params"] = current
-            self._save_user_presets(changed_slot=slot_id)
-            self._refresh_user_preset_buttons_text()
-            run_cinegain("batch", json.dumps(current), "--preset-id", slot_id)
-        else:
-            # Occupied slot -> load its stored parameters
-            saved_p = slot["params"]
+            self._overwrite_user_slot(slot_id)
+            return
+        saved_p = dict(slot["params"])
+        if self.selected_key is STANDARD:
+            self.pending_params.clear()
             self._set_sliders_silently(saved_p)
             run_cinegain("batch", json.dumps(saved_p), "--preset-id", slot_id)
-
+        else:
+            self._load_into_program(self.selected_key, full_params(saved_p))
         self.update_preset_highlights()
 
     def show_user_preset_menu(self, slot_id, button, pos):
@@ -1314,10 +1325,8 @@ class CinegainMainWindow(QMainWindow):
         menu.exec(button.mapToGlobal(pos))
 
     def _overwrite_user_slot(self, slot_id):
-        self.active_user_slot = slot_id
-        current = self.get_current_slider_params()
-        self.user_presets[slot_id]["params"] = current
-        self._save_user_presets(changed_slot=slot_id)
+        self.user_presets[slot_id]["params"] = self.get_current_slider_params()
+        self._save_user_presets()
         self._refresh_user_preset_buttons_text()
         self.update_preset_highlights()
 
@@ -1339,9 +1348,7 @@ class CinegainMainWindow(QMainWindow):
         idx_num = slot_id.split("_")[-1]
         self.user_presets[slot_id]["name"] = f"User {idx_num}"
         self.user_presets[slot_id]["params"] = None
-        if self.active_user_slot == slot_id:
-            self.active_user_slot = None
-        self._save_user_presets(changed_slot=slot_id)
+        self._save_user_presets()
         self._refresh_user_preset_buttons_text()
         self.update_preset_highlights()
 
@@ -1392,7 +1399,7 @@ class CinegainMainWindow(QMainWindow):
         self.btn_power.style().unpolish(self.btn_power)
         self.btn_power.style().polish(self.btn_power)
 
-        if sync_sliders and params:
+        if sync_sliders and params and self.selected_key is STANDARD:
             for pname, info in self.sliders.items():
                 if pname in params and not info["slider"].isSliderDown():
                     val = float(params[pname])
@@ -1403,17 +1410,108 @@ class CinegainMainWindow(QMainWindow):
                     s.setValue(int(round(val * 10)))
                     vl.setText(self._format_val(pname, val, u))
                     s.blockSignals(False)
-            if preset_id and str(preset_id).startswith("user_"):
-                self.active_user_slot = preset_id
 
         self.update_preset_highlights()
 
         self.refresh_apps()
 
     def refresh_apps(self):
-        """Scans streams, enforces per-app routing and updates the programs panel."""
+        """Scans streams, enforces per-program routing and updates the sidebar."""
         views = self.router.tick(active=self.is_active)
-        self.apps_panel.update_views(views, self.is_active)
+        self.sidebar.update_views(views, self.is_active)
+        if not self._initial_selection_done:
+            # Open on the program that is playing right now, if it is the only one.
+            self._initial_selection_done = True
+            playing = [v for v in views if v.playing]
+            if len(playing) == 1:
+                self.sidebar.select(playing[0].key)
+        self.update_edit_header()
+
+    # -- editing target ---------------------------------------------------------
+    def _subtitle(self):
+        return f"{t('app_subtitle')} · {t('kbd_program')}"
+
+    def _build_edit_header(self):
+        frame = QFrame()
+        frame.setObjectName("edit_header")
+        frame.setStyleSheet(
+            "QFrame#edit_header { background-color: #1F1712; border: 1px solid #6E1516; border-radius: 8px; }"
+            "QLabel { background: transparent; }"
+            "QPushButton#btn_back_standard { background-color: #14100D; color: #FFD21F; "
+            "border: 1px solid #A86B4A; border-radius: 6px; padding: 6px 14px; font-weight: 700; }"
+            "QPushButton#btn_back_standard:hover { background-color: #8C1014; border-color: #FFD21F; }"
+        )
+        lay = QHBoxLayout(frame)
+        lay.setContentsMargins(16, 10, 12, 10)
+        lay.setSpacing(12)
+        text = QVBoxLayout()
+        text.setSpacing(2)
+        self.lbl_edit_target = QLabel()
+        self.lbl_edit_target.setStyleSheet(
+            'font-family: "Fira Sans Condensed", sans-serif; font-size: 21px; font-weight: 800; '
+            "letter-spacing: 0.6px; color: #FFD21F;"
+        )
+        self.lbl_edit_state = QLabel()
+        self.lbl_edit_state.setStyleSheet("font-size: 12px; color: #E2C89B;")
+        self.lbl_edit_state.setWordWrap(True)
+        text.addWidget(self.lbl_edit_target)
+        text.addWidget(self.lbl_edit_state)
+        self.btn_back_standard = QPushButton()
+        self.btn_back_standard.setObjectName("btn_back_standard")
+        self.btn_back_standard.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_back_standard.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_back_standard.clicked.connect(self.back_to_standard)
+        lay.addLayout(text, 1)
+        lay.addWidget(self.btn_back_standard, 0, Qt.AlignmentFlag.AlignVCenter)
+        return frame
+
+    def update_edit_header(self):
+        if not hasattr(self, "lbl_edit_target"):
+            return
+        key = self.selected_key
+        entry = self.router.registry.get(key) if key is not STANDARD else None
+        if entry is None:
+            self.lbl_edit_target.setText(amp(t("prog_standard")).upper())
+            self.lbl_edit_state.setText(t("edit_state_standard"))
+            self.btn_back_standard.hide()
+            return
+        self.lbl_edit_target.setText(entry["label"].upper())
+        if not entry["enabled"]:
+            state = t("edit_state_off")
+        elif entry["params"]:
+            state = t("edit_state_own")
+        else:
+            state = t("edit_state_follows")
+        self.lbl_edit_state.setText(state)
+        self.btn_back_standard.setText(t("btn_back_standard"))
+        self.btn_back_standard.setToolTip(t("btn_back_standard_tip"))
+        self.btn_back_standard.setVisible(entry["params"] is not None)
+
+    def target_values(self):
+        """Parameter values of the current editing target."""
+        if self.selected_key is not STANDARD:
+            entry = self.router.registry.get(self.selected_key)
+            if entry and entry["params"]:
+                return full_params(entry["params"])
+        return self.catalog.standard_params()
+
+    def on_selection_changed(self, key):
+        # Commit pending edits to the previous target before switching.
+        self.param_timer.stop()
+        self.flush_pending_params()
+        self.selected_key = key
+        self._set_sliders_silently(self.target_values())
+        self.update_edit_header()
+        self.update_preset_highlights()
+
+    def back_to_standard(self):
+        if self.selected_key is STANDARD:
+            return
+        self._program_dirty = None
+        self.router.registry.set_params(self.selected_key, None)
+        self._set_sliders_silently(self.catalog.standard_params())
+        self.refresh_apps()
+        self.update_preset_highlights()
 
     def reset_everything(self):
         box = QMessageBox(self)
@@ -1476,7 +1574,7 @@ class CinegainMainWindow(QMainWindow):
             ("clean_linear", t("preset_clean_linear")),
         ]:
             act = QAction(label, self)
-            act.triggered.connect(lambda checked=False, p=pid: self.apply_factory_preset(p))
+            act.triggered.connect(lambda checked=False, p=pid: self.apply_standard_preset(p))
             menu.addAction(act)
 
         menu.addSeparator()

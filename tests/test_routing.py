@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Tests for the persistent app registry, per-app profile routing, runtime config
-generation, pactl parsing and the factory reset. Runs without PipeWire: the
+Tests for the persistent program registry (incl. 0.2.0 migration), per-program
+routing, runtime config generation, pactl parsing, process matching and the
+factory reset. Runs without PipeWire: the
 sound server is replaced by an in-memory fake.
 """
 import json
@@ -20,9 +21,11 @@ os.environ["CINEGAIN_BASE_DIR"] = BASE_DIR
 sys.path.insert(0, os.path.join(BASE_DIR, "ui"))
 
 import cinegain_paths as paths  # noqa: E402
-from cinegain_profiles import ProfileCatalog, build_runtime_conf, sink_name  # noqa: E402
+from cinegain_profiles import ProfileCatalog, build_runtime_conf, sink_name  # noqa: E402,F401
 from cinegain_pulse import Stream, clean_wireplumber_targets, parse_streams_json, parse_streams_text  # noqa: E402
-from cinegain_registry import AppRegistry, default_label, is_media_app, make_key  # noqa: E402
+from cinegain_registry import (  # noqa: E402
+    AppRegistry, default_label, is_media_app, make_key, profile_id_for,
+)
 from cinegain_reset import reset_everything  # noqa: E402
 from cinegain_router import PROFILE_IDLE_STOP_S, Router  # noqa: E402
 
@@ -79,16 +82,18 @@ class FakePulse:
 
 
 class FakeSinks:
-    """Profile sink processes; starting one makes its sink appear in FakePulse."""
+    """Per-program sink processes; starting one makes its sink appear in FakePulse."""
 
     def __init__(self, pulse):
         self.pulse = pulse
         self.live = set()
         self.started = []
         self.stopped = []
+        self.params = {}
 
-    def start(self, profile_id, params=None, description=None):
+    def start(self, profile_id, params, description="Cinegain"):
         self.started.append(profile_id)
+        self.params[profile_id] = dict(params)
         self.live.add(profile_id)
         self.pulse.add_sink(sink_name(profile_id))
         return 1234
@@ -115,6 +120,10 @@ def write_presets(user_slots=None):
     })
 
 
+SPOTIFY = make_key("Spotify", "spotify")
+FIREFOX = make_key("Firefox", "firefox")
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         for p in paths.USER_STATE_FILES + (paths.WIREPLUMBER_STREAM_PROPS,):
@@ -128,8 +137,7 @@ class Base(unittest.TestCase):
         self.sinks = FakeSinks(self.pulse)
         write_presets()
         self.registry = AppRegistry(clock=self.clock)
-        self.router = Router(registry=self.registry, catalog=ProfileCatalog(), sinks=self.sinks,
-                             pulse=self.pulse, clock=self.clock)
+        self.router = Router(registry=self.registry, sinks=self.sinks, pulse=self.pulse, clock=self.clock)
 
     def stream(self, idx, app, binary, sink="53", **kw):
         s = Stream(idx, sink, app_name=app, binary=binary, node_name=app, **kw)
@@ -139,28 +147,52 @@ class Base(unittest.TestCase):
     def sink_of(self, stream):
         return self.pulse.sinks.get(stream.sink)
 
+    def own_sink(self, key):
+        return sink_name(profile_id_for(key))
+
+    def give_own(self, key, **params):
+        self.registry.set_params(key, dict({"input_db": 12.0}, **params))
+
 
 class TestRegistry(Base):
-    def test_apps_survive_restart(self):
+    def test_programs_survive_restart(self):
         self.stream(1, "Firefox", "firefox")
         self.router.tick(active=True)
         self.pulse.streams.clear()
         self.clock.t += 24 * 3600  # a day without sound
         self.router.tick(active=True)
         reloaded = AppRegistry(clock=self.clock)
-        self.assertIn(make_key("Firefox", "firefox"), reloaded.apps)
+        self.assertIn(FIREFOX, reloaded.apps)
 
-    def test_profile_choice_is_persisted(self):
+    def test_switch_and_own_values_are_persisted(self):
         self.stream(1, "Spotify", "spotify")
         self.router.tick(active=True)
-        key = make_key("Spotify", "spotify")
-        self.registry.set_profile(key, "night_mode")
-        self.assertEqual(AppRegistry().get(key)["profile"], "night_mode")
+        self.registry.set_enabled(SPOTIFY, False)
+        self.give_own(SPOTIFY, dialog_db=4.5)
+        entry = AppRegistry().get(SPOTIFY)
+        self.assertFalse(entry["enabled"])
+        self.assertEqual(entry["params"]["dialog_db"], 4.5)
+        self.registry.set_params(SPOTIFY, None)
+        self.assertIsNone(AppRegistry().get(SPOTIFY)["params"])
+
+    def test_new_programs_follow_standard(self):
+        self.stream(1, "Firefox", "firefox")
+        self.stream(2, "Claude", "claude-desktop")
+        self.router.tick(active=True)
+        self.assertEqual((self.registry.get(FIREFOX)["enabled"], self.registry.get(FIREFOX)["params"]), (True, None))
+        self.assertFalse(self.registry.get(make_key("Claude", "claude-desktop"))["enabled"])
 
     def test_electron_apps_are_kept_apart(self):
         self.assertNotEqual(make_key("Chromium", "ChatGPT"), make_key("Chromium", "chromium"))
         self.assertEqual(default_label("Chromium", "ChatGPT"), "ChatGPT")
         self.assertEqual(default_label("Firefox", "firefox"), "Firefox")
+        self.assertNotEqual(profile_id_for(make_key("Chromium", "ChatGPT")),
+                            profile_id_for(make_key("Chromium", "chromium")))
+
+    def test_profile_ids_are_safe_and_stable(self):
+        pid = profile_id_for("weird binary/../x::Some App (Beta) ÄÖÜ")
+        self.assertRegex(pid, r"^app_[a-z0-9_]+_[0-9a-f]{6}$")
+        self.assertEqual(pid, profile_id_for("weird binary/../x::Some App (Beta) ÄÖÜ"))
 
     def test_media_defaults(self):
         self.assertTrue(is_media_app("Firefox", "firefox"))
@@ -181,48 +213,115 @@ class TestRegistry(Base):
     def test_external_edit_is_picked_up(self):
         self.stream(1, "Firefox", "firefox")
         self.router.tick(active=True)
-        other = AppRegistry()
-        other.set_profile(make_key("Firefox", "firefox"), "off")
+        AppRegistry().set_enabled(FIREFOX, False)
         os.utime(paths.APPS_FILE, (self.clock.t + 5, self.clock.t + 5))
         views = self.router.tick(active=True)
-        self.assertEqual(views[0].profile, "off")
+        self.assertFalse(views[0].enabled)
+
+
+class TestMigration(unittest.TestCase):
+    def setUp(self):
+        for p in paths.USER_STATE_FILES:
+            try:
+                os.remove(p)
+            except FileNotFoundError:
+                pass
+
+    def test_v1_assignments_are_dropped_programs_kept(self):
+        v1 = {"version": 1, "apps": {
+            SPOTIFY: {"name": "Spotify", "binary": "spotify", "label": "Mein Spotify",
+                      "profile": "night_mode", "first_seen": 1.0, "last_seen": 2.0},
+            make_key("Claude", "claude-desktop"): {"name": "Claude", "binary": "claude-desktop",
+                                                   "label": "Claude", "profile": "standard",
+                                                   "first_seen": 1.0, "last_seen": 3.0},
+        }}
+        paths.write_json_atomic(paths.APPS_FILE, v1)
+        reg = AppRegistry()
+        self.assertEqual(set(reg.apps), set(v1["apps"]))
+        spotify = reg.get(SPOTIFY)
+        self.assertEqual((spotify["label"], spotify["enabled"], spotify["params"]), ("Mein Spotify", True, None))
+        self.assertFalse(reg.get(make_key("Claude", "claude-desktop"))["enabled"])  # media default, not "standard"
+        self.assertEqual(paths.read_json(paths.APPS_FILE)["version"], 2)
+        self.assertEqual(paths.read_json(paths.APPS_V1_BACKUP), v1)
+        self.assertNotIn("profile", paths.read_json(paths.APPS_FILE)["apps"][SPOTIFY])
+
+    def test_v2_file_is_not_migrated_again(self):
+        paths.write_json_atomic(paths.APPS_FILE, {"version": 2, "apps": {
+            SPOTIFY: {"name": "Spotify", "binary": "spotify", "label": "Spotify", "enabled": False,
+                      "params": {"input_db": 9}, "first_seen": 1, "last_seen": 2}}})
+        reg = AppRegistry()
+        self.assertEqual(reg.get(SPOTIFY)["params"], {"input_db": 9.0})
+        self.assertFalse(reg.get(SPOTIFY)["enabled"])
+        self.assertFalse(os.path.exists(paths.APPS_V1_BACKUP))
 
 
 class TestRouting(Base):
-    def test_media_app_goes_to_standard_sink(self):
+    def test_media_program_goes_to_standard_sink(self):
         s = self.stream(1, "Firefox", "firefox")
         self.router.tick(active=True)
         self.assertEqual(self.sink_of(s), "cinegain_sink")
 
-    def test_unknown_app_stays_direct(self):
+    def test_unknown_program_stays_direct(self):
         s = self.stream(1, "Claude", "claude-desktop")
         self.router.tick(active=True)
         self.assertEqual(self.sink_of(s), HW)
         self.assertEqual(self.pulse.moves, [])
 
-    def test_off_never_overrides_manual_hardware_choice(self):
+    def test_switch_off_never_overrides_manual_hardware_choice(self):
         s = self.stream(1, "Claude", "claude-desktop", sink="55")
         self.router.tick(active=True)
         self.assertEqual(self.sink_of(s), "alsa_output.hdmi-stereo")
 
-    def test_profile_sink_started_on_demand_then_routed(self):
+    def test_switching_a_program_off_moves_it_to_hardware(self):
+        s = self.stream(1, "Firefox", "firefox")
+        self.router.tick(active=True)
+        self.registry.set_enabled(FIREFOX, False)
+        self.router.tick(active=True)
+        self.assertEqual(self.sink_of(s), HW)
+
+    def test_own_setting_gets_own_sink_with_its_values(self):
         s = self.stream(1, "Spotify", "spotify")
         self.router.tick(active=True)
-        self.registry.set_profile(make_key("Spotify", "spotify"), "user_1")
+        self.give_own(SPOTIFY, dialog_db=4.5)
         self.router.tick(active=True)
-        self.assertEqual(self.sinks.started, ["user_1"])
+        pid = profile_id_for(SPOTIFY)
+        self.assertEqual(self.sinks.started, [pid])
+        self.assertEqual(self.sinks.params[pid]["dialog_db"], 4.5)
+        self.assertIn("lim_ceiling_db", self.sinks.params[pid])  # complete set, defaults filled
         self.router.tick(active=True)
-        self.assertEqual(self.sink_of(s), "cinegain_user_1")
+        self.assertEqual(self.sink_of(s), self.own_sink(SPOTIFY))
 
-    def test_two_apps_two_profiles_at_once(self):
+    def test_two_own_settings_and_standard_at_once(self):
         a = self.stream(1, "Firefox", "firefox")
         b = self.stream(2, "Spotify", "spotify")
+        c = self.stream(3, "mpv", "mpv")
         self.router.tick(active=True)
-        self.registry.set_profile(make_key("Spotify", "spotify"), "night_mode")
+        self.give_own(SPOTIFY)
+        self.give_own(make_key("mpv", "mpv"), input_db=3.0)
         self.router.tick(active=True)
         self.router.tick(active=True)
         self.assertEqual(self.sink_of(a), "cinegain_sink")
-        self.assertEqual(self.sink_of(b), "cinegain_night_mode")
+        self.assertEqual(self.sink_of(b), self.own_sink(SPOTIFY))
+        self.assertEqual(self.sink_of(c), self.own_sink(make_key("mpv", "mpv")))
+
+    def test_back_to_standard(self):
+        s = self.stream(1, "Spotify", "spotify")
+        self.router.tick(active=True)
+        self.give_own(SPOTIFY)
+        self.router.tick(active=True)
+        self.router.tick(active=True)
+        self.registry.set_params(SPOTIFY, None)
+        self.router.tick(active=True)
+        self.assertEqual(self.sink_of(s), "cinegain_sink")
+
+    def test_own_setting_with_switch_off_stays_direct(self):
+        s = self.stream(1, "Spotify", "spotify")
+        self.router.tick(active=True)
+        self.give_own(SPOTIFY)
+        self.registry.set_enabled(SPOTIFY, False)
+        self.router.tick(active=True)
+        self.assertEqual(self.sinks.started, [])
+        self.assertEqual(self.sink_of(s), HW)
 
     def test_no_moves_in_steady_state(self):
         self.stream(1, "Firefox", "firefox")
@@ -232,11 +331,11 @@ class TestRouting(Base):
         self.router.tick(active=True)
         self.assertEqual(len(self.pulse.moves), n)
 
-    def test_switching_off_releases_everything(self):
+    def test_main_switch_off_releases_everything(self):
         a = self.stream(1, "Firefox", "firefox")
         b = self.stream(2, "Spotify", "spotify")
         self.router.tick(active=True)
-        self.registry.set_profile(make_key("Spotify", "spotify"), "night_mode")
+        self.give_own(SPOTIFY)
         self.router.tick(active=True)
         self.router.tick(active=True)
         self.router.tick(active=False)
@@ -244,42 +343,35 @@ class TestRouting(Base):
         self.assertEqual(self.sink_of(b), HW)
         self.assertEqual(self.sinks.running(), set())
 
-    def test_idle_profile_sink_is_stopped(self):
+    def test_idle_program_sink_is_stopped(self):
         s = self.stream(1, "Spotify", "spotify")
         self.router.tick(active=True)
-        self.registry.set_profile(make_key("Spotify", "spotify"), "night_mode")
+        self.give_own(SPOTIFY)
         self.router.tick(active=True)
         self.router.tick(active=True)
+        pid = profile_id_for(SPOTIFY)
         self.pulse.streams.remove(s)
         self.clock.t += PROFILE_IDLE_STOP_S - 1
         self.router.tick(active=True)
-        self.assertIn("night_mode", self.sinks.running())
+        self.assertIn(pid, self.sinks.running())
         self.clock.t += 2
         self.router.tick(active=True)
-        self.assertNotIn("night_mode", self.sinks.running())
+        self.assertNotIn(pid, self.sinks.running())
 
-    def test_cleared_user_slot_falls_back_to_standard(self):
-        s = self.stream(1, "Spotify", "spotify")
-        self.router.tick(active=True)
-        self.registry.set_profile(make_key("Spotify", "spotify"), "user_2")  # empty slot
-        self.router.tick(active=True)
-        self.assertEqual(self.sinks.started, [])
-        self.assertEqual(self.sink_of(s), "cinegain_sink")
-
-    def test_failed_profile_start_is_retried_with_backoff(self):
+    def test_failed_sink_start_is_retried_with_backoff(self):
         self.stream(1, "Spotify", "spotify")
         self.router.tick(active=True)
-        self.registry.set_profile(make_key("Spotify", "spotify"), "night_mode")
-        self.sinks.start = lambda *a, **k: self.sinks.started.append("night_mode")  # never comes up
+        self.give_own(SPOTIFY)
+        self.sinks.start = lambda *a, **k: self.sinks.started.append("x")  # never comes up
         for _ in range(3):
             self.router.tick(active=True)
-        self.assertEqual(self.sinks.started, ["night_mode"])
+        self.assertEqual(self.sinks.started, ["x"])
         self.clock.t += 6
         self.router.tick(active=True)
-        self.assertEqual(self.sinks.started, ["night_mode", "night_mode"])
+        self.assertEqual(self.sinks.started, ["x", "x"])
 
     def test_own_streams_are_ignored(self):
-        self.pulse.streams.append(Stream(9, "53", node_name="cinegain_output_night_mode"))
+        self.pulse.streams.append(Stream(9, "53", node_name="cinegain_output_app_spotify_abc123"))
         views = self.router.tick(active=True)
         self.assertEqual(views, [])
 
@@ -301,10 +393,10 @@ class TestRuntimeConf(unittest.TestCase):
             self.template = f.read()
 
     def test_profile_conf_has_own_names_and_params(self):
-        conf = build_runtime_conf(self.template, "/x/cinegain.so", "night_mode",
+        conf = build_runtime_conf(self.template, "/x/cinegain.so", "app_spotify_spotify_abc123",
                                   {"input_db": 12.5, "leveler": 1.0}, "Cinegain · Nacht")
-        self.assertIn('node.name          = "cinegain_night_mode"', conf)
-        self.assertIn('"cinegain_output_night_mode"', conf)
+        self.assertIn('node.name          = "cinegain_app_spotify_spotify_abc123"', conf)
+        self.assertIn('"cinegain_output_app_spotify_spotify_abc123"', conf)
         self.assertNotIn('"cinegain_sink"', conf)
         self.assertIn('"input_db"         = 12.5', conf)
         self.assertIn('plugin = "/x/cinegain.so"', conf)
@@ -384,7 +476,7 @@ class TestReset(Base):
         with open(paths.WIREPLUMBER_STREAM_PROPS, "w") as f:
             f.write('[stream-properties]\nOutput/Audio:application.name:Firefox={"mute":false, '
                     '"target":"cinegain_sink", "volume":0.003906}\n')
-        self.sinks.start("night_mode")
+        self.sinks.start("app_x_abc123", {"input_db": 1.0})
         report = reset_everything(pulse=self.pulse, sinks=self.sinks)
         self.assertEqual(self.sink_of(a), HW)
         self.assertEqual(a.volume_pct, 100)

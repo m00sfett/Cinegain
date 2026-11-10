@@ -15,7 +15,7 @@ import subprocess
 import sys
 import time
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if os.path.exists(os.path.join(SCRIPT_DIR, "..", "share", "cinegain")):
@@ -36,6 +36,7 @@ sys.path.insert(0, os.path.join(os.path.abspath(BASE_DIR), "ui"))
 import cinegain_paths as paths  # noqa: E402
 from cinegain_profiles import (  # noqa: E402
     DEFAULT_PARAMS,
+    PROFILE_STANDARD,
     STANDARD_SINK,
     ProfileCatalog,
     SinkProcesses,
@@ -47,7 +48,7 @@ from cinegain_profiles import (  # noqa: E402
     wait_for_node,
 )
 from cinegain_pulse import PulseControl, clean_wireplumber_targets  # noqa: E402
-from cinegain_registry import PROFILE_OFF, PROFILE_STANDARD, AppRegistry  # noqa: E402
+from cinegain_registry import AppRegistry  # noqa: E402
 from cinegain_reset import reset_everything  # noqa: E402
 from cinegain_router import Router  # noqa: E402
 
@@ -133,7 +134,7 @@ def make_router():
 
 
 def standard_sinks():
-    return SinkProcesses(ProfileCatalog())
+    return SinkProcesses()
 
 
 # -- commands ----------------------------------------------------------------------
@@ -157,8 +158,8 @@ def cmd_start(args):
         print(f"Cinegain started successfully (Node ID: {node_id}).")
     if getattr(args, "route", False):
         apps = make_router().tick(active=True)
-        n = sum(1 for a in apps if a.streams and a.profile != PROFILE_OFF)
-        print(f"Routing applied to {n} playing application(s).")
+        n = sum(1 for a in apps if a.streams and a.enabled)
+        print(f"Routing applied to {n} playing program(s).")
     return 0
 
 
@@ -309,9 +310,18 @@ def _resolve_app(registry, needle):
     return None
 
 
+def _describe(entry):
+    state = "on " if entry["enabled"] else "off"
+    if entry["params"]:
+        db = entry["params"].get("input_db", 0.0)
+        setting = f"own ({db:+.1f} dB)"
+    else:
+        setting = "follows Standard"
+    return f"{state}  {setting}"
+
+
 def cmd_apps(args):
     registry = AppRegistry()
-    catalog = ProfileCatalog()
     action = args.action or "list"
     if action == "list":
         entries = sorted(registry.entries(), key=lambda e: -e["last_seen"])
@@ -319,65 +329,57 @@ def cmd_apps(args):
             print(json.dumps(entries, ensure_ascii=False))
             return 0
         if not entries:
-            print("No applications known yet. They appear as soon as they play audio.")
+            print("No programs known yet. They appear as soon as they play audio.")
             return 0
         for e in entries:
             seen = time.strftime("%Y-%m-%d %H:%M", time.localtime(e["last_seen"]))
-            print(f"  {e['label']:28} {e['profile']:14} last heard {seen}   [{e['key']}]")
+            print(f"  {e['label']:26} {_describe(e):26} last heard {seen}   [{e['key']}]")
         return 0
     if not args.app:
-        print(f"'cinegain apps {action}' needs an application name.", file=sys.stderr)
+        print(f"'cinegain apps {action}' needs a program name.", file=sys.stderr)
         return 2
     entry = _resolve_app(registry, args.app)
     if entry is None:
         return 1
-    if action == "set":
-        profile = PRESET_ALIASES.get((args.profile or "").lower(), args.profile)
-        if not profile or not catalog.exists(profile):
-            names = ", ".join(pid for pid, _ in catalog.choices())
-            print(f"Unknown profile '{args.profile}'. Available: {names}", file=sys.stderr)
+    key = entry["key"]
+    router = None
+    if action in ("on", "off"):
+        registry.set_enabled(key, action == "on")
+    elif action == "load":
+        catalog = ProfileCatalog()
+        template = PRESET_ALIASES.get((args.value or "").lower(), args.value)
+        params = catalog.params(template) if template else None
+        if template == PROFILE_STANDARD or params is None:
+            names = ", ".join(tid for tid, _ in catalog.templates())
+            print(f"Unknown template '{args.value}'. Available: {names}", file=sys.stderr)
             return 1
-        registry.set_profile(entry["key"], profile)
-        print(f"{entry['label']}: {profile}")
-        if get_cinegain_node_id():
-            make_router().tick(active=True)
-        return 0
-    if action == "rename":
-        registry.rename(entry["key"], args.profile or "")
-        print(f"Renamed to: {registry.get(entry['key'])['label']}")
-        return 0
-    if action == "forget":
-        registry.forget(entry["key"])
+        registry.set_params(key, params)
+        router = make_router()
+        router.push_program_params(key)
+    elif action == "standard":
+        registry.set_params(key, None)
+    elif action == "rename":
+        registry.rename(key, args.value or "")
+    elif action == "forget":
+        registry.forget(key)
         print(f"Forgot {entry['label']}.")
         return 0
-    return 2
-
-
-def cmd_profiles(args):
-    catalog = ProfileCatalog()
-    running = standard_sinks().running()
-    for pid, name in catalog.choices():
-        mark = ""
-        if pid == PROFILE_STANDARD and get_cinegain_node_id():
-            mark = "  (running)"
-        elif pid in running:
-            mark = f"  (running: {sink_name(pid)})"
-        print(f"  {pid:14} {name}{mark}")
+    else:
+        return 2
+    updated = registry.get(key)
+    print(f"{updated['label']}: {_describe(updated)}")
+    if get_cinegain_node_id():
+        (router or make_router()).tick(active=True)
     return 0
 
 
-def cmd_profile_sync(args):
-    """Pushes the current parameters of a profile to its running sink."""
-    catalog = ProfileCatalog()
-    params = catalog.params(args.profile)
-    if params is None:
-        # The profile vanished (slot cleared): drop its apps back to standard.
-        AppRegistry().replace_profile(args.profile, PROFILE_STANDARD)
-        standard_sinks().stop(args.profile)
-        return 0
-    node_id = find_node_id(sink_name(args.profile))
-    if node_id:
-        push_params(node_id, params)
+def cmd_templates(args):
+    """Lists the presets and filled user slots that can be loaded into a program."""
+    for tid, name in ProfileCatalog().templates():
+        print(f"  {tid:14} {name}")
+    running = sorted(standard_sinks().running() - {PROFILE_STANDARD})
+    if running:
+        print("\nPer-program sinks running: " + ", ".join(sink_name(p) for p in running))
     return 0
 
 
@@ -440,16 +442,17 @@ def main(argv=None):
     p_preset = sub.add_parser("preset", help="Load a factory preset into the standard profile")
     p_preset.add_argument("name", help="Preset name (clean_linear, boost_5db..boost_25db, dialog_boost, ...)")
 
-    p_apps = sub.add_parser("apps", help="List known applications or change their profile")
-    p_apps.add_argument("action", nargs="?", choices=["list", "set", "rename", "forget"])
-    p_apps.add_argument("app", nargs="?", help="Application (label, name, binary or key)")
-    p_apps.add_argument("profile", nargs="?", help="Profile id for 'set', new label for 'rename'")
+    p_apps = sub.add_parser(
+        "apps",
+        help="List programs, switch them on/off, load a template or go back to Standard",
+    )
+    p_apps.add_argument("action", nargs="?",
+                        choices=["list", "on", "off", "load", "standard", "rename", "forget"])
+    p_apps.add_argument("app", nargs="?", help="Program (label, name, binary or key)")
+    p_apps.add_argument("value", nargs="?", help="Template id for 'load', new label for 'rename'")
     p_apps.add_argument("--json", action="store_true", help="Output list as JSON")
 
-    sub.add_parser("profiles", help="List usable profiles")
-
-    p_sync = sub.add_parser("profile-sync", help="Push a profile's parameters to its running sink")
-    p_sync.add_argument("profile")
+    sub.add_parser("templates", aliases=["profiles"], help="List presets and user slots")
 
     p_reset = sub.add_parser("reset", help="Reset everything to factory settings (with backup)")
     p_reset.add_argument("--yes", "-y", action="store_true", help="Do not ask for confirmation")
@@ -467,8 +470,8 @@ def main(argv=None):
         "batch": cmd_batch,
         "preset": cmd_preset,
         "apps": cmd_apps,
-        "profiles": cmd_profiles,
-        "profile-sync": cmd_profile_sync,
+        "templates": cmd_templates,
+        "profiles": cmd_templates,
         "reset": cmd_reset,
     }
     return handlers[args.cmd](args)
