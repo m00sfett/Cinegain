@@ -387,6 +387,37 @@ class TestRouting(Base):
         self.assertFalse(views[1].streams)
 
 
+class TestNeutralDefault(unittest.TestCase):
+    """Standard starts neutral: factory defaults == the "Neutral (0 dB)" preset."""
+
+    def setUp(self):
+        for p in paths.USER_STATE_FILES:
+            try:
+                os.remove(p)
+            except FileNotFoundError:
+                pass
+
+    def test_defaults_match_neutral_preset(self):
+        from cinegain_profiles import DEFAULT_PARAMS
+        self.assertEqual(DEFAULT_PARAMS, ProfileCatalog().params("clean_linear"))
+
+    def test_standard_without_saved_state_is_neutral(self):
+        std = ProfileCatalog().standard_params()
+        self.assertEqual(std["input_db"], 0.0)
+        self.assertEqual(std["leveler"], 0.0)
+        self.assertEqual(std["comp_ratio"], 1.0)
+
+    def test_filter_template_starts_neutral(self):
+        import re
+        with open(os.path.join(BASE_DIR, "config", "cinegain-standalone.conf"), encoding="utf-8") as f:
+            conf = f.read()
+        from cinegain_profiles import DEFAULT_PARAMS
+        for key, value in DEFAULT_PARAMS.items():
+            m = re.search(r'"' + key + r'"\s*=\s*(-?[0-9.]+)', conf)
+            self.assertIsNotNone(m, key)
+            self.assertAlmostEqual(float(m.group(1)), value, msg=key)
+
+
 class TestRuntimeConf(unittest.TestCase):
     def setUp(self):
         with open(os.path.join(BASE_DIR, "config", "cinegain-standalone.conf"), encoding="utf-8") as f:

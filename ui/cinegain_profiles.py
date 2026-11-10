@@ -26,31 +26,33 @@ STANDARD_SINK = "cinegain_sink"
 STANDARD_OUTPUT = "cinegain_output"
 USER_SLOTS = tuple(f"user_{i}" for i in range(1, 9))
 
+# Factory default = the "Neutral (0 dB)" preset: Standard leaves audio untouched
+# until the user changes it (presets.json clean_linear must stay in sync).
 DEFAULT_PARAMS = {
     "bypass": 0.0,
-    "input_db": 8.0,
-    "highpass_hz": 40.0,
-    "bass_db": -3.0,
-    "dialog_db": 6.5,
+    "input_db": 0.0,
+    "highpass_hz": 20.0,
+    "bass_db": 0.0,
+    "dialog_db": 0.0,
     "dialog_hz": 2500.0,
     "dialog_q": 1.0,
-    "treble_db": 1.5,
-    "mid_db": 2.0,
-    "side_db": -3.0,
-    "leveler": 1.0,
-    "lev_target_db": -16.0,
-    "lev_max_boost_db": 15.0,
-    "lev_max_cut_db": 6.0,
-    "lev_speed_s": 1.5,
+    "treble_db": 0.0,
+    "mid_db": 0.0,
+    "side_db": 0.0,
+    "leveler": 0.0,
+    "lev_target_db": -18.0,
+    "lev_max_boost_db": 0.0,
+    "lev_max_cut_db": 0.0,
+    "lev_speed_s": 2.0,
     "lev_gate_db": -55.0,
-    "comp_thresh_db": -12.0,
-    "comp_ratio": 3.5,
-    "comp_knee_db": 6.0,
-    "comp_attack_ms": 10.0,
-    "comp_release_ms": 180.0,
-    "makeup_db": 2.0,
-    "lim_ceiling_db": -0.5,
-    "lim_release_ms": 70.0,
+    "comp_thresh_db": 0.0,
+    "comp_ratio": 1.0,
+    "comp_knee_db": 0.0,
+    "comp_attack_ms": 20.0,
+    "comp_release_ms": 250.0,
+    "makeup_db": 0.0,
+    "lim_ceiling_db": -0.2,
+    "lim_release_ms": 80.0,
 }
 BOOL_PARAMS = {"bypass", "leveler"}
 

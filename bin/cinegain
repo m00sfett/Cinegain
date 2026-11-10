@@ -71,7 +71,7 @@ PRESET_ALIASES = {
 
 def load_saved_state():
     """Loads persisted parameters and active preset of the standard profile."""
-    state = {"preset": "dialog_boost", "params": dict(DEFAULT_PARAMS)}
+    state = {"preset": "clean_linear", "params": dict(DEFAULT_PARAMS)}
     data = paths.read_json(paths.STATE_FILE, default={}) or {}
     if isinstance(data.get("params"), dict):
         state["params"].update(normalize_params(data["params"]))
