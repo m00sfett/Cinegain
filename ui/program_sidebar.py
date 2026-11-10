@@ -228,6 +228,7 @@ class ToggleSwitch(QAbstractButton):
 
 
 class ProgramRow(QFrame):
+    page_requested = pyqtSignal(object, int)
     clicked = pyqtSignal(object)  # key (None = Standard)
     switched = pyqtSignal(str, bool)
     menu_requested = pyqtSignal(str, object)
@@ -277,6 +278,10 @@ class ProgramRow(QFrame):
             lay.addWidget(self.switch, 0, Qt.AlignmentFlag.AlignVCenter)
 
     def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_PageUp, Qt.Key.Key_PageDown):
+            self.page_requested.emit(self.key, -1 if event.key() == Qt.Key.Key_PageUp else 1)
+            event.accept()
+            return
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
             self.clicked.emit(self.key)
             event.accept()
@@ -377,6 +382,7 @@ class ProgramSidebar(QGroupBox):
 
         self.standard_row = ProgramRow(STANDARD, content)
         self.standard_row.clicked.connect(self.select)
+        self.standard_row.page_requested.connect(self._page_from_row)
         self.list.addWidget(self.standard_row)
 
         self.empty = QLabel(t("apps_empty"))
@@ -415,6 +421,7 @@ class ProgramSidebar(QGroupBox):
             if v.key not in self.rows:
                 row = ProgramRow(v.key, self.scroll.widget())
                 row.clicked.connect(self.select)
+                row.page_requested.connect(self._page_from_row)
                 row.switched.connect(self._on_switch)
                 row.menu_requested.connect(self._on_menu)
                 row.volume_clicked.connect(self._on_volume)
@@ -477,9 +484,19 @@ class ProgramSidebar(QGroupBox):
 
     def select_step(self, delta):
         """PageUp/PageDown: moves the selection through Standard and the visible programs."""
+        self.select(self._step_target(self.selected, delta))
+
+    def _page_from_row(self, key, delta):
+        target = self._step_target(key, delta)
+        self.select(target)
+        row = self.standard_row if target is STANDARD else self.rows[target]
+        row.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self.scroll.ensureWidgetVisible(row)
+
+    def _step_target(self, key, delta):
         chain = [STANDARD] + self.order
-        idx = chain.index(self.selected) if self.selected in chain else 0
-        self.select(chain[max(0, min(len(chain) - 1, idx + delta))])
+        idx = chain.index(key) if key in chain else 0
+        return chain[max(0, min(len(chain) - 1, idx + delta))]
 
     def _toggle_silent(self):
         self.show_silent = not self.show_silent

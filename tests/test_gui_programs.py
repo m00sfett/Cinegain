@@ -256,6 +256,21 @@ class TestProgramEditing(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIsNone(json.loads(result.stdout)["active"])
 
+    def test_page_keys_from_focused_program_row(self):
+        from PyQt6.QtTest import QTest
+
+        sidebar = self.win.sidebar
+        first, second = sidebar.order
+        self.win.show()
+        sidebar.select(first)
+        sidebar.rows[first].setFocus()
+        self.app.processEvents()
+        for key, target in ((self.gui.Qt.Key.Key_PageDown, second),
+                            (self.gui.Qt.Key.Key_PageUp, first)):
+            QTest.keyClick(self.app.focusWidget(), key)
+            self.assertEqual(self.win.selected_key, target)
+            self.assertTrue(sidebar.rows[target].hasFocus())
+
     def test_page_down_walks_standard_then_programs(self):
         down = self.gui.QKeyEvent(self.gui.QKeyEvent.Type.KeyPress, self.gui.Qt.Key.Key_PageDown,
                                   self.gui.Qt.KeyboardModifier.NoModifier)
