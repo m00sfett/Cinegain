@@ -15,6 +15,14 @@ Categories follow the standard Keep a Changelog taxonomy: `Added`, `Changed`, `D
 
 ---
 
+## [0.3.3] - 2026-11-10
+
+### Fixed
+- Per-program editing: moving *Leveler: max boost* now switches the program's leveler on (and off again at 0), exactly like it already did for Standard. Before, the slider stored a value but the leveler stayed off, so nothing changed in the sound.
+- `cinegain route` no longer crashes with `AttributeError: 'AppView' object has no attribute 'profile'`; it lists each playing program with `off`, `standard` or `own` and its sink.
+
+---
+
 ## [0.3.2] - 2026-11-10
 
 ### Fixed
