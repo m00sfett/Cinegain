@@ -9,6 +9,8 @@ Skipped when PyQt6 is not installed.
 import importlib.util
 import json
 import os
+import subprocess
+import tempfile
 import sys
 import unittest
 
@@ -227,6 +229,32 @@ class TestProgramEditing(unittest.TestCase):
         self.assertIn(("preset", "boost_20db"), self.calls)
         self.assertEqual(self.slider().value(), before)
         self.assertIsNone(AppRegistry().get(SPOTIFY)["params"])
+
+    def test_failed_pw_dump_does_not_start_filter_or_enable_power(self):
+        from pathlib import Path
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as directory:
+            dump = Path(directory, "pw-dump")
+            dump.write_text("#!/bin/sh\nexit 1\n")
+            dump.chmod(0o755)
+            env = dict(os.environ, PATH=directory + os.pathsep + os.environ["PATH"])
+            result = subprocess.run([self.gui.BIN_PATH, "status", "--json"], env=env,
+                                    text=True, capture_output=True, check=False)
+        with patch.object(self.gui, "run_cinegain", return_value=(result.stdout, result.returncode)) as run:
+            window = self.gui.CinegainMainWindow(self.router)
+            try:
+                self.assertNotIn(("start", "--route"), [call.args for call in run.call_args_list])
+                self.assertFalse(window.btn_power.isEnabled())
+                self.assertFalse(window.tray_toggle_action.isEnabled())
+                self.assertEqual(window.lbl_status.text(), self.gui.t("unknown_status"))
+            finally:
+                window.timer.stop()
+                window.meter_timer.stop()
+                window.tray.hide()
+                window.deleteLater()
+        self.assertEqual(result.returncode, 2)
+        self.assertIsNone(json.loads(result.stdout)["active"])
 
     def test_page_down_walks_standard_then_programs(self):
         down = self.gui.QKeyEvent(self.gui.QKeyEvent.Type.KeyPress, self.gui.Qt.Key.Key_PageDown,
