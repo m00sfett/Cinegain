@@ -15,6 +15,32 @@ Categories follow the standard Keep a Changelog taxonomy: `Added`, `Changed`, `D
 
 ---
 
+## [0.3.0] - 2026-11-10
+
+### Added
+- **Program sidebar:** Programs now sit in a sidebar on the left, with *Standard* pinned on top. Select a program and the presets and sliders on the right edit exactly that program. A header above the presets names the target and its state.
+- **Own setting per program:** The first slider move or preset you load while a program is selected gives it its own complete setting, copied from Standard. *Back to Standard* discards it. Programs with their own setting run through their own filter sink, started on demand and stopped after 45 s without use.
+- **On/off switch per program:** Each row has a switch that routes the program through Cinegain or straight to the speakers. Its setting is kept while it is off.
+- **Keyboard:** `Page Up` / `Page Down` switch the selected program.
+- **Folding:** Programs silent for more than seven days fold away under *Silent for a while*.
+- **CLI:** `cinegain apps on|off|load|standard` and `cinegain templates` (alias `profiles`).
+- **Tests:** `tests/test_gui_programs.py` drives the real window offscreen (selection, editing, templates, PageDown, back to Standard, switch). `tests/test_routing.py` now covers the new model and the migration (34 tests).
+
+### Changed
+- **Presets and user slots are templates:** A click loads their values into the selected program or into Standard. User slots no longer save every slider move in the background; right-click a slot to store the current values in it.
+- **Tray presets** always apply to Standard, since the tray has no selection.
+- **The window opens on the program that is playing**, if exactly one is. Otherwise Standard is selected. The selection never jumps by itself afterwards.
+- **`apps.json` format version 2:** per program an on/off switch and either its own parameters or none. Version 1 files from 0.2.0 are migrated: programs are kept, their profile choices are dropped (media programs start switched on and following Standard), and the old file is kept as `apps.v1.json`. The factory reset also removes that backup.
+- **Layout:** The program block at the bottom is gone; the window is wider and lower (about 1400×880).
+
+### Removed
+- The per-row profile drop-down from 0.2.0 and the CLI commands `apps set` and `profile-sync`.
+
+### Fixed
+- Long program names and status texts no longer push the switch out of the sidebar row; they are shortened with "…" and shown in full as a tooltip.
+
+---
+
 ## [0.2.0] - 2026-11-10
 
 ### Added
