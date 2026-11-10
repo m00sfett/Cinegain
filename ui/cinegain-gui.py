@@ -22,7 +22,7 @@ elif os.path.exists(os.path.expanduser("~/.local/bin/cinegain")):
 else:
     BIN_PATH = "cinegain"
 
-APP_VERSION = "0.3.2"
+APP_VERSION = "0.3.3"
 
 os.environ.setdefault("CINEGAIN_BASE_DIR", BASE_DIR)
 import cinegain_paths as paths  # noqa: E402
@@ -1290,6 +1290,9 @@ class CinegainMainWindow(QMainWindow):
         params = full_params(base)
         params.update(values)
         params["bypass"] = 0.0
+        if "lev_max_boost_db" in values and "leveler" not in values:
+            # Same rule as `cinegain batch` for Standard: boost > 0 means leveler on.
+            params["leveler"] = 1.0 if float(values["lev_max_boost_db"]) > 0.05 else 0.0
         self.router.registry.set_params(key, params, save=False)
         self._program_dirty = key
         if first_time:

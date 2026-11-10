@@ -114,6 +114,32 @@ class TestProgramEditing(unittest.TestCase):
         self.assertAlmostEqual(AppRegistry().get(SPOTIFY)["params"]["input_db"], night["input_db"])
         self.assertFalse([c for c in self.calls if c[0] == "preset"])
 
+    def test_program_boost_slider_switches_its_leveler_on_and_off(self):
+        self.win.sidebar.select(CHROME)
+        self.slider("lev_max_boost_db").setValue(150)
+        self.win.flush_pending_params()
+        params = AppRegistry().get(CHROME)["params"]
+        self.assertEqual((params["leveler"], params["lev_max_boost_db"]), (1.0, 15.0))
+        self.slider("lev_max_boost_db").setValue(0)
+        self.win.flush_pending_params()
+        self.assertEqual(AppRegistry().get(CHROME)["params"]["leveler"], 0.0)
+
+    def test_cli_route_lists_programs_without_crashing(self):
+        import contextlib
+        import io
+        from importlib.machinery import SourceFileLoader
+        cli = SourceFileLoader("cinegain_cli", os.path.join(BASE_DIR, "bin", "cinegain")).load_module()
+        self.win.sidebar.select(CHROME)
+        self.slider().setValue(150)
+        self.win.flush_pending_params()
+        cli.get_cinegain_node_id = lambda: 1
+        cli.make_router = lambda: self.router
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(cli.cmd_route(None), 0)
+        self.assertIn("Google Chrome", out.getvalue())
+        self.assertIn("own", out.getvalue())
+
     def test_tray_preset_always_targets_standard(self):
         self.win.sidebar.select(SPOTIFY)
         before = self.slider().value()
