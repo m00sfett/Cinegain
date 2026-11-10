@@ -868,7 +868,7 @@ TRANSLATIONS = {
         "preset_night_mode": "नाइट मोड",
         "preset_max_loudness": "अधिकतम सिनेमा",
     },
-    "in": {
+    "id": {
         "app_title": "Cinegain — Penguat Volume & Pemroses Audio Film",
         "app_subtitle": "Penguat Volume (+25 dB) & Dialog Jelas · Keyboard: ↑↓ pilih, ←→ 1 dB (Shift: 0.1 dB)",
         "status_active": "● AKTIF",
@@ -1281,13 +1281,18 @@ LANGUAGE_NAMES = {
     "uk": "Українська",
     "ar": "العربية",
     "hi": "हिन्दी",
-    "in": "Bahasa Indonesia",
+    "id": "Bahasa Indonesia",
     "vi": "Tiếng Việt",
     "ja": "日本語",
     "ko": "한국어",
     "zh-CN": "简体中文",
     "zh-TW": "繁體中文",
 }
+
+
+# Legacy ISO 639-1 code for Indonesian. Accepted for system locales and saved
+# configs; the canonical key is "id".
+LANGUAGE_ALIASES = {"in": "id"}
 
 
 def get_system_lang():
@@ -1297,7 +1302,7 @@ def get_system_lang():
         lang_env = lang_env.split(".")[0].replace("_", "-")
         if lang_env in TRANSLATIONS:
             return lang_env
-        short = lang_env.split("-")[0]
+        short = LANGUAGE_ALIASES.get(lang_env.split("-")[0], lang_env.split("-")[0])
         if short == "zh":
             return "zh-CN"
         if short in TRANSLATIONS:
@@ -1334,6 +1339,7 @@ def t(key, **kwargs):
 
 def set_language(lang_code):
     global CURRENT_LANG
+    lang_code = LANGUAGE_ALIASES.get(lang_code, lang_code)
     if lang_code in TRANSLATIONS:
         CURRENT_LANG = lang_code
         return True
