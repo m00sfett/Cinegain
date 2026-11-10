@@ -42,7 +42,7 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           mkdir -p "$HOME/rpmbuild/SOURCES"
           git archive --prefix="cinegain-${VERSION}/" -o "$HOME/rpmbuild/SOURCES/v${VERSION}.tar.gz" HEAD
-          rpmbuild -bb --nodeps packaging/rpm/cinegain.spec
+          rpmbuild -bb --nodeps --define "debug_package %{nil}" packaging/rpm/cinegain.spec
           cp "$HOME"/rpmbuild/RPMS/*/cinegain-*.rpm .
 
       - name: Create GitHub Release

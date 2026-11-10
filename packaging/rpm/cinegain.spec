@@ -72,5 +72,5 @@ install -Dm644 assets/icons/cinegain.png %{buildroot}%{_datadir}/icons/hicolor/2
 * Tue Nov 10 2026 Tobias Moos <tobias@roteson.de> - 0.1.1-1
 - Fix Indonesian language code (id), correct limiter description
 
-* Sun Nov 09 2026 Tobias Moos <tobias@roteson.de> - 0.1.0-1
+* Mon Nov 09 2026 Tobias Moos <tobias@roteson.de> - 0.1.0-1
 - Initial public release v0.1.0
