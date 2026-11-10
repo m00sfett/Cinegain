@@ -39,6 +39,7 @@ from cinegain_profiles import (  # noqa: E402
     STANDARD_SINK,
     ProfileCatalog,
     SinkProcesses,
+    cinegain_pipewire_pids,
     find_node_id,
     normalize_params,
     push_params,
@@ -162,26 +163,16 @@ def cmd_start(args):
 
 
 def _kill_legacy_processes():
-    if os.path.exists(LEGACY_PID_FILE):
+    """Stops Cinegain filter chains started by older versions (or left behind)."""
+    try:
+        os.remove(LEGACY_PID_FILE)
+    except OSError:
+        pass
+    for pid in cinegain_pipewire_pids():
         try:
-            with open(LEGACY_PID_FILE) as f:
-                os.kill(int(f.read().strip()), signal.SIGTERM)
-        except (OSError, ValueError):
-            pass
-        try:
-            os.remove(LEGACY_PID_FILE)
+            os.kill(pid, signal.SIGTERM)
         except OSError:
             pass
-    try:
-        out = subprocess.check_output(["ps", "-u", str(os.getuid()), "-o", "pid=,args="], text=True)
-    except (subprocess.CalledProcessError, OSError):
-        return
-    for line in out.splitlines():
-        if "pipewire -c" in line and ("cinegain" in line or "kinoton" in line):
-            try:
-                os.kill(int(line.strip().split()[0]), signal.SIGTERM)
-            except (OSError, ValueError):
-                pass
 
 
 def cmd_stop(args):

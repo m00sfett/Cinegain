@@ -171,20 +171,58 @@ def build_runtime_conf(template, plugin_so, profile_id, params, description):
     return text
 
 
+def _read_argv(pid):
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            raw = f.read()
+    except OSError:
+        return []
+    return [a.decode(errors="replace") for a in raw.split(b"\0") if a]
+
+
+def is_cinegain_pipewire(pid):
+    """
+    True only for a `pipewire -c <conf>` process whose config belongs to Cinegain.
+    Matching on argv (not on the whole command line text) keeps shells or editors
+    that merely mention these words safe from being killed.
+    """
+    argv = _read_argv(pid)
+    if not argv or os.path.basename(argv[0]) != "pipewire":
+        return False
+    try:
+        conf = argv[argv.index("-c") + 1]
+    except (ValueError, IndexError):
+        return False
+    name = conf.lower()
+    return "cinegain" in name or "kinoton" in name
+
+
+def cinegain_pipewire_pids():
+    """All Cinegain filter-chain processes of the current user."""
+    uid = os.getuid()
+    pids = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            if os.stat(f"/proc/{entry}").st_uid != uid:
+                continue
+        except OSError:
+            continue
+        if is_cinegain_pipewire(int(entry)):
+            pids.append(int(entry))
+    return pids
+
+
 def _pid_alive(pid):
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True
-    # Exclude zombies and recycled PIDs that are not our pipewire.
-    try:
-        with open(f"/proc/{pid}/cmdline", "rb") as f:
-            cmd = f.read().replace(b"\0", b" ").decode(errors="replace")
-        return "pipewire" in cmd and "cinegain" in cmd
-    except OSError:
         return False
+    # Exclude zombies and recycled PIDs that are not our pipewire.
+    return is_cinegain_pipewire(pid)
 
 
 class SinkProcesses:

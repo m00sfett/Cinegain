@@ -317,6 +317,41 @@ class TestRuntimeConf(unittest.TestCase):
         self.assertIn("priority.session   = 500", conf)
 
 
+class TestProcessMatching(unittest.TestCase):
+    """Stopping Cinegain must never kill a process that only mentions the words."""
+
+    def setUp(self):
+        import cinegain_profiles
+        self.mod = cinegain_profiles
+        self._orig = cinegain_profiles._read_argv
+
+    def tearDown(self):
+        self.mod._read_argv = self._orig
+
+    def check(self, argv):
+        self.mod._read_argv = lambda pid: argv
+        return self.mod.is_cinegain_pipewire(1)
+
+    def test_real_filter_chain(self):
+        self.assertTrue(self.check(["/usr/bin/pipewire", "-c", "/run/user/1000/cinegain/runtime-standard.conf"]))
+        self.assertTrue(self.check(["/usr/bin/pipewire", "-c", "/tmp/cinegain-runtime-1000.conf"]))
+
+    def test_shell_mentioning_the_words_is_spared(self):
+        self.assertFalse(self.check(["/usr/bin/zsh", "-c", "pgrep -af 'pipewire -c' | grep cinegain"]))
+        self.assertFalse(self.check(["/usr/bin/pipewire"]))  # the system daemon itself
+        self.assertFalse(self.check(["/usr/bin/pipewire", "-c", "/etc/pipewire/other.conf"]))
+
+    def test_live_shell_process_is_spared(self):
+        import subprocess
+        p = subprocess.Popen(["sh", "-c", "sleep 5 # pipewire -c /x/cinegain.conf"])
+        try:
+            self.assertFalse(self._orig(p.pid) == [])
+            self.assertNotIn(p.pid, self.mod.cinegain_pipewire_pids())
+        finally:
+            p.kill()
+            p.wait()
+
+
 class TestPulseParsing(unittest.TestCase):
     def test_json(self):
         data = [{"index": 7, "sink": 53, "mute": False, "corked": True,
