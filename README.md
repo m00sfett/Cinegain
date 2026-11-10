@@ -4,7 +4,7 @@
 [![PipeWire](https://img.shields.io/badge/Audio-PipeWire-blue.svg)](https://pipewire.org)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow.svg)](https://www.python.org/)
 [![GUI: PyQt6](https://img.shields.io/badge/GUI-PyQt6-green.svg)](https://riverbankcomputing.com/software/pyqt/)
-[![Version](https://img.shields.io/badge/Release-v0.2.0-orange.svg)](https://github.com/m00sfett/cinegain/releases)
+[![Version](https://img.shields.io/badge/Release-v0.3.0-orange.svg)](https://github.com/m00sfett/cinegain/releases)
 
 > **Realtime Volume Booster, Dialogue Clarity Optimizer & Film Audio Processor for Linux (PipeWire).**
 
@@ -32,14 +32,14 @@ Unlike simple equalizers or aggressive compressors that distort the entire mix, 
   Control every parameter using the keyboard (`↑`/`↓` to switch sliders, `←`/`→` for 1.0 dB steps, `Shift + ←`/`→` for 0.1 dB fine tuning).
 - **8 Auto-Saving User Presets:**
   Store and recall your own custom audio profiles with live change indicators and slot renaming.
-- **Per-Program Profiles, Remembered Permanently:**
-  Every program that ever played audio stays in the list, with its choice saved in `~/.config/cinegain/apps.json`. Pick a profile per program: *Off* (direct to the speakers), *Standard* (the main sliders) or any factory preset or user slot. Programs on different profiles are processed by separate filter sinks, so a film in the browser and music in Spotify can play at the same time with different settings. Electron apps that pretend to be "Chromium" (e.g. the ChatGPT desktop client) are told apart by their binary.
+- **Settings per Program, Remembered Permanently:**
+  Every program that ever played audio stays in the sidebar (`~/.config/cinegain/apps.json`). Select a program and the presets and sliders edit exactly that program; untouched programs follow *Standard*. A program with its own setting runs through its own filter sink, so a film in the browser and music in Spotify play at the same time with different processing. A switch per program decides whether it goes through Cinegain at all. Electron apps that pretend to be "Chromium" (e.g. the ChatGPT desktop client) are told apart by their binary.
 - **Reset Everything:**
   One button (or `cinegain reset`) returns sliders, user presets, program list and language to factory settings. The previous state is backed up to `~/.local/share/cinegain/backups/` first.
 - **Multi-Language Support (19 Languages):**
   Instant live translation switcher in the title bar (Material Translate `A / 文` icon): English, German, Spanish, French, Italian, Portuguese, Dutch, Polish, Turkish, Russian, Ukrainian, Arabic, Hindi, Indonesian, Vietnamese, Japanese, Korean, Simplified Chinese, Traditional Chinese.
 - **Headless Daemon & CLI:**
-  Full command-line interface (`cinegain start`, `stop`, `status`, `set`, `preset`, `route`, `watch`, `apps`, `profiles`, `reset`) for scripting or headless desktop environments.
+  Full command-line interface (`cinegain start`, `stop`, `status`, `set`, `preset`, `route`, `watch`, `apps`, `templates`, `reset`) for scripting or headless desktop environments.
 
 ---
 
@@ -103,13 +103,13 @@ Download the `.deb` package from the [Releases page](https://github.com/m00sfett
 
 ```bash
 sudo apt update
-sudo apt install ./cinegain_0.2.0_amd64.deb
+sudo apt install ./cinegain_0.3.0_amd64.deb
 ```
 
 *Or build the `.deb` package yourself:*
 ```bash
 ./packaging/debian/build-deb.sh
-sudo apt install ./packaging/cinegain_0.2.0_amd64.deb
+sudo apt install ./packaging/cinegain_0.3.0_amd64.deb
 ```
 
 > [!NOTE]
@@ -122,18 +122,18 @@ sudo apt install ./packaging/cinegain_0.2.0_amd64.deb
 Download the `.rpm` package from the [Releases page](https://github.com/m00sfett/cinegain/releases) or build it using the spec file:
 
 ```bash
-sudo dnf install ./cinegain-0.2.0-1.x86_64.rpm
+sudo dnf install ./cinegain-0.3.0-1.x86_64.rpm
 ```
 
 ---
 
 ### Method 5: Standalone Release Archive (Universal Tarball)
 
-Download `cinegain-0.2.0-linux-x86_64.tar.gz` from [GitHub Releases](https://github.com/m00sfett/cinegain/releases):
+Download `cinegain-0.3.0-linux-x86_64.tar.gz` from [GitHub Releases](https://github.com/m00sfett/cinegain/releases):
 
 ```bash
-tar -xzvf cinegain-0.2.0-linux-x86_64.tar.gz
-cd cinegain-0.2.0-linux-x86_64
+tar -xzvf cinegain-0.3.0-linux-x86_64.tar.gz
+cd cinegain-0.3.0-linux-x86_64
 ./install.sh        # Installs for current user (~/.local)
 # or: sudo ./install.sh --system  # Installs system-wide (/usr/local)
 ```
@@ -176,7 +176,9 @@ cinegain-gui
 - **Factory Presets:** Click any preset button (`+5 dB`, `+10 dB`, `+15 dB`, `+20 dB`, `+25 dB`, `Film & Serie`, `Night Mode`, `Neutral 0 dB`).
 - **User Slots:** Click any empty slot (`User 1`–`8`) to save the current slider state. Left-click to recall; right-click to rename or clear.
 - **Keyboard Controls:** Use `↑` / `↓` to select sliders. Press `←` / `→` for 1.0 dB steps, or hold `Shift` for fine 0.1 dB steps.
-- **Programs & Profiles:** Choose a profile per program from its drop-down. Right-click a program to rename it, set its own volume back to 100 % or forget it. A yellow `🔉 40 %` badge means the program itself is turned down; one click fixes it.
+- **Programs (sidebar):** Click *Standard* or a program; the header above the presets names what you are editing. The first slider move or preset gives a program its own setting, *Back to Standard* discards it. The switch in each row routes the program through Cinegain or straight to the speakers. Programs silent for more than a week fold away under *Silent for a while*. Right-click a program to rename it, set its own volume back to 100 % or forget it. A yellow volume badge (e.g. `40 %`) means the program itself is turned down; one click fixes it.
+- **Presets & user slots are templates:** A click loads the values into the selected program (or Standard). Right-click a user slot to store the current values in it, rename or clear it.
+- **Keyboard:** `Page Up` / `Page Down` switch the program; arrows work as before.
 - **Reset everything:** The button in the bottom left asks for confirmation, backs up the current state and restarts the window in factory state.
 
 ### 2. Command-Line Interface (CLI)
@@ -206,13 +208,15 @@ cinegain preset clean_linear
 cinegain route
 cinegain watch
 
-# Programs and their profiles:
-cinegain apps                         # list every program ever heard
-cinegain apps set spotify night_mode  # Spotify gets its own Night Mode sink
-cinegain apps set chatgpt off         # ChatGPT bypasses Cinegain
+# Programs and their settings:
+cinegain apps                          # list every program ever heard
+cinegain apps load spotify night_mode  # Spotify gets its own setting from the Night Mode preset
+cinegain apps standard spotify         # Spotify follows Standard again
+cinegain apps off chatgpt              # ChatGPT bypasses Cinegain
+cinegain apps on chatgpt
 cinegain apps rename chatgpt "ChatGPT Voice"
 cinegain apps forget mpv
-cinegain profiles                     # list usable profiles
+cinegain templates                     # presets and user slots you can load
 
 # Reset everything to factory settings (state is backed up first):
 cinegain reset
