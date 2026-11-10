@@ -16,4 +16,4 @@ Cinegain ist ein Desktop- und System-Tray-Werkzeug für Linux (PipeWire), das zw
 - **Primäre Aktionen:**
   1. Direkt-Verstärkung (`input_db`, `-12 dB` bis `+25 dB`) regeln oder einen Schnell-Boost (`+5` bis `+25 dB` / Film-Profil / Eigenes Preset) wählen.
   2. Sprachfokus und Dynamik feinabstimmen.
-  3. Festlegen, welche laufenden Anwendungen durch Cinegain geleitet werden (mit 5-Minuten-Gedächtnis bei kurzen Pausen).
+  3. Pro Programm festlegen, ob und mit welchem Profil es durch Cinegain läuft. Die Liste bleibt dauerhaft gespeichert, auch über Pausen und Neustarts hinweg.
