@@ -155,6 +155,20 @@ class TestProgramEditing(unittest.TestCase):
         self.win.flush_pending_params()
         self.assertEqual(paths.read_json(paths.USER_PRESETS_FILE)["user_1"]["params"]["input_db"], 1.0)
 
+    def test_brand_link_click_opens_url_and_does_not_crash(self):
+        from unittest import mock
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtTest import QTest
+        label = self.gui.brand_label(self.gui.BRAND_ROTESON_PATH, 50, "t", "https://roteson.de")
+        label.show()
+        with mock.patch.object(self.gui.QDesktopServices, "openUrl", return_value=True) as opened:
+            QTest.mouseClick(label, Qt.MouseButton.LeftButton)
+        self.assertEqual(opened.call_args[0][0].toString(), "https://roteson.de")
+        with mock.patch.object(self.gui.QDesktopServices, "openUrl", return_value=False), \
+                mock.patch.object(self.gui.subprocess, "Popen") as popen:
+            QTest.mouseClick(label, Qt.MouseButton.LeftButton)
+        self.assertEqual(popen.call_args[0][0], ["xdg-open", "https://roteson.de"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

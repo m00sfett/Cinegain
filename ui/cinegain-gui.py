@@ -22,7 +22,7 @@ elif os.path.exists(os.path.expanduser("~/.local/bin/cinegain")):
 else:
     BIN_PATH = "cinegain"
 
-APP_VERSION = "0.3.1"
+APP_VERSION = "0.3.2"
 
 os.environ.setdefault("CINEGAIN_BASE_DIR", BASE_DIR)
 import cinegain_paths as paths  # noqa: E402
@@ -408,9 +408,33 @@ QMenu::separator {
 """
 
 
+def open_link(url):
+    """Opens a URL in the default browser; falls back to xdg-open. Never raises."""
+    try:
+        if QDesktopServices.openUrl(QUrl(url)):
+            return
+        subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except Exception:
+        pass
+
+
+class LinkLabel(QLabel):
+    """Label that opens a URL on left click."""
+
+    def __init__(self, url, parent=None):
+        super().__init__(parent)
+        self._url = url
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            open_link(self._url)
+        super().mousePressEvent(event)
+
+
 def brand_label(path, size, tooltip, link=None):
     """Crisp logo label for the banner (HiDPI-aware); optional link opens in the browser."""
-    lbl = QLabel()
+    lbl = LinkLabel(link) if link else QLabel()
     lbl.setFixedSize(size, size)
     lbl.setStyleSheet("background: transparent; border: none;")
     lbl.setToolTip(tooltip)
@@ -431,7 +455,6 @@ def brand_label(path, size, tooltip, link=None):
     lbl.setPixmap(pix)
     if link:
         lbl.setCursor(Qt.CursorShape.PointingHandCursor)
-        lbl.mousePressEvent = lambda event, url=link: QDesktopServices.openUrl(QUrl(url))
     return lbl
 
 
