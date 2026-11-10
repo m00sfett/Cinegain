@@ -15,6 +15,17 @@ Categories follow the standard Keep a Changelog taxonomy: `Added`, `Changed`, `D
 
 ---
 
+## [0.1.1] - 2026-11-10
+
+### Fixed
+- **Indonesian UI was never selected:** The translation was keyed as `in`, the obsolete ISO 639-1 code, so Indonesian system locales (`id_ID`) fell back to English. The key is now `id`. The legacy code `in` is still accepted for system locales and saved configs.
+
+### Changed
+- **Limiter description corrected:** The limiter works on sample peaks with a 5 ms look-ahead, not on true peaks. Measured overshoot above the ceiling is about 0.2 dB, and the output never exceeds 0 dBFS. README, package descriptions and the German ceiling tooltip say so now. The DSP behaviour itself is unchanged.
+- **Regression tests:** `tests/test_limiter_ceiling.py` checks the limiter ceiling against a fresh build of `cinegain.c`. `tests/test_i18n.py` checks the language mapping and the translation key set.
+
+---
+
 ## [0.1.0] - 2026-11-09
 
 ### Added

@@ -2,7 +2,7 @@
 # Builds a native Debian/Ubuntu .deb package for Cinegain
 set -e
 
-VERSION="0.1.0"
+VERSION="0.1.1"
 ARCH="amd64"
 PKG_DIR="/tmp/cinegain-deb-build/cinegain_${VERSION}_${ARCH}"
 
@@ -51,7 +51,7 @@ Description: Realtime volume booster & dialogue clarity optimizer for PipeWire
  Cinegain is a dedicated realtime audio DSP processor designed for movies, TV
  shows, laptops, and stream media on Linux. Features an intelligent dialogue
  leveler, presence boost, center/side isolation, soft-knee compressor, and a
- true-peak look-ahead limiter preventing digital clipping.
+ look-ahead peak limiter that keeps the output below full scale.
 EOF
 
 dpkg-deb --build "$PKG_DIR" "$SCRIPT_DIR/packaging/cinegain_${VERSION}_${ARCH}.deb"

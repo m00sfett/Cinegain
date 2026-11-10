@@ -954,7 +954,7 @@ class CinegainMainWindow(QMainWindow):
         footer_layout = QHBoxLayout()
         footer_layout.setContentsMargins(4, 2, 4, 0)
         self.lbl_footer = QLabel(
-            f'<span style="color:#A79B8C;">Cinegain v0.1.0 · AGPLv3 · </span>'
+            f'<span style="color:#A79B8C;">Cinegain v0.1.1 · AGPLv3 · </span>'
             f'<a href="https://roteson.de" style="color:#FFD21F; text-decoration:none; font-weight:700;">roteson.de</a>'
         )
         self.lbl_footer.setOpenExternalLinks(True)

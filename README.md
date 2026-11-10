@@ -4,13 +4,13 @@
 [![PipeWire](https://img.shields.io/badge/Audio-PipeWire-blue.svg)](https://pipewire.org)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow.svg)](https://www.python.org/)
 [![GUI: PyQt6](https://img.shields.io/badge/GUI-PyQt6-green.svg)](https://riverbankcomputing.com/software/pyqt/)
-[![Version](https://img.shields.io/badge/Release-v0.1.0-orange.svg)](https://github.com/m00sfett/cinegain/releases)
+[![Version](https://img.shields.io/badge/Release-v0.1.1-orange.svg)](https://github.com/m00sfett/cinegain/releases)
 
 > **Realtime Volume Booster, Dialogue Clarity Optimizer & Film Audio Processor for Linux (PipeWire).**
 
-Cinegain solves the classic movie audio problem on Linux: **quiet, mumbled dialogues drowned out by deafening explosions and loud background music**. It also serves as a clean, distortion-free **system volume booster** capable of pushing media audio up to **+25 dB** with zero digital clipping.
+Cinegain solves the classic movie audio problem on Linux: **quiet, mumbled dialogues drowned out by deafening explosions and loud background music**. It also serves as a clean, distortion-free **system volume booster** capable of pushing media audio up to **+25 dB** while keeping the output below full scale (0 dBFS).
 
-Unlike simple equalizers or aggressive compressors that distort the entire mix, Cinegain runs a dedicated low-latency C99 LADSPA DSP filter chain directly inside PipeWire. It isolates the center speech channel, elevates quiet whispers, softens harsh transients, and caps peaks with a look-ahead brickwall limiter.
+Unlike simple equalizers or aggressive compressors that distort the entire mix, Cinegain runs a dedicated low-latency C99 LADSPA DSP filter chain directly inside PipeWire. It isolates the center speech channel, elevates quiet whispers, softens harsh transients, and caps peaks with a look-ahead peak limiter.
 
 ---
 
@@ -24,8 +24,8 @@ Unlike simple equalizers or aggressive compressors that distort the entire mix, 
   Selectively boosts the core consonant frequencies of human speech without making the audio sound harsh or tinny.
 - **Mid/Side Acoustic Separation:**
   Separates center dialogue from stereo sound effects, music, and room reverberation.
-- **Zero-Overshoot True-Peak Limiter:**
-  Look-ahead brickwall limiter guarantees zero digital clipping or harsh digital distortion, even when pushed to maximum gain.
+- **Look-Ahead Peak Limiter:**
+  A 5 ms look-ahead on sample peaks pulls the output down to the configured ceiling (default -0.5 dBFS) before the peak arrives. Measured overshoot above the ceiling stays around 0.2 dB. A soft safety clip with a hard stop keeps the output at or below 0 dBFS, even when pushed to maximum gain. The limiter works on sample peaks only and does not detect inter-sample (true-peak) overs.
 - **Red-Yellow-Black Desktop Interface:**
   Modern two-column layout with high-contrast hero sliders, real-time feedback, and system tray integration.
 - **Full Keyboard Navigation:**
@@ -101,13 +101,13 @@ Download the `.deb` package from the [Releases page](https://github.com/m00sfett
 
 ```bash
 sudo apt update
-sudo apt install ./cinegain_0.1.0_amd64.deb
+sudo apt install ./cinegain_0.1.1_amd64.deb
 ```
 
 *Or build the `.deb` package yourself:*
 ```bash
 ./packaging/debian/build-deb.sh
-sudo apt install ./packaging/cinegain_0.1.0_amd64.deb
+sudo apt install ./packaging/cinegain_0.1.1_amd64.deb
 ```
 
 > [!NOTE]
@@ -120,18 +120,18 @@ sudo apt install ./packaging/cinegain_0.1.0_amd64.deb
 Download the `.rpm` package from the [Releases page](https://github.com/m00sfett/cinegain/releases) or build it using the spec file:
 
 ```bash
-sudo dnf install ./cinegain-0.1.0-1.x86_64.rpm
+sudo dnf install ./cinegain-0.1.1-1.x86_64.rpm
 ```
 
 ---
 
 ### Method 5: Standalone Release Archive (Universal Tarball)
 
-Download `cinegain-0.1.0-linux-x86_64.tar.gz` from [GitHub Releases](https://github.com/m00sfett/cinegain/releases):
+Download `cinegain-0.1.1-linux-x86_64.tar.gz` from [GitHub Releases](https://github.com/m00sfett/cinegain/releases):
 
 ```bash
-tar -xzvf cinegain-0.1.0-linux-x86_64.tar.gz
-cd cinegain-0.1.0-linux-x86_64
+tar -xzvf cinegain-0.1.1-linux-x86_64.tar.gz
+cd cinegain-0.1.1-linux-x86_64
 ./install.sh        # Installs for current user (~/.local)
 # or: sudo ./install.sh --system  # Installs system-wide (/usr/local)
 ```
@@ -236,7 +236,7 @@ Audio Input (L / R)
  [ Soft-Knee Feedforward Compressor (Threshold, Ratio, Makeup Gain) ]
        │
        ▼
- [ True-Peak Look-Ahead Brickwall Limiter (-0.5 dBFS Ceiling) ]
+ [ Look-Ahead Peak Limiter (-0.5 dBFS default ceiling) ]
        │
        ▼
  Audio Output (L / R to Speakers / Headphones)
