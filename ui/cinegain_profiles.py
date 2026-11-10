@@ -31,7 +31,7 @@ USER_SLOTS = tuple(f"user_{i}" for i in range(1, 9))
 DEFAULT_PARAMS = {
     "bypass": 0.0,
     "input_db": 0.0,
-    "highpass_hz": 20.0,
+    "highpass_hz": 10.0,
     "bass_db": 0.0,
     "dialog_db": 0.0,
     "dialog_hz": 2500.0,
@@ -354,3 +354,27 @@ def wait_for_node(node_name, timeout=3.0, step=0.15):
             return node_id
         time.sleep(step)
     return None
+
+
+METER_FORMAT = "<IIffff"
+METER_MAGIC = 0x434E4D31
+
+
+def read_meter(pid, runtime_dir=None):
+    """
+    Reads the plugin's meter file for a filter process.
+    Returns (seq, level_db, leveler_db, gr_db, limit_db) or None when unavailable.
+    """
+    import struct
+    if not pid:
+        return None
+    path = os.path.join(runtime_dir or paths.RUNTIME_DIR, f"meter-{pid}.bin")
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(struct.calcsize(METER_FORMAT))
+        magic, seq, level, leveler, gr, limit = struct.unpack(METER_FORMAT, raw)
+    except (OSError, struct.error):
+        return None
+    if magic != METER_MAGIC:
+        return None
+    return seq, level, leveler, gr, limit
