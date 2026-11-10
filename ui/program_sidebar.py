@@ -202,7 +202,7 @@ class ToggleSwitch(QAbstractButton):
         super().__init__(parent)
         self.setCheckable(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setFixedSize(QSize(38, 20))
 
     def sizeHint(self):
@@ -217,6 +217,9 @@ class ToggleSwitch(QAbstractButton):
         p.setPen(QPen(QColor(YELLOW if on else ("#A86B4A" if hover else BORDER)), 1.2))
         p.setBrush(QColor("#3D2C07" if on else "#080604"))
         p.drawRoundedRect(track, 8, 8)
+        if self.hasFocus():
+            p.setPen(QPen(QColor("#FFF1D6"), 2))
+            p.drawRoundedRect(track, 8, 8)
         knob_x = 20 if on else 4
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QColor(YELLOW if on else "#7A6A5C"))
@@ -232,6 +235,7 @@ class ProgramRow(QFrame):
 
     def __init__(self, key, parent=None):
         super().__init__(parent)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.key = key
         self.setObjectName("program_row")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -262,7 +266,7 @@ class ProgramRow(QFrame):
             self.badge = QPushButton()
             self.badge.setObjectName("volume_badge")
             self.badge.setCursor(Qt.CursorShape.PointingHandCursor)
-            self.badge.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            self.badge.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
             self.badge.setIconSize(QSize(14, 14))
             self.badge.clicked.connect(lambda: self.volume_clicked.emit(self.key))
             self.badge.hide()
@@ -272,6 +276,13 @@ class ProgramRow(QFrame):
             lay.addWidget(self.badge, 0, Qt.AlignmentFlag.AlignVCenter)
             lay.addWidget(self.switch, 0, Qt.AlignmentFlag.AlignVCenter)
 
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            self.clicked.emit(self.key)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit(self.key)
@@ -280,6 +291,7 @@ class ProgramRow(QFrame):
     def set_selected(self, selected, label):
         _set_prop(self, "selected", selected)
         _set_prop(self.name, "selected", selected)
+        self.setAccessibleName(label)
         self.name.setText(f"▶ {label}" if selected else label)
 
     def update_standard(self, selected):
@@ -347,14 +359,15 @@ class ProgramSidebar(QGroupBox):
         self.show_silent = False
         self.is_active = False
         self.setStyleSheet(SIDEBAR_STYLE)
-        self.setFixedWidth(300)
+        self.setMinimumWidth(190)
+        self.setMaximumWidth(300)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(8, 12, 8, 8)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.scroll.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         content = QWidget()
         content.setObjectName("program_list")
@@ -374,7 +387,7 @@ class ProgramSidebar(QGroupBox):
         self.silent_toggle = QPushButton()
         self.silent_toggle.setObjectName("silent_toggle")
         self.silent_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.silent_toggle.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.silent_toggle.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.silent_toggle.clicked.connect(self._toggle_silent)
         self.list.addWidget(self.silent_toggle)
         self.list.addStretch()

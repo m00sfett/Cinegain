@@ -15,6 +15,11 @@ Categories follow the standard Keep a Changelog taxonomy: `Added`, `Changed`, `D
 
 ---
 
+## [0.3.4] - 2026-11-10
+
+- Die GUI zeigt zuerst Filmprofile und Hauptregler. Weitere Einstellungen öffnen Feinregler, Boost-Stufen und eigene Vorlagen. Kleine Fenster unterstützen Scrollen.
+- Tab wechselt zwischen Bedienelementen, F6 zwischen Reglerspalten. Geladene Vorlagen bleiben bis zum ausdrücklichen Speichern erhalten. Bei fehlender Statusantwort zeigt die GUI einen unbekannten Zustand und prüft erneut.
+
 ## [0.3.3] - 2026-11-10
 
 ### Added

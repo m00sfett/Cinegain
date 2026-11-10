@@ -142,12 +142,37 @@ class TestProgramEditing(unittest.TestCase):
         self.assertIn("Google Chrome", out.getvalue())
         self.assertIn("own", out.getvalue())
 
-    def test_loaded_user_slot_saves_slider_changes_back(self):
+    def test_unknown_status_recovers_to_confirmed_inactive(self):
+        self.gui.run_cinegain = lambda *args: ("", 1)
+        self.win.on_heartbeat()
+        self.assertFalse(self.win.btn_power.isEnabled())
+        self.assertEqual(self.win.lbl_status.text(), self.gui.t("unknown_status"))
+        self.gui.run_cinegain = lambda *args: ('{"active": false}', 1)
+        self.win.on_heartbeat()
+        self.assertTrue(self.win.btn_power.isEnabled())
+        self.assertEqual(self.win.lbl_status.text(), self.gui.t("status_inactive"))
+
+    def test_keyboard_and_details(self):
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtTest import QTest
+        self.win.show()
+        self.slider().setFocus()
+        self.app.processEvents()
+        QTest.keyClick(self.slider(), Qt.Key.Key_Tab)
+        self.assertFalse(self.slider().hasFocus())
+        self.assertTrue(self.win.grp_adv.isHidden())
+        self.win.details.setFocus()
+        QTest.keyClick(self.win.details, Qt.Key.Key_Space)
+        self.assertTrue(self.win.grp_adv.isVisible())
+        self.assertTrue(self.win.user_preset_buttons["user_1"].isVisible())
+
+    def test_loaded_user_slot_preserves_template_until_explicit_save(self):
         self.win.on_user_preset_clicked("user_1")  # filled slot: loads into Standard
         self.slider("input_db").setValue(77)
         self.win.flush_pending_params()
         saved = paths.read_json(paths.USER_PRESETS_FILE)["user_1"]["params"]
-        self.assertAlmostEqual(saved["input_db"], 7.7)
+        self.assertEqual(saved["input_db"], 1.0)
+        self.win._overwrite_user_slot("user_1")
         self.assertEqual(self.win.user_presets["user_1"]["params"]["input_db"], 7.7)
 
     def test_user_slot_stops_auto_saving_after_factory_preset_or_program_switch(self):
