@@ -343,9 +343,13 @@ class TestProcessMatching(unittest.TestCase):
 
     def test_live_shell_process_is_spared(self):
         import subprocess
-        p = subprocess.Popen(["sh", "-c", "sleep 5 # pipewire -c /x/cinegain.conf"])
+        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)  # pipewire -c /x/cinegain.conf"])
         try:
-            self.assertFalse(self._orig(p.pid) == [])
+            import time
+            deadline = time.time() + 2
+            while "pipewire -c" not in " ".join(self._orig(p.pid)) and time.time() < deadline:
+                time.sleep(0.02)  # the child may not have exec'd yet
+            self.assertIn("pipewire -c", " ".join(self._orig(p.pid)))
             self.assertNotIn(p.pid, self.mod.cinegain_pipewire_pids())
         finally:
             p.kill()
