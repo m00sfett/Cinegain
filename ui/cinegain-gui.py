@@ -22,16 +22,19 @@ elif os.path.exists(os.path.expanduser("~/.local/bin/cinegain")):
 else:
     BIN_PATH = "cinegain"
 
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.3.1"
 
 os.environ.setdefault("CINEGAIN_BASE_DIR", BASE_DIR)
 import cinegain_paths as paths  # noqa: E402
-from cinegain_profiles import ProfileCatalog, full_params  # noqa: E402
+from cinegain_profiles import DEFAULT_PARAMS, ProfileCatalog, full_params  # noqa: E402
 from cinegain_router import Router  # noqa: E402
 from i18n import t, set_language, get_available_languages, get_current_language  # noqa: E402
 
 PRESETS_PATH = os.path.join(BASE_DIR, "presets", "presets.json")
 ICON_PATH = os.path.join(BASE_DIR, "assets", "icons", "cinegain.png")
+LOGO_SVG_PATH = os.path.join(BASE_DIR, "assets", "icons", "cinegain.svg")
+BRAND_ROTESON_PATH = os.path.join(BASE_DIR, "assets", "icons", "brand-roteson.png")
+BRAND_R2W2_PATH = os.path.join(BASE_DIR, "assets", "icons", "brand-r2w2.png")
 CONFIG_DIR = paths.CONFIG_DIR
 USER_PRESETS_FILE = paths.USER_PRESETS_FILE
 CONFIG_FILE = paths.CONFIG_FILE
@@ -56,8 +59,8 @@ try:
         QInputDialog,
         QMessageBox,
     )
-    from PyQt6.QtGui import QIcon, QAction, QKeyEvent, QPainter, QPixmap
-    from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QByteArray, QPoint
+    from PyQt6.QtGui import QIcon, QAction, QKeyEvent, QPainter, QPixmap, QDesktopServices
+    from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QByteArray, QPoint, QUrl
     from PyQt6.QtSvg import QSvgRenderer
 except ImportError:
     print("Error: PyQt6 is required to run the Cinegain desktop interface.")
@@ -405,6 +408,33 @@ QMenu::separator {
 """
 
 
+def brand_label(path, size, tooltip, link=None):
+    """Crisp logo label for the banner (HiDPI-aware); optional link opens in the browser."""
+    lbl = QLabel()
+    lbl.setFixedSize(size, size)
+    lbl.setStyleSheet("background: transparent; border: none;")
+    lbl.setToolTip(tooltip)
+    if path.endswith(".svg"):
+        renderer = QSvgRenderer(path)
+        dpr = 2.0
+        pix = QPixmap(int(size * dpr), int(size * dpr))
+        pix.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pix)
+        renderer.render(painter)
+        painter.end()
+    else:
+        pix = QPixmap(path)
+        dpr = max(1.0, pix.width() / size)
+        pix = pix.scaled(int(size * dpr), int(size * dpr), Qt.AspectRatioMode.KeepAspectRatio,
+                         Qt.TransformationMode.SmoothTransformation)
+    pix.setDevicePixelRatio(dpr)
+    lbl.setPixmap(pix)
+    if link:
+        lbl.setCursor(Qt.CursorShape.PointingHandCursor)
+        lbl.mousePressEvent = lambda event, url=link: QDesktopServices.openUrl(QUrl(url))
+    return lbl
+
+
 def amp(text):
     """Escapes '&' so Qt shows it instead of turning it into a keyboard mnemonic."""
     return text.replace("&", "&&")
@@ -735,12 +765,21 @@ class CinegainMainWindow(QMainWindow):
         self.btn_quit.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_quit.clicked.connect(self.quit_app)
 
+        if os.path.exists(LOGO_SVG_PATH):
+            hdr.addWidget(brand_label(LOGO_SVG_PATH, 46, "Cinegain"), 0, Qt.AlignmentFlag.AlignVCenter)
         hdr.addLayout(title_box)
         hdr.addStretch()
         hdr.addWidget(self.lbl_status)
         hdr.addWidget(self.btn_power)
         hdr.addWidget(self.btn_lang)
         hdr.addWidget(self.btn_quit)
+        brands = [(BRAND_ROTESON_PATH, "roteson.de", "https://roteson.de"),
+                  (BRAND_R2W2_PATH, "R²W² Development", None)]
+        brands = [b for b in brands if os.path.exists(b[0])]
+        if brands:
+            hdr.addSpacing(6)
+            for path, tip, link in brands:
+                hdr.addWidget(brand_label(path, 50, tip, link), 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(banner)
 
         # Body: program sidebar (left) selects what the editor (right) changes.
@@ -1006,6 +1045,8 @@ class CinegainMainWindow(QMainWindow):
         tip_key=None,
         is_hero=False,
     ):
+        # Start from the neutral factory default; real values arrive with the first status.
+        def_val = DEFAULT_PARAMS.get(param_name, def_val)
         idx = len(self.slider_order)
         self.slider_order.append(param_name)
 

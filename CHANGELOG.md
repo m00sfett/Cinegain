@@ -15,6 +15,14 @@ Categories follow the standard Keep a Changelog taxonomy: `Added`, `Changed`, `D
 
 ---
 
+## [0.3.1] - 2026-11-10
+
+### Changed
+- **Standard starts neutral:** Fresh installs and the factory reset start Standard with the values of the "Neutral (0 dB)" preset (0 dB, flat EQ, leveler and compressor off) instead of the dialogue-boost values. Programs that follow Standard sound untouched until you change it. Existing saved Standard values are not changed by the update.
+- **Logos in the title banner:** the Cinegain logo left of the title, the roteson.de emblem (opens roteson.de) and the R2W2 Development emblem right of the quit button.
+
+---
+
 ## [0.3.0] - 2026-11-10
 
 ### Added
