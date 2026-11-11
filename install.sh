@@ -7,7 +7,7 @@
 
 set -e
 
-VERSION="0.3.5"
+VERSION="0.3.6"
 REPO_URL="https://github.com/m00sfett/cinegain.git"
 
 # Detect if piped via curl | bash

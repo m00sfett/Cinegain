@@ -15,6 +15,14 @@ Categories follow the standard Keep a Changelog taxonomy: `Added`, `Changed`, `D
 
 ---
 
+## [0.3.6] - 2026-11-11
+
+### Fixed
+- **Zwei Cinegain-Instanzen schoben Streams hin und her (#18):** Lief eine zweite GUI (oder `cinegain watch` neben der GUI), verteilten beide die Streams. Bei der Installation von 0.3.5 wechselte Chrome so 15 s lang alle 1,5 s zwischen eigener Einstellung und Standard.
+  - Jetzt verteilt nur ein Prozess die Streams. Dafür gibt es eine Sperre (`flock` auf `$XDG_RUNTIME_DIR/cinegain/router.lock`), die nach einem Absturz von selbst verschwindet.
+  - Ein zweiter GUI-Start holt das laufende Fenster nach vorn und beendet sich.
+  - `cinegain watch` startet nicht, solange die GUI läuft. Umgekehrt meldet die GUI, wer die Streams bereits verteilt.
+
 ## [0.3.5] - 2026-11-11
 
 ### Added
