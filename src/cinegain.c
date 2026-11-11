@@ -335,9 +335,17 @@ static void activate(LADSPA_Handle h)
 }
 
 
+/* Control value clamped to the port's LADSPA range; NaN/Inf or an unconnected
+ * port give the fallback (the documented default). */
 static inline float ctl(Cinegain *k, int p, float fallback)
 {
-	return k->port[p] ? *k->port[p] : fallback;
+	if (!k->port[p]) return fallback;
+	float v = *k->port[p];
+	if (!isfinite(v)) return fallback;
+	const LADSPA_PortRangeHint *h = &port_hints[p];
+	if ((h->HintDescriptor & LADSPA_HINT_BOUNDED_BELOW) && v < h->LowerBound) return h->LowerBound;
+	if ((h->HintDescriptor & LADSPA_HINT_BOUNDED_ABOVE) && v > h->UpperBound) return h->UpperBound;
+	return v;
 }
 
 /* Moves every applied gain towards its control value: down at once, up at

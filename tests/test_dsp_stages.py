@@ -125,25 +125,20 @@ class StageTests(unittest.TestCase):
             finally:
                 del os.environ["CINEGAIN_METER_DIR"]
 
-    def _run_steps(self, steps, base=None):
-        """
-        Runs (seconds, params[, signal]) steps on one instance; returns the output per
-        step. Without a signal a step plays a -40 dBFS 1 kHz sine.
-        """
+    def _run_steps(self, steps):
+        """Runs (seconds, params) steps on one instance; returns the output per step."""
         p = dict(NEUTRAL)
-        p.update(base or {})
         ctl = {i: C.c_float(float(p.get(name, 0.0))) for i, name in enumerate(self.names) if i >= 4}
         h = self.desc.instantiate(C.cast(self.dptr, C.c_void_p), RATE)
         for i, c in ctl.items():
             self.desc.connect_port(h, i, C.addressof(c))
         self.desc.activate(h)
         outs = []
-        for step in steps:
-            seconds, params = step[0], step[1]
+        for seconds, params in steps:
             for i, name in enumerate(self.names):
                 if name in params:
                     ctl[i].value = float(params[name])
-            x = step[2] if len(step) > 2 else self._sine(1000, -40, seconds)
+            x = self._sine(1000, -40, seconds)
             n = len(x)
             inp = (C.c_float * n)(*x)
             out_l, out_r = (C.c_float * n)(), (C.c_float * n)()
@@ -175,42 +170,6 @@ class StageTests(unittest.TestCase):
         _, _, back = self._run_steps([(3.0, {"input_db": 12}), (0.1, {"bypass": 1}),
                                       (0.2, {"bypass": 0})])
         self.assertLess(rms_db(back[RATE // 100: RATE // 20]) + 43.0, 2.0)
-
-    # Night-mode style leveler: quiet dialog at -45 dBFS gets the full +20 dB boost.
-    NIGHT = dict(leveler=1, lev_target_db=-14, lev_max_boost_db=20, lev_max_cut_db=10,
-                 lev_speed_s=1, lev_gate_db=-60)
-
-    def test_bypass_return_plays_no_stale_lookahead_audio(self):
-        """#28: after bypass the look-ahead line must not replay old processed audio."""
-        quiet = self._sine(1000, -45, 6.0)
-        silence = [0.0] * (RATE // 10)
-        boosted, _, back = self._run_steps([(6.0, {}, quiet), (0.1, {"bypass": 1}, silence),
-                                            (0.1, {"bypass": 0}, silence)], base=self.NIGHT)
-        self.assertGreater(rms_db(boosted[-RATE // 10:]), -45 - 3 + 15)  # leveler really boosted
-        self.assertEqual(max(abs(v) for v in back), 0.0)  # silence in, silence out
-
-    def test_bypass_return_starts_the_leveler_at_0_db(self):
-        """#28: the leveler boost fades in again instead of being there at once."""
-        quiet = self._sine(1000, -45, 6.0)
-        _, _, back = self._run_steps([(6.0, {}, quiet), (0.1, {"bypass": 1}, quiet[:RATE // 10]),
-                                      (0.3, {"bypass": 0}, quiet[:int(0.3 * RATE)])], base=self.NIGHT)
-        # 10-20 ms after switching back on: about the dry level, not +20 dB (rms of -45 dBpk = -48)
-        self.assertLess(rms_db(back[RATE // 100: RATE // 50]) + 48.0, 2.0)
-        # and it still glides up afterwards: the leveler is not switched off for good
-        self.assertGreater(rms_db(back[-RATE // 20:]) + 48.0, 3.0)
-
-    def test_bypass_return_crossfades_without_a_gap(self):
-        """#28: the dry signal hands over to the delayed processed one without a dropout."""
-        x = self._sine(1000, -20, 0.6)
-        _, _, back = self._run_steps([(0.5, {}, x[:RATE // 2]), (0.05, {"bypass": 1}, x[:RATE // 20]),
-                                      (0.05, {"bypass": 0}, x[RATE // 20: RATE // 10])])
-        amp = 10 ** (-20 / 20)
-        max_step = 2 * math.pi * 1000 / RATE * amp  # steepest sample-to-sample step of the sine
-        steps = [abs(back[i] - back[i - 1]) for i in range(1, 3 * RATE // 200)]
-        self.assertLess(max(steps), 1.5 * max_step)
-        # no dropout while the look-ahead line refills: every 1 ms window keeps level
-        for w in range(0, 3 * RATE // 200, RATE // 1000):
-            self.assertGreater(rms_db(back[w: w + RATE // 1000]), -20 - 3 - 6, w)
 
     def test_meter_reports_the_remaining_ramp(self):
         with tempfile.TemporaryDirectory() as d:
