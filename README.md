@@ -4,7 +4,7 @@
 [![PipeWire](https://img.shields.io/badge/Audio-PipeWire-blue.svg)](https://pipewire.org)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow.svg)](https://www.python.org/)
 [![GUI: PyQt6](https://img.shields.io/badge/GUI-PyQt6-green.svg)](https://riverbankcomputing.com/software/pyqt/)
-[![Version](https://img.shields.io/badge/Release-v0.3.5-orange.svg)](https://github.com/m00sfett/cinegain/releases)
+[![Version](https://img.shields.io/badge/Release-v0.3.6-orange.svg)](https://github.com/m00sfett/cinegain/releases)
 
 > **Realtime Volume Booster, Dialogue Clarity Optimizer & Film Audio Processor for Linux (PipeWire).**
 
@@ -47,7 +47,7 @@ Unlike simple equalizers or aggressive compressors that distort the entire mix, 
 
 ### Runtime Requirements
 All installation methods require:
-- **Linux OS** with **PipeWire** (>= 0.3.50) and `pipewire-pulse` (default audio stack on Arch, CachyOS, Fedora 34+, Ubuntu 22.10+, Debian 12+, openSUSE).
+- **Linux OS** with **PipeWire** (>= 0.3.60) and `pipewire-pulse` (default audio stack on Arch, CachyOS, Fedora 34+, Ubuntu 22.10+, Debian 12+, openSUSE).
 - **Python** (>= 3.10).
 - **PyQt6** (`python-pyqt6` / `python3-pyqt6`) for the graphical desktop interface. *(The headless CLI works without PyQt6).*
 - Standard C math library (`libm`).
@@ -103,13 +103,13 @@ Download the `.deb` package from the [Releases page](https://github.com/m00sfett
 
 ```bash
 sudo apt update
-sudo apt install ./cinegain_0.3.5_amd64.deb
+sudo apt install ./cinegain_0.3.6_amd64.deb
 ```
 
 *Or build the `.deb` package yourself:*
 ```bash
 ./packaging/debian/build-deb.sh
-sudo apt install ./packaging/cinegain_0.3.5_amd64.deb
+sudo apt install ./packaging/cinegain_0.3.6_amd64.deb
 ```
 
 > [!NOTE]
@@ -122,18 +122,18 @@ sudo apt install ./packaging/cinegain_0.3.5_amd64.deb
 Download the `.rpm` package from the [Releases page](https://github.com/m00sfett/cinegain/releases) or build it using the spec file:
 
 ```bash
-sudo dnf install ./cinegain-0.3.5-1.x86_64.rpm
+sudo dnf install ./cinegain-0.3.6-1.x86_64.rpm
 ```
 
 ---
 
 ### Method 5: Standalone Release Archive (Universal Tarball)
 
-Download `cinegain-0.3.5-linux-x86_64.tar.gz` from [GitHub Releases](https://github.com/m00sfett/cinegain/releases):
+Download `cinegain-0.3.6-linux-x86_64.tar.gz` from [GitHub Releases](https://github.com/m00sfett/cinegain/releases):
 
 ```bash
-tar -xzvf cinegain-0.3.5-linux-x86_64.tar.gz
-cd cinegain-0.3.5-linux-x86_64
+tar -xzvf cinegain-0.3.6-linux-x86_64.tar.gz
+cd cinegain-0.3.6-linux-x86_64
 ./install.sh        # Installs for current user (~/.local)
 # or: sudo ./install.sh --system  # Installs system-wide (/usr/local)
 ```
@@ -204,7 +204,8 @@ cinegain preset dialog_boost
 cinegain preset boost_10db
 cinegain preset clean_linear
 
-# Apply per-program routing once, or keep it applied without the GUI:
+# Apply per-program routing once, or keep it applied without the GUI
+# (watch refuses to start while the GUI runs: only one process may move streams):
 cinegain route
 cinegain watch
 
