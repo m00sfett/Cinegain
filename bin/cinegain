@@ -9,6 +9,7 @@ apps.json, config.json).
 """
 import argparse
 import json
+import math
 import os
 import signal
 import subprocess
@@ -45,7 +46,9 @@ from cinegain_profiles import (  # noqa: E402
     ProfileCatalog,
     SinkProcesses,
     cinegain_pipewire_pids,
+    clamp_param,
     find_node_id,
+    non_finite_keys,
     normalize_params,
     push_params,
     sink_name,
@@ -241,6 +244,9 @@ def _set_and_report(updates, preset, mode=None):
 
 def cmd_set(args):
     short_p = args.param.replace("cinegain:", "")
+    if not math.isfinite(args.value):
+        print(f"Refusing to set {args.param} to {args.value}: the value must be a finite number.", file=sys.stderr)
+        return 1
     updates = {short_p: args.value}
     if short_p != "bypass":
         updates["bypass"] = 0.0
@@ -248,7 +254,11 @@ def cmd_set(args):
         updates["leveler"] = 1.0 if float(args.value) > 0.05 else 0.0
     ok = _set_and_report(updates, "custom")
     if ok:
-        print(f"Set {args.param} = {args.value}")
+        clamped = clamp_param(short_p, args.value)
+        if clamped != args.value:
+            print(f"Set {args.param} = {clamped:g} (limited to the plugin range, requested {args.value:g})")
+        else:
+            print(f"Set {args.param} = {args.value}")
     else:
         print(f"Failed to set {args.param}", file=sys.stderr)
     return 0 if ok else 1
@@ -257,6 +267,10 @@ def cmd_set(args):
 def cmd_batch(args):
     try:
         raw = json.loads(args.json_params)
+        bad = non_finite_keys(raw)
+        if bad:
+            print(f"Refusing batch: not a finite number for {', '.join(bad)}.", file=sys.stderr)
+            return 1
         updates = normalize_params(raw)
     except (ValueError, AttributeError) as e:
         print(f"Invalid JSON for batch: {e}", file=sys.stderr)

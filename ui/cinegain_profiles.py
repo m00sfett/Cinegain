@@ -12,6 +12,7 @@ Factory presets (presets.json) and the 8 user slots (user_presets.json) are
 templates: loading one copies its values into the selected target.
 """
 import json
+import math
 import os
 import re
 import signal
@@ -59,6 +60,35 @@ DEFAULT_PARAMS = {
 }
 BOOL_PARAMS = {"bypass", "leveler"}
 
+# Control-port ranges of the LADSPA plugin (port_hints in src/cinegain.c; the plugin
+# clamps to the same limits). tests/test_modes_volume.py compares both tables.
+PARAM_LIMITS = {
+    "bypass": (0.0, 1.0),
+    "input_db": (-30.0, 40.0),
+    "highpass_hz": (10.0, 400.0),
+    "bass_db": (-15.0, 15.0),
+    "dialog_db": (-15.0, 15.0),
+    "dialog_hz": (300.0, 8000.0),
+    "dialog_q": (0.2, 5.0),
+    "treble_db": (-15.0, 15.0),
+    "mid_db": (-15.0, 15.0),
+    "side_db": (-30.0, 15.0),
+    "leveler": (0.0, 1.0),
+    "lev_target_db": (-45.0, -6.0),
+    "lev_max_boost_db": (0.0, 36.0),
+    "lev_max_cut_db": (0.0, 36.0),
+    "lev_speed_s": (0.2, 60.0),
+    "lev_gate_db": (-100.0, -20.0),
+    "comp_thresh_db": (-70.0, 0.0),
+    "comp_ratio": (1.0, 30.0),
+    "comp_knee_db": (0.0, 30.0),
+    "comp_attack_ms": (0.1, 500.0),
+    "comp_release_ms": (5.0, 5000.0),
+    "makeup_db": (-24.0, 40.0),
+    "lim_ceiling_db": (-24.0, 0.0),
+    "lim_release_ms": (5.0, 2000.0),
+}
+
 
 def _safe_id(profile_id):
     return re.sub(r"[^a-z0-9_]", "_", str(profile_id).lower())
@@ -76,14 +106,39 @@ def output_name(profile_id):
     return f"cinegain_output_{_safe_id(profile_id)}"
 
 
+def clamp_param(key, value):
+    """Value inside the plugin's port range (unknown keys pass unchanged)."""
+    low, high = PARAM_LIMITS.get(key, (None, None))
+    if low is None:
+        return value
+    return max(low, min(high, value))
+
+
 def normalize_params(raw):
+    """Short-key floats inside the plugin's port ranges; NaN/Inf and non-numbers are dropped (#37)."""
     out = {}
     for k, v in (raw or {}).items():
         try:
-            out[str(k).replace("cinegain:", "")] = float(v)
+            value = float(v)
         except (TypeError, ValueError):
             continue
+        if not math.isfinite(value):
+            continue
+        key = str(k).replace("cinegain:", "")
+        out[key] = clamp_param(key, value)
     return out
+
+
+def non_finite_keys(raw):
+    """Keys of a raw parameter dict whose number is NaN or infinite (the CLI refuses those)."""
+    bad = []
+    for k, v in (raw or {}).items():
+        try:
+            if not math.isfinite(float(v)):
+                bad.append(str(k))
+        except (TypeError, ValueError):
+            continue
+    return bad
 
 
 class ProfileCatalog:

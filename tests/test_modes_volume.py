@@ -231,6 +231,88 @@ class TestCliModes(unittest.TestCase):
         self.assertEqual(modes.load_standard()["params"]["comp_ratio"], 6.0)
 
 
+class TestParameterRange(unittest.TestCase):
+    """#37: values are finite and inside the plugin's port ranges before they are saved or pushed."""
+
+    def setUp(self):
+        for p in paths.USER_STATE_FILES:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(p)
+        self.cli = TestCliModes.cli
+
+    @classmethod
+    def setUpClass(cls):
+        TestCliModes.setUpClass()
+
+    def run_cli(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = self.cli.main(list(argv))
+        return rc, out.getvalue(), err.getvalue()
+
+    @staticmethod
+    def c_port_limits():
+        """Control-port ranges parsed from port_names / port_hints in src/cinegain.c."""
+        import re
+        with open(os.path.join(tr.BASE_DIR, "src", "cinegain.c"), encoding="utf-8") as f:
+            src = f.read()
+        names = re.findall(r'"([^"]+)"', re.search(r"port_names\[P_COUNT\] = \{(.*?)\};", src, re.S).group(1))
+        block = re.search(r"port_hints\[P_COUNT\] = \{(.*?)\n\};", src, re.S).group(1)
+        entries = re.findall(r"\{\s*([A-Za-z_| 0-9]+?)\s*,\s*(-?[0-9.]+)f?\s*,\s*(-?[0-9.]+)f?\s*\}", block)
+        assert len(entries) == len(names), (len(entries), len(names))
+        return {n: (float(lo), float(hi)) for n, (_h, lo, hi) in zip(names, entries)
+                if n.islower() and not n.startswith("meter_") and " " not in n}
+
+    def test_python_limits_match_the_plugin_port_hints(self):
+        from cinegain_profiles import DEFAULT_PARAMS, PARAM_LIMITS
+        self.assertEqual(PARAM_LIMITS, self.c_port_limits())
+        self.assertEqual(set(PARAM_LIMITS), set(DEFAULT_PARAMS))
+        for key, value in DEFAULT_PARAMS.items():
+            low, high = PARAM_LIMITS[key]
+            self.assertTrue(low <= value <= high, key)
+
+    def test_normalize_clamps_to_range_and_keeps_inside_values(self):
+        from cinegain_profiles import normalize_params
+        got = normalize_params({"lim_ceiling_db": 6, "input_db": 99, "makeup_db": -99, "comp_ratio": 0.2,
+                                "bass_db": 4.5, "cinegain:dialog_hz": 2500})
+        self.assertEqual(got, {"lim_ceiling_db": 0.0, "input_db": 40.0, "makeup_db": -24.0, "comp_ratio": 1.0,
+                               "bass_db": 4.5, "dialog_hz": 2500.0})
+
+    def test_normalize_drops_non_finite_numbers(self):
+        from cinegain_profiles import normalize_params
+        self.assertEqual(normalize_params({"bass_db": float("nan"), "treble_db": float("inf"),
+                                           "mid_db": float("-inf"), "side_db": 2}), {"side_db": 2.0})
+        sets = modes.apply_values("dynamic", None, {"bass_db": float("nan"), "lim_ceiling_db": 6})
+        self.assertEqual((sets["dynamic"]["bass_db"], sets["dynamic"]["lim_ceiling_db"]), (0.0, 0.0))
+
+    def test_cli_set_refuses_non_finite_values_and_saves_nothing(self):
+        self.assertEqual(self.run_cli("set", "bass_db", "2")[0], 0)
+        before = paths.read_json(paths.STATE_FILE)
+        for bad in (["nan"], ["inf"], ["--", "-inf"]):
+            rc, _out, err = self.run_cli("set", "bass_db", *bad)
+            self.assertNotEqual(rc, 0, bad)
+            self.assertIn("finite", err)
+        self.assertEqual(paths.read_json(paths.STATE_FILE), before)
+
+    def test_cli_batch_refuses_non_finite_values_and_saves_nothing(self):
+        self.assertEqual(self.run_cli("batch", '{"bass_db": 2}')[0], 0)
+        before = paths.read_json(paths.STATE_FILE)
+        for bad in ('{"bass_db": NaN}', '{"bass_db": 1, "treble_db": Infinity}', '{"mid_db": -Infinity}'):
+            rc, _out, err = self.run_cli("batch", bad)
+            self.assertNotEqual(rc, 0, bad)
+            self.assertIn("finite", err)
+        self.assertEqual(paths.read_json(paths.STATE_FILE), before)
+
+    def test_cli_set_clamps_the_ceiling_in_dynamic_mode(self):
+        self.assertEqual(self.run_cli("mode", "dynamic")[0], 0)
+        rc, out, _err = self.run_cli("set", "lim_ceiling_db", "6")
+        self.assertEqual(rc, 0)
+        self.assertIn("limited", out)
+        self.assertEqual(modes.load_standard()["params"]["lim_ceiling_db"], 0.0)
+        self.assertEqual(self.run_cli("set", "lim_ceiling_db", "-3")[0], 0)  # inside the range: untouched
+        self.assertEqual(modes.load_standard()["params"]["lim_ceiling_db"], -3.0)
+
+
 class TestUserSlots(unittest.TestCase):
     def test_six_slots_and_mode_inferred_for_old_slots(self):
         from cinegain_profiles import USER_SLOTS, ProfileCatalog
