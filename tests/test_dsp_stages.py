@@ -184,6 +184,38 @@ class StageTests(unittest.TestCase):
             finally:
                 del os.environ["CINEGAIN_METER_DIR"]
 
+    def assertSameSamples(self, a, b, msg=None):
+        """List equality without unittest's (very slow) diff of long sample lists."""
+        self.assertEqual(len(a), len(b), msg)
+        diff = next((i for i, (u, v) in enumerate(zip(a, b)) if u != v), None)
+        if diff is not None:
+            self.fail(f"samples differ from index {diff}: {a[diff]!r} != {b[diff]!r} {msg or ''}")
+
+    def test_control_values_are_clamped_and_finite(self):
+        """#37: out-of-range controls act like the port bound, NaN/Inf like the default."""
+        x = self._sine(1000, 0, 0.3)  # full scale, so every ceiling setting matters
+        same = self.assertSameSamples
+        # above the upper bound: ceiling +6 dB acts like 0 dB (limiter, not the hard clip)
+        hot = self._sine(1000, -6, 1.5)
+        same(self._run(hot, makeup_db=12, lim_ceiling_db=6), self._run(hot, makeup_db=12, lim_ceiling_db=0))
+        same(self._run(x, dialog_db=6, dialog_hz=20000), self._run(x, dialog_db=6, dialog_hz=8000))
+        same(self._run(x, comp_thresh_db=20, comp_ratio=4), self._run(x, comp_thresh_db=0, comp_ratio=4))
+        # below the lower bound: ceiling -40 dB acts like -24 dB
+        same(self._run(x, lim_ceiling_db=-40), self._run(x, lim_ceiling_db=-24))
+        # below the lower bound: q 0 acts like 0.2, ratio 0.1 like 1
+        same(self._run(x, dialog_db=6, dialog_q=0), self._run(x, dialog_db=6, dialog_q=0.2))
+        same(self._run(x, dialog_db=6, dialog_q=-5), self._run(x, dialog_db=6, dialog_q=0.2))
+        same(self._run(x, comp_thresh_db=-30, comp_ratio=0.1), self._run(x, comp_thresh_db=-30))
+        # non-finite values fall back to the default instead of poisoning the filters
+        for bad in (math.nan, math.inf, -math.inf):
+            out = self._run(x, bass_db=bad)
+            self.assertTrue(all(math.isfinite(v) for v in out), bad)
+            same(out, self._run(x, bass_db=0), bad)
+            same(self._run(x, input_db=bad), self._run(x, input_db=0), bad)
+            same(self._run(x, lim_ceiling_db=bad), self._run(x, lim_ceiling_db=-1), bad)
+        # values inside the range are untouched
+        self.assertTrue(self._run(x, lim_ceiling_db=-3) != self._run(x, lim_ceiling_db=-1))
+
 
 if __name__ == "__main__":
     unittest.main()
