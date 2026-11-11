@@ -43,6 +43,7 @@ ICON_PATH = os.path.join(BASE_DIR, "assets", "icons", "cinegain.png")
 LOGO_SVG_PATH = os.path.join(BASE_DIR, "assets", "icons", "cinegain.svg")
 BRAND_ROTESON_PATH = os.path.join(BASE_DIR, "assets", "icons", "brand-roteson.png")
 BRAND_R2W2_PATH = os.path.join(BASE_DIR, "assets", "icons", "brand-r2w2.png")
+PROJECT_URL = "https://github.com/m00sfett/Cinegain"
 CONFIG_DIR = paths.CONFIG_DIR
 USER_PRESETS_FILE = paths.USER_PRESETS_FILE
 CONFIG_FILE = paths.CONFIG_FILE
@@ -917,7 +918,7 @@ class CinegainMainWindow(QMainWindow):
         hdr.addWidget(self.btn_lang)
         hdr.addWidget(self.btn_quit)
         brands = [(BRAND_ROTESON_PATH, "roteson.de", "https://roteson.de"),
-                  (BRAND_R2W2_PATH, "R²W² Development", None)]
+                  (BRAND_R2W2_PATH, "R²W² Development · GitHub", PROJECT_URL)]
         brands = [b for b in brands if os.path.exists(b[0])]
         if brands:
             hdr.addSpacing(6)
