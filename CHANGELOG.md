@@ -15,6 +15,27 @@ Categories follow the standard Keep a Changelog taxonomy: `Added`, `Changed`, `D
 
 ---
 
+## [0.3.5] - 2026-11-11
+
+### Added
+- **Debug-Log** für die Fehlersuche: GUI, CLI und Routing schreiben in eine Datei (`~/.local/state/cinegain/cinegain.log`, 5 × 2 MB rotierend, Pfad über `CINEGAIN_LOG_DIR` änderbar). Protokolliert werden:
+  - neue, verschobene und verschwundene Streams mit Programm, Sink und Grund
+  - Start, Stopp und Absturz der Filterprozesse
+  - übertragene Reglerwerte
+  - alle 10 s die Pegel jedes Filters, solange Ton läuft
+  - Bedienschritte (Sprache, Preset, Programmwahl, Ein/Aus, Reset, Beenden)
+  - fehlgeschlagene `pactl`/`pw-cli`-Aufrufe, Qt-Warnungen und unbehandelte Exceptions
+- Die Fehlerausgabe jedes PipeWire-Filterprozesses landet in `pipewire-<profil>.log` daneben.
+- Geschrieben werden nur Änderungen, im Normalbetrieb also kaum etwas. Stufe über `CINEGAIN_LOG_LEVEL` oder `"log_level"` in `config.json` (Standard `DEBUG`).
+- `cinegain log` zeigt das Log (`-n 200`, `--follow`, `--path`). Im Tray-Menü gibt es „Debug-Log öffnen“.
+- Die Pegelanzeige nennt, welchen Filter sie gerade misst („Gemessen: Google Chrome“).
+
+### Fixed
+- **Leiser Ton nach einem Browser-Update:** Aktualisiert der Paketmanager Chrome (oder eine Electron-App wie ChatGPT) während er läuft, meldet Linux das Programm als `chrome (deleted)`. Cinegain hielt das für ein neues Programm ohne eigene Einstellung. Chrome lief dann plötzlich über den neutralen Standard, also ohne Verstärkung. Der Zusatz wird jetzt ignoriert. Bereits entstandene Doppel-Einträge werden beim Start zusammengeführt, die zuletzt benutzte Einstellung gewinnt (#16).
+- **„Filter ausschalten“ pausierte Videos im Browser:** Ausschalten entfernte alle Cinegain-Sinks, und Browser pausieren, wenn ihr Ausgabegerät verschwindet. Aus/Ein schaltet jetzt alle Filter auf Durchreichen (Bypass). Streams und Sinks bleiben, wo sie sind. Neue Filter starten im Aus-Zustand ebenfalls durchgereicht. Ganz gestoppt wird nur noch über Beenden oder `cinegain stop` (#14).
+- **Sprachwechsel:** Tooltip der Pegelanzeige und Preset-Namen im Tray-Menü blieben in der Startsprache. Die Reglertitel nach Fokuswechsel hatte schon 0.3.4 behoben (#15).
+- **Pegelanzeige maß das falsche Ziel:** Mit „Standard“ ausgewählt zeigte sie den leerlaufenden Standard-Filter (Leveler 0 dB), während Chrome über seine eigene Einstellung lief. Sie zeigt jetzt den ersten Filter, durch den tatsächlich Ton fließt: zuerst das ausgewählte Ziel, dann die gerade spielenden Programme (#16).
+
 ## [0.3.4] - 2026-11-10
 
 - Schlägt die PipeWire-Abfrage fehl, meldet die CLI einen unbekannten Status (Exitcode 2). Die GUI wartet auf die nächste Abfrage, bevor sie Start oder Stopp anbietet. Bild↑ und Bild↓ wechseln jetzt auch aus einer fokussierten Programmzeile das Programm und nehmen den Tastaturfokus mit.

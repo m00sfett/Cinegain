@@ -12,12 +12,15 @@ so steady state costs two pactl calls per tick.
 """
 import time
 
+import cinegain_log
 from cinegain_profiles import (
     PROFILE_STANDARD,
+    STANDARD_SINK,
     SinkProcesses,
     find_node_id,
     full_params,
     push_params,
+    read_meter,
     sink_name,
 )
 from cinegain_pulse import PulseControl, is_cinegain_name
@@ -27,6 +30,10 @@ from cinegain_registry import AppRegistry, make_key, profile_id_for
 PROFILE_IDLE_STOP_S = 45.0
 # Minimum delay between two start attempts of the same sink.
 START_RETRY_S = 5.0
+# While audio flows, each filter's meters are written to the debug log this often.
+METER_LOG_S = 10.0
+
+log = cinegain_log.get("router")
 
 
 class AppView:
@@ -65,6 +72,12 @@ class Router:
         self._last_used = {}
         self._start_attempts = {}
         self._node_ids = {}
+        # Soft off: every Cinegain sink passes audio through untouched (bypass=1)
+        # while streams stay where they are. Removing sinks makes browsers pause.
+        self.bypass = False
+        self._seen_streams = {}   # stream index -> (key, sink name, corked)
+        self._known_pids = {}     # profile id -> pid seen on the last tick
+        self._meter_state = {}    # pid -> (last seq, last log time)
 
     @staticmethod
     def target_profile(key, entry, active=True):
@@ -114,6 +127,8 @@ class Router:
                         # Only pull streams off Cinegain; never fight a user's own
                         # choice of hardware output (e.g. HDMI in pavucontrol).
                         if is_cinegain_name(current):
+                            why = "Cinegain off" if not active else "program switched off"
+                            log.info("move stream #%s (%s) %s -> %s: %s", s.index, key, current, hw, why)
                             self.pulse.move(s.index, hw)
                             current = hw
                     elif target_id is None:
@@ -122,15 +137,24 @@ class Router:
                             # fails to come up) and route on a later tick.
                             if now - self._start_attempts.get(profile, 0.0) > START_RETRY_S:
                                 self._start_attempts[profile] = now
-                                self.sinks.start(profile, full_params(entry["params"]),
+                                log.info("own sink %s for %s not up: starting it (stream #%s waits on %s)",
+                                         profile, key, s.index, current)
+                                self.sinks.start(profile, self._sink_params(entry["params"]),
                                                  f"Cinegain · {entry['label']}")
+                        else:
+                            log.warning("standard sink %s missing: stream #%s (%s) stays on %s",
+                                        STANDARD_SINK, s.index, key, current)
                     elif s.sink != target_id:
+                        why = "own setting" if profile != PROFILE_STANDARD else "follows Standard"
+                        log.info("move stream #%s (%s) %s -> %s: %s", s.index, key, current, target, why)
                         self.pulse.move(s.index, target)
                         current = target
                 view.sink = current
 
+        self._log_stream_changes(streams, sink_ids)
         if route:
             self._reap_idle(wanted, now, active)
+        self._watch_processes(now)
         self.registry.flush()
         return sorted(views.values(), key=lambda v: (not v.playing, not v.streams, -v.last_seen, v.label.lower()))
 
@@ -142,7 +166,8 @@ class Router:
                 continue
             last = self._last_used.setdefault(pid, now)
             if not active or (pid not in wanted and now - last > PROFILE_IDLE_STOP_S):
-                self.sinks.stop(pid)
+                reason = "Cinegain off" if not active else f"no stream for {PROFILE_IDLE_STOP_S:.0f} s"
+                self.sinks.stop(pid, reason)
                 self._last_used.pop(pid, None)
                 self._node_ids.pop(pid, None)
 
@@ -155,7 +180,8 @@ class Router:
         if pid not in self.sinks.running():
             return False
         node_id = self._node_ids.get(pid) or find_node_id(sink_name(pid))
-        if push_params(node_id, full_params(entry["params"])):
+        log.debug("push own setting of %s to %s (node %s)", key, pid, node_id)
+        if push_params(node_id, self._sink_params(entry["params"])):
             self._node_ids[pid] = node_id
             return True
         self._node_ids.pop(pid, None)
@@ -163,14 +189,16 @@ class Router:
 
     def release_all(self):
         """Moves every stream off any Cinegain sink and stops all per-program sinks."""
+        log.info("release all streams and stop all per-program sinks")
         sink_ids = self.pulse.list_sinks()
         hw = self.pulse.hardware_sink(sink_ids)
         for st in self.pulse.list_streams():
             if st.is_own:
                 continue
             if is_cinegain_name(sink_ids.get(st.sink, "")):
+                log.info("move stream #%s (%s) -> %s: release", st.index, st.display_name, hw)
                 self.pulse.move(st.index, hw)
-        self.sinks.stop_all_profiles()
+        self.sinks.stop_all_profiles("release all")
         self._last_used.clear()
         self._node_ids.clear()
         self.registry.flush(force=True)
@@ -180,3 +208,82 @@ class Router:
         for st in self.pulse.list_streams():
             if not st.is_own and make_key(st.app_name or st.node_name, st.binary) == key:
                 self.pulse.set_volume_100(st.index)
+
+    # -- soft off ------------------------------------------------------------
+    def _sink_params(self, params):
+        out = full_params(params)
+        out["bypass"] = 1.0 if self.bypass else 0.0
+        return out
+
+    def set_bypass(self, on):
+        """
+        Soft on/off for every running Cinegain sink. Streams are not moved and no
+        sink disappears, so players keep playing. Returns the profiles that failed.
+        """
+        self.bypass = bool(on)
+        log.info("filter %s (bypass=%d on all sinks)", "OFF" if on else "ON", int(on))
+        failed = []
+        for pid in sorted(self.sinks.running()):
+            node_id = self._node_ids.get(pid) or find_node_id(sink_name(pid))
+            if push_params(node_id, {"bypass": 1.0 if on else 0.0}):
+                self._node_ids[pid] = node_id
+            else:
+                self._node_ids.pop(pid, None)
+                failed.append(pid)
+        if failed:
+            log.warning("bypass=%d not applied to: %s", int(on), ", ".join(failed))
+        return failed
+
+    # -- debug log -----------------------------------------------------------
+    def _log_stream_changes(self, streams, sink_ids):
+        current = {}
+        for st in streams:
+            key = make_key(st.app_name or st.node_name, st.binary)
+            sink = sink_ids.get(st.sink, st.sink)
+            current[st.index] = (key, sink, st.corked)
+            old = self._seen_streams.get(st.index)
+            if old is None:
+                log.info("stream #%s appeared: %s (app=%r bin=%r node=%r) on %s%s vol=%s%%%s",
+                         st.index, key, st.app_name, st.binary, st.node_name, sink,
+                         " paused" if st.corked else "", st.volume_pct, " muted" if st.muted else "")
+            else:
+                if old[1] != sink:
+                    log.info("stream #%s (%s) now on %s (was %s)", st.index, key, sink, old[1])
+                if old[2] != st.corked:
+                    log.debug("stream #%s (%s) %s", st.index, key, "paused" if st.corked else "playing")
+        for index, (key, sink, _) in self._seen_streams.items():
+            if index not in current:
+                log.info("stream #%s gone: %s (was on %s)", index, key, sink)
+        self._seen_streams = current
+
+    def _watch_processes(self, now):
+        """Logs filter processes that vanished on their own, and their meters while audio flows."""
+        pids = {}
+        for profile in self.sinks.running():
+            pids[profile] = self.sinks.pid(profile)
+        for profile, pid in self._known_pids.items():
+            if profile not in pids:
+                log.info("filter process %s pid=%s is no longer running", profile, pid)
+        for profile, pid in pids.items():
+            if self._known_pids.get(profile) not in (None, pid):
+                log.warning("filter process %s restarted: pid %s -> %s",
+                            profile, self._known_pids[profile], pid)
+            self._log_meter(profile, pid, now)
+        self._known_pids = pids
+
+    def _log_meter(self, profile, pid, now):
+        if not log.isEnabledFor(10) or not isinstance(pid, int):
+            return
+        m = read_meter(pid)
+        if not m:
+            return
+        seq, level, leveler, gr, limit = m
+        last_seq, last_t = self._meter_state.get(pid, (None, 0.0))
+        if seq == last_seq:
+            return  # no audio through this filter since the last look
+        if now - last_t >= METER_LOG_S:
+            log.debug("meter %s: in %.1f dBFS, leveler %+.1f dB, comp %.1f dB, limiter %.1f dB%s",
+                      profile, level, leveler, gr, limit, " (bypass)" if self.bypass else "")
+            self._meter_state[pid] = (seq, now)
+        else:
+            self._meter_state[pid] = (seq, last_t)

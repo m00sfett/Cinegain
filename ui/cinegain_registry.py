@@ -24,7 +24,10 @@ import re
 import shutil
 import time
 
+import cinegain_log
 import cinegain_paths as paths
+
+log = cinegain_log.get("registry")
 
 SCHEMA_VERSION = 2
 
@@ -43,10 +46,19 @@ GENERIC_APP_NAMES = ("chromium", "electron", "chrome", "webkit", "qtwebengine", 
 LAST_SEEN_FLUSH_S = 60.0
 
 
+# Linux reports "<binary> (deleted)" for a process whose executable was replaced
+# on disk, e.g. Chrome after a package update while it keeps running.
+DELETED_SUFFIX = re.compile(r"\s*\(deleted\)$", re.IGNORECASE)
+
+
+def clean_binary(binary):
+    """Process binary without path and without the "(deleted)" marker of an updated executable."""
+    return DELETED_SUFFIX.sub("", os.path.basename((binary or "").strip()))
+
+
 def make_key(app_name, binary):
     name = (app_name or "").strip().lower()
-    binary = os.path.basename((binary or "").strip()).lower()
-    return f"{binary}::{name}"
+    return f"{clean_binary(binary).lower()}::{name}"
 
 
 def profile_id_for(key):
@@ -58,7 +70,7 @@ def profile_id_for(key):
 
 def default_label(app_name, binary):
     name = (app_name or "").strip()
-    binary = os.path.basename((binary or "").strip())
+    binary = clean_binary(binary)
     if binary and name.lower() in GENERIC_APP_NAMES and binary.lower() != name.lower():
         return binary
     return name or binary or "?"
@@ -68,9 +80,9 @@ def is_media_app(app_name, binary):
     # An Electron app reporting "Chromium" is judged by its binary alone, so the
     # ChatGPT client is not mistaken for a browser.
     if default_label(app_name, binary) != (app_name or "").strip():
-        hay = os.path.basename(binary or "").lower()
+        hay = clean_binary(binary).lower()
     else:
-        hay = f"{app_name} {os.path.basename(binary or '')}".lower()
+        hay = f"{app_name} {clean_binary(binary)}".lower()
     return any(m in hay for m in DEFAULT_MEDIA_APPS)
 
 
@@ -129,6 +141,39 @@ class AppRegistry:
         self._dirty = False
         if apps and version < SCHEMA_VERSION:
             self._migrate_from_v1()
+        if self._merge_deleted_binaries():
+            self.save()
+
+    def _merge_deleted_binaries(self):
+        """
+        Folds entries created for "<binary> (deleted)" (0.3.4 and older) into the
+        program they belong to. The more recently used entry wins for the switch
+        and the own setting, so changes made after the update are kept.
+        """
+        changed = False
+        for key in [k for k in self.apps if DELETED_SUFFIX.search(k.split("::", 1)[0])]:
+            entry = self.apps.pop(key)
+            name = entry["name"]
+            target = make_key(name, entry["binary"])
+            entry["binary"] = clean_binary(entry["binary"])
+            if DELETED_SUFFIX.search(entry["label"]):
+                entry["label"] = default_label(name, entry["binary"])
+            base = self.apps.get(target)
+            if base is None:
+                self.apps[target] = entry
+            else:
+                newer = entry if entry["last_seen"] > base["last_seen"] else base
+                merged = dict(base)
+                merged["enabled"] = newer["enabled"]
+                merged["params"] = newer["params"] if newer["params"] is not None else (
+                    base["params"] or entry["params"])
+                seen = [x for x in (base["first_seen"], entry["first_seen"]) if x]
+                merged["first_seen"] = min(seen) if seen else 0.0
+                merged["last_seen"] = max(base["last_seen"], entry["last_seen"])
+                self.apps[target] = merged
+            log.info("merged program %r into %r (executable was replaced by an update)", key, target)
+            changed = True
+        return changed
 
     def _migrate_from_v1(self):
         backup = os.path.join(os.path.dirname(self.path), os.path.basename(paths.APPS_V1_BACKUP))
@@ -182,13 +227,15 @@ class AppRegistry:
         if entry is None:
             self.apps[key] = {
                 "name": app_name or "",
-                "binary": os.path.basename(binary or ""),
+                "binary": clean_binary(binary),
                 "label": default_label(app_name, binary),
                 "enabled": is_media_app(app_name, binary),
                 "params": None,
                 "first_seen": now,
                 "last_seen": now,
             }
+            log.info("new program %r (label %r, %s)", key, self.apps[key]["label"],
+                     "routed through Cinegain" if self.apps[key]["enabled"] else "not routed")
             self.save()
         else:
             entry["last_seen"] = now
@@ -198,13 +245,18 @@ class AppRegistry:
     def set_enabled(self, key, enabled):
         if key in self.apps and self.apps[key]["enabled"] != bool(enabled):
             self.apps[key]["enabled"] = bool(enabled)
+            log.info("program %r switched %s", key, "on" if enabled else "off")
             self.save()
 
     def set_params(self, key, params, save=True):
         """Gives a program its own parameters (None: follow Standard again)."""
         if key not in self.apps:
             return
+        before = self.apps[key]["params"]
         self.apps[key]["params"] = _clean_params(params)
+        if (before is None) != (self.apps[key]["params"] is None):
+            log.info("program %r now %s", key,
+                     "follows Standard" if self.apps[key]["params"] is None else "has its own setting")
         if save:
             self.save()
         else:
@@ -219,4 +271,5 @@ class AppRegistry:
 
     def forget(self, key):
         if self.apps.pop(key, None) is not None:
+            log.info("forgot program %r", key)
             self.save()

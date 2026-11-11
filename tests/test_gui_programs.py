@@ -27,7 +27,7 @@ except ImportError:
     HAVE_QT = False
 
 import cinegain_paths as paths  # noqa: E402
-from cinegain_registry import AppRegistry, make_key  # noqa: E402
+from cinegain_registry import AppRegistry, make_key, profile_id_for  # noqa: E402
 from cinegain_router import Router  # noqa: E402
 
 CHROME = make_key("Google Chrome", "chrome")
@@ -211,6 +211,88 @@ class TestProgramEditing(unittest.TestCase):
             self.assertIsNone(self.win.meter_strip.values)
         finally:
             self.gui.read_meter = cp_read
+
+    def test_power_off_is_pass_through_without_removing_sinks(self):
+        """#14: off/on keeps every sink and stream; browsers pause when a sink disappears."""
+        import cinegain_router
+        pushed = []
+        orig = (cinegain_router.push_params, cinegain_router.find_node_id)
+        cinegain_router.push_params = lambda node, params: pushed.append(dict(params)) or True
+        cinegain_router.find_node_id = lambda name: 1
+        try:
+            self.win.on_heartbeat()
+            self.sinks.live.add("standard")
+            moves = list(self.pulse.moves)
+            self.win.toggle_power()
+            self.assertTrue(self.router.bypass)
+            self.assertFalse(self.win.processing)
+            self.assertEqual(self.win.btn_power.text(), self.gui.t("btn_power_on"))
+            self.assertEqual(self.win.lbl_status.text(), self.gui.t("status_inactive"))
+            self.assertNotIn(("stop",), self.calls)
+            self.assertEqual(self.sinks.stopped, [])
+            self.assertEqual(self.pulse.moves, moves)
+            self.assertIn({"bypass": 1.0}, pushed)
+            # Loading a Standard preset while off must not switch processing back on.
+            pushed.clear()
+            self.win.apply_standard_preset("boost_20db")
+            self.assertEqual(pushed[-1], {"bypass": 1.0})
+            self.win.toggle_power()
+            self.assertFalse(self.router.bypass)
+            self.assertEqual(pushed[-1], {"bypass": 0.0})
+            self.assertEqual(self.win.btn_power.text(), self.gui.t("btn_power_off"))
+        finally:
+            cinegain_router.push_params, cinegain_router.find_node_id = orig
+
+    def test_language_switch_reaches_meter_tray_and_focused_labels(self):
+        """#15: nothing keeps the previous language after switching back and forth."""
+        self.win.change_language("de")
+        for i in range(len(self.win.slider_order)):
+            self.win.set_focused_slider(i)
+        self.win.set_focused_slider(0)
+        self.assertEqual(self.win.meter_strip.toolTip(), self.gui.t("meter_tip"))
+        self.assertEqual(self.win.tray_preset_actions["night_mode"].text(), self.gui.t("preset_night_mode"))
+        self.assertEqual(self.win.tray_log_action.text(), "Debug-Log öffnen")
+        titles = [self.win.slider_ui_elements[n]["label"].text().lstrip("▶ ") for n in self.win.slider_order]
+        self.win.change_language("en")
+        self.win.change_language("de")
+        self.win.set_focused_slider(3)
+        again = [self.win.slider_ui_elements[n]["label"].text().lstrip("▶ ") for n in self.win.slider_order]
+        self.assertEqual(titles, again)
+        self.win.change_language("en")
+        self.win.set_focused_slider(1)
+        english = [self.win.slider_ui_elements[n]["label"].text().lstrip("▶ ") for n in self.win.slider_order]
+        self.assertTrue(all(a != b for a, b in zip(titles, english) if a not in ("", )), list(zip(titles, english)))
+
+    def test_meter_follows_the_playing_program_when_standard_is_idle(self):
+        """#16: Standard selected, Chrome plays on its own setting -> the meter shows Chrome."""
+        self.win.sidebar.select(CHROME)
+        self.slider().setValue(self.slider().value() + 20)
+        self.win.flush_pending_params()
+        self.win.refresh_apps()  # starts Chrome's own sink
+        self.win.refresh_apps()  # moves Chrome there
+        self.win.sidebar.select(None)
+        self.win.on_selection_changed(None)
+        self.win.refresh_apps()
+        chrome_profile = profile_id_for(CHROME)
+        self.assertEqual(self.win.meter_candidates(), [("standard", "Standard"), (chrome_profile, "Google Chrome")])
+        pids = {"standard": 1, chrome_profile: 2}
+        orig_pid, orig_read = self.sinks.pid, self.gui.read_meter
+        seq = [0]
+
+        def read(pid):
+            seq[0] += 1
+            return (7, -60.0, 0.0, 0.0, 0.0) if pid == 1 else (seq[0], -20.0, 12.0, -2.0, 0.0)
+
+        self.sinks.pid = lambda profile: pids.get(profile)
+        self.gui.read_meter = read
+        try:
+            self.win.is_active = True
+            for _ in range(6):
+                self.win.update_meters()
+            self.assertEqual(self.win.meter_strip.values, (-20.0, 12.0, -2.0, 0.0))
+            self.assertEqual(self.win.meter_strip.source, self.gui.t("meter_source", name="Google Chrome"))
+        finally:
+            self.sinks.pid, self.gui.read_meter = orig_pid, orig_read
 
     def test_read_meter_parses_plugin_file(self):
         import struct

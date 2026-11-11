@@ -18,7 +18,10 @@ import signal
 import subprocess
 import time
 
+import cinegain_log
 import cinegain_paths as paths
+
+log = cinegain_log.get("sinks")
 
 PROFILE_STANDARD = "standard"
 
@@ -282,23 +285,39 @@ class SinkProcesses:
         conf_path = self._conf_file(profile_id)
         with open(conf_path, "w", encoding="utf-8") as f:
             f.write(conf)
-        proc = self.popen(
-            ["/usr/bin/pipewire", "-c", conf_path],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        err = subprocess.DEVNULL
+        try:
+            os.makedirs(paths.LOG_DIR, mode=0o700, exist_ok=True)
+            err = open(cinegain_log.pipewire_log_path(profile_id), "w", encoding="utf-8")
+        except OSError:
+            pass
+        try:
+            proc = self.popen(
+                ["/usr/bin/pipewire", "-c", conf_path],
+                stdout=subprocess.DEVNULL,
+                stderr=err,
+                start_new_session=True,
+            )
+        except OSError as e:
+            log.error("start %s failed: %s", profile_id, e)
+            return None
+        finally:
+            if err is not subprocess.DEVNULL:
+                err.close()
         with open(self._pid_file(profile_id), "w") as f:
             f.write(str(proc.pid))
+        log.info("started sink %s pid=%s (%s) params=%s", profile_id, proc.pid, description,
+                 _param_summary(params))
         return proc.pid
 
-    def stop(self, profile_id):
+    def stop(self, profile_id, reason=""):
         pid = self.pid(profile_id)
         if pid:
             try:
                 os.kill(pid, signal.SIGTERM)
-            except OSError:
-                pass
+            except OSError as e:
+                log.warning("stop %s pid=%s failed: %s", profile_id, pid, e)
+            log.info("stopped sink %s pid=%s%s", profile_id, pid, f" ({reason})" if reason else "")
         for path in (self._pid_file(profile_id), self._conf_file(profile_id)):
             try:
                 os.remove(path)
@@ -306,12 +325,12 @@ class SinkProcesses:
                 pass
         return pid is not None
 
-    def stop_all_profiles(self):
+    def stop_all_profiles(self, reason="stop all"):
         """Stops every per-program sink (everything except the standard one)."""
         stopped = []
         for pid_id in self.running():
             if pid_id != PROFILE_STANDARD:
-                self.stop(pid_id)
+                self.stop(pid_id, reason)
                 stopped.append(pid_id)
         return stopped
 
@@ -342,12 +361,28 @@ def push_params(node_id, params):
         key = k.replace("cinegain:", "")
         val = (1.0 if float(v) > 0.5 else 0.0) if key in BOOL_PARAMS else float(v)
         flat.extend([f"cinegain:{key}", val])
-    res = subprocess.run(
-        ["pw-cli", "s", str(node_id), "Props", json.dumps({"params": flat})],
-        capture_output=True,
-        text=True,
-    )
-    return res.returncode == 0
+    try:
+        res = subprocess.run(
+            ["pw-cli", "s", str(node_id), "Props", json.dumps({"params": flat})],
+            capture_output=True,
+            text=True,
+        )
+    except OSError as e:
+        log.error("pw-cli could not run: %s", e)
+        return False
+    if res.returncode != 0:
+        log.warning("push to node %s failed (rc=%s): %s", node_id, res.returncode,
+                    (res.stderr or res.stdout or "").strip())
+        return False
+    log.debug("pushed to node %s: %s", node_id, _param_summary(params))
+    return True
+
+
+def _param_summary(params):
+    """Compact one-line form of a parameter set for the log."""
+    if not params:
+        return "{}"
+    return " ".join(f"{k.replace('cinegain:', '')}={float(v):g}" for k, v in sorted(params.items()))
 
 
 def wait_for_node(node_name, timeout=3.0, step=0.15):

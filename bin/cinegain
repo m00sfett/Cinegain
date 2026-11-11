@@ -15,7 +15,7 @@ import subprocess
 import sys
 import time
 
-__version__ = "0.3.4"
+__version__ = "0.3.5"
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if os.path.exists(os.path.join(SCRIPT_DIR, "..", "share", "cinegain")):
@@ -33,6 +33,7 @@ if os.path.exists(os.path.join(SCRIPT_DIR, "..", "ui", "cinegain_paths.py")):
 os.environ.setdefault("CINEGAIN_BASE_DIR", os.path.abspath(BASE_DIR))
 sys.path.insert(0, os.path.join(os.path.abspath(BASE_DIR), "ui"))
 
+import cinegain_log  # noqa: E402
 import cinegain_paths as paths  # noqa: E402
 from cinegain_profiles import (  # noqa: E402
     DEFAULT_PARAMS,
@@ -51,6 +52,8 @@ from cinegain_pulse import PulseControl, clean_wireplumber_targets  # noqa: E402
 from cinegain_registry import AppRegistry  # noqa: E402
 from cinegain_reset import reset_everything  # noqa: E402
 from cinegain_router import Router  # noqa: E402
+
+log = cinegain_log.get("cli")
 
 LEGACY_PID_FILE = "/tmp/cinegain.pid"
 STANDARD_DESCRIPTION = "Cinegain (Filmton Dialog & Dynamik)"
@@ -183,7 +186,7 @@ def cmd_stop(args):
         if live:
             save_state(params=live)
     make_router().release_all()
-    standard_sinks().stop(PROFILE_STANDARD)
+    standard_sinks().stop(PROFILE_STANDARD, "cinegain stop")
     _kill_legacy_processes()
     clean_wireplumber_targets(paths.WIREPLUMBER_STREAM_PROPS)
     for _ in range(15):
@@ -421,6 +424,36 @@ def cmd_reset(args):
     return 0
 
 
+def cmd_log(args):
+    if args.path:
+        print(paths.LOG_FILE)
+        return 0
+    lines = cinegain_log.tail(lines=max(1, args.lines))
+    if not lines and not os.path.exists(paths.LOG_FILE):
+        print(f"No log yet: {paths.LOG_FILE}", file=sys.stderr)
+        if not args.follow:
+            return 1
+    sys.stdout.writelines(lines)
+    sys.stdout.flush()
+    if not args.follow:
+        return 0
+    try:
+        with open(paths.LOG_FILE, "r", encoding="utf-8", errors="replace") as f:
+            f.seek(0, os.SEEK_END)
+            while True:
+                line = f.readline()
+                if line:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                else:
+                    time.sleep(0.3)
+    except KeyboardInterrupt:
+        return 0
+    except OSError as e:
+        print(f"Cannot read {paths.LOG_FILE}: {e}", file=sys.stderr)
+        return 1
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Cinegain Film Audio Control CLI")
     parser.add_argument("--version", "-v", action="version", version=f"Cinegain {__version__}")
@@ -460,6 +493,11 @@ def main(argv=None):
     p_apps.add_argument("value", nargs="?", help="Template id for 'load', new label for 'rename'")
     p_apps.add_argument("--json", action="store_true", help="Output list as JSON")
 
+    p_log = sub.add_parser("log", help="Show the debug log (path, last lines or follow)")
+    p_log.add_argument("--lines", "-n", type=int, default=80, help="Number of lines to show")
+    p_log.add_argument("--follow", "-f", action="store_true", help="Keep printing new lines")
+    p_log.add_argument("--path", action="store_true", help="Only print the log file path")
+
     sub.add_parser("templates", aliases=["profiles"], help="List presets and user slots")
 
     p_reset = sub.add_parser("reset", help="Reset everything to factory settings (with backup)")
@@ -468,6 +506,9 @@ def main(argv=None):
     p_reset.add_argument("--json", action="store_true", help="Output report as JSON")
 
     args = parser.parse_args(argv)
+    cinegain_log.setup("cli")
+    if args.cmd not in ("status", "log"):  # status is polled by the GUI every 1.5 s
+        log.info("cinegain %s", " ".join(sys.argv[1:] if argv is None else argv))
     handlers = {
         "start": cmd_start,
         "stop": cmd_stop,
@@ -481,8 +522,13 @@ def main(argv=None):
         "templates": cmd_templates,
         "profiles": cmd_templates,
         "reset": cmd_reset,
+        "log": cmd_log,
     }
-    return handlers[args.cmd](args)
+    try:
+        return handlers[args.cmd](args)
+    except Exception:
+        log.exception("cinegain %s failed", args.cmd)
+        raise
 
 
 if __name__ == "__main__":

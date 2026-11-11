@@ -1,5 +1,5 @@
 Name:           cinegain
-Version:        0.3.4
+Version:        0.3.5
 Release:        1%{?dist}
 Summary:        Realtime volume booster, dialogue clarity optimizer & film audio processor for PipeWire
 
@@ -54,6 +54,12 @@ install -Dm644 assets/icons/cinegain.png %{buildroot}%{_datadir}/icons/hicolor/2
 %{_datadir}/icons/hicolor/256x256/apps/cinegain.png
 
 %changelog
+* Wed Nov 11 2026 Tobias Moos <tobias@roteson.de> - 0.3.5-1
+- Debug log, filter off without pausing players, Chrome update keeps its setting
+
+* Tue Nov 10 2026 Tobias Moos <tobias@roteson.de> - 0.3.4-1
+- Compact start view, keyboard access, unknown status handling
+
 * Tue Nov 10 2026 Tobias Moos <tobias@roteson.de> - 0.3.3-1
 - Fix per-program leveler slider and cinegain route crash
 
