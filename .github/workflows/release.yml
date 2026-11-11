@@ -15,6 +15,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Check version ledger against tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 tests/test_version_ledger.py -v
+
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          ./packaging/release-notes.sh "${GITHUB_REF_NAME#v}" > RELEASE_NOTES.md
+
       - name: Set up build tools
         run: |
           sudo apt-get update
@@ -45,11 +55,19 @@ jobs:
           rpmbuild -bb --nodeps --define "debug_package %{nil}" packaging/rpm/cinegain.spec
           cp "$HOME"/rpmbuild/RPMS/*/cinegain-*.rpm .
 
+      - name: Compute SHA-256 checksums
+        run: |
+          cp packaging/*.deb .
+          sha256sum cinegain-*-linux-x86_64.tar.gz cinegain_*.deb cinegain-*.rpm > SHA256SUMS
+          test "$(wc -l < SHA256SUMS)" -eq 3
+          cat SHA256SUMS
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             cinegain-*-linux-x86_64.tar.gz
-            packaging/*.deb
+            cinegain_*.deb
             cinegain-*.rpm
-          generate_release_notes: true
+            SHA256SUMS
+          body_path: RELEASE_NOTES.md

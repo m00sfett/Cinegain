@@ -15,6 +15,17 @@ Categories follow the standard Keep a Changelog taxonomy: `Added`, `Changed`, `D
 
 ---
 
+## [0.5.1] - Unreleased
+
+Patch-Version: nur Packaging und Release-Ablauf, das Programm selbst ist unverändert.
+
+### Changed
+- **Release-Notes aus dem Changelog:** Der Release-Workflow übernimmt den Abschnitt der getaggten Version aus `CHANGELOG.md` als Text des GitHub-Release. Bisher wurden die Notes aus PR-Titeln erzeugt. Fehlt der Abschnitt, bricht der Workflow vor dem Build ab.
+
+### Added
+- **Prüfsummen:** Jedes Release enthält eine Datei `SHA256SUMS` für Tarball, `.deb` und `.rpm`. Prüfen mit `sha256sum -c SHA256SUMS --ignore-missing`.
+- **Versionsabgleich:** `tests/test_version_ledger.py` prüft, dass CLI, GUI, Fußzeilen, `install.sh`, PKGBUILD, RPM-Spec samt `%changelog`, `build-deb.sh`, README und Changelog dieselbe Version tragen und die PipeWire-Mindestversion 0.3.50 unverändert bleibt. Der Release-Workflow führt ihn mit dem Tag aus und stoppt bei Abweichung.
+
 ## [0.5.0] - 2026-11-11
 
 Minor-Version mit Freigabe des Nutzers (Grill-Runde 0.5.0, Q14b). Die Produktausrichtung ändert sich: Hauptfunktion ist die Lautstärke über das Systemmaß, zweite Hauptfunktion die Analyse versteckter Lautstärken. Dazu kommen Overdrive, Ansichtsstufen und eine neue Skala. Spezifikation: `docs/SPEC.md`.
