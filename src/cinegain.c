@@ -273,6 +273,11 @@ typedef struct {
 	/* applied (ramped) values of the gain controls */
 	double ramp[RG_N];
 	int ramp_valid;
+
+	/* bypass -> active: the dry signal hands over to the processed one */
+	int was_bypassed;
+	int xf_on;
+	unsigned xf_pos;     /* samples since processing resumed */
 } Cinegain;
 
 static LADSPA_Handle instantiate(const LADSPA_Descriptor *d, unsigned long rate)
@@ -332,6 +337,26 @@ static void activate(LADSPA_Handle h)
 	k->comp_env_db = -120.0;
 	k->eq_valid = 0;
 	k->ramp_valid = 0;
+	k->was_bypassed = 0;
+	k->xf_on = 0;
+}
+
+/* Bypass -> active: no stale audio from the look-ahead line and no leveler boost
+ * at once (#28). The leveler restarts at 0 dB at most and glides up as usual; the
+ * compressor detector and the leveler's power/peak estimates stay, because they
+ * can only hold the level down. The first LOOKAHEAD_MS keep the dry signal while
+ * the line fills, the next LOOKAHEAD_MS crossfade to the processed signal. */
+static void resume_after_bypass(Cinegain *k)
+{
+	memset(k->eqs, 0, sizeof(k->eqs));
+	memset(k->delay, 0, sizeof(k->delay));
+	for (unsigned i = 0; i < MAX_LOOKAHEAD; i++) k->need[i] = 1.0f;
+	k->la_pos = 0;
+	k->lim_gain = 1.0;
+	if (k->lev_gain_db > 0.0) k->lev_gain_db = 0.0;
+	k->was_bypassed = 0;
+	k->xf_on = 1;
+	k->xf_pos = 0;
 }
 
 
@@ -398,10 +423,13 @@ static void run(LADSPA_Handle h, unsigned long n)
 
 	if (ctl(k, P_BYPASS, 0) > 0.5f) {
 		k->ramp_valid = 0; /* switching the filter back on fades the boost in again */
+		k->was_bypassed = 1;
 		if (outL != inL) memmove(outL, inL, n * sizeof(float));
 		if (outR != inR) memmove(outR, inR, n * sizeof(float));
 		return;
 	}
+
+	if (k->was_bypassed) resume_after_bypass(k);
 
 	/* gains glide linearly across the block from their old to their new value */
 	const double in_from = k->ramp_valid ? db2lin(k->ramp[RG_INPUT]) : -1.0;
@@ -448,7 +476,8 @@ static void run(LADSPA_Handle h, unsigned long n)
 
 	for (unsigned long i = 0; i < n; i++) {
 		const double ig = in_start + in_inc * (double)(i + 1);
-		double l = inL[i] * ig, r = inR[i] * ig;
+		const double dry_l = inL[i], dry_r = inR[i]; /* outL may alias inL */
+		double l = dry_l * ig, r = dry_r * ig;
 
 		/* EQ: identical coefficients per channel keep the image stable */
 		for (int b = 0; b < EQ_N; b++) {
@@ -529,6 +558,12 @@ static void run(LADSPA_Handle h, unsigned long n)
 		/* safety: soft clip only above the ceiling, hard stop at 0 dBFS */
 		if (fabs(ol) > ceil_lin) ol = (ol > 0 ? 1 : -1) * (ceil_lin + (1.0 - ceil_lin) * tanh((fabs(ol) - ceil_lin) / (1.0 - ceil_lin + 1e-9)));
 		if (fabs(orr) > ceil_lin) orr = (orr > 0 ? 1 : -1) * (ceil_lin + (1.0 - ceil_lin) * tanh((fabs(orr) - ceil_lin) / (1.0 - ceil_lin + 1e-9)));
+		if (k->xf_on) {
+			double w = k->xf_pos < la ? 0.0 : (double)(k->xf_pos - la + 1) / (double)la;
+			ol = (1.0 - w) * dry_l + w * ol;
+			orr = (1.0 - w) * dry_r + w * orr;
+			if (++k->xf_pos >= 2 * la) k->xf_on = 0;
+		}
 		if (ol > 1.0) ol = 1.0; else if (ol < -1.0) ol = -1.0;
 		if (orr > 1.0) orr = 1.0; else if (orr < -1.0) orr = -1.0;
 		outL[i] = (float)ol;
