@@ -125,6 +125,65 @@ class StageTests(unittest.TestCase):
             finally:
                 del os.environ["CINEGAIN_METER_DIR"]
 
+    def _run_steps(self, steps):
+        """Runs (seconds, params) steps on one instance; returns the output per step."""
+        p = dict(NEUTRAL)
+        ctl = {i: C.c_float(float(p.get(name, 0.0))) for i, name in enumerate(self.names) if i >= 4}
+        h = self.desc.instantiate(C.cast(self.dptr, C.c_void_p), RATE)
+        for i, c in ctl.items():
+            self.desc.connect_port(h, i, C.addressof(c))
+        self.desc.activate(h)
+        outs = []
+        for seconds, params in steps:
+            for i, name in enumerate(self.names):
+                if name in params:
+                    ctl[i].value = float(params[name])
+            x = self._sine(1000, -40, seconds)
+            n = len(x)
+            inp = (C.c_float * n)(*x)
+            out_l, out_r = (C.c_float * n)(), (C.c_float * n)()
+            for pos in range(0, n, BLOCK):
+                cnt = min(BLOCK, n - pos)
+                for port, arr in ((0, inp), (1, inp), (2, out_l), (3, out_r)):
+                    self.desc.connect_port(h, port, C.addressof(arr) + pos * 4)
+                self.desc.run(h, cnt)
+            outs.append(list(out_l))
+        self.desc.cleanup(h)
+        return outs
+
+    def test_boost_rises_slowly_on_a_fresh_instance(self):
+        out = self._run(self._sine(1000, -40, 3.0), input_db=20)
+        early = rms_db(out[int(0.45 * RATE):int(0.55 * RATE)]) - (-43.0)  # -40 dBpk sine = -43 dB rms
+        late = rms_db(out[int(2.6 * RATE):int(2.9 * RATE)]) - (-43.0)
+        self.assertAlmostEqual(early, 5.0, delta=1.0)   # 10 dB/s
+        self.assertAlmostEqual(late, 20.0, delta=0.3)
+
+    def test_turning_down_is_immediate_and_up_again_ramps(self):
+        settled, down, up = self._run_steps([(3.0, {"input_db": 20}), (0.2, {"input_db": 0}),
+                                             (0.3, {"input_db": 10})])
+        self.assertAlmostEqual(rms_db(settled[-RATE // 10:]) + 43.0, 20.0, delta=0.3)
+        # right after the 5 ms look-ahead delay the level is already down
+        self.assertAlmostEqual(rms_db(down[RATE // 100: RATE // 20]) + 43.0, 0.0, delta=0.5)
+        self.assertLess(rms_db(up[RATE // 100: RATE // 20]) + 43.0, 2.0)
+
+    def test_bypass_fades_the_boost_in_again(self):
+        _, _, back = self._run_steps([(3.0, {"input_db": 12}), (0.1, {"bypass": 1}),
+                                      (0.2, {"bypass": 0})])
+        self.assertLess(rms_db(back[RATE // 100: RATE // 20]) + 43.0, 2.0)
+
+    def test_meter_reports_the_remaining_ramp(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.environ["CINEGAIN_METER_DIR"] = d
+            try:
+                _, h = self._run(self._sine(1000, -40, 0.5), cleanup=False, input_db=15)
+                with open(os.path.join(d, f"meter-{os.getpid()}.bin"), "rb") as f:
+                    raw = f.read(28)
+                ramp = struct.unpack("<IIfffff", raw)[6]
+                self.assertAlmostEqual(ramp, 10.0, delta=0.5)
+                self.desc.cleanup(h)
+            finally:
+                del os.environ["CINEGAIN_METER_DIR"]
+
 
 if __name__ == "__main__":
     unittest.main()
