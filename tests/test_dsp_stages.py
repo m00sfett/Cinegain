@@ -125,6 +125,52 @@ class StageTests(unittest.TestCase):
             finally:
                 del os.environ["CINEGAIN_METER_DIR"]
 
+    def _open(self):
+        """New activated instance with neutral controls; returns (handle, controls)."""
+        ctl = {i: C.c_float(float(NEUTRAL.get(name, 0.0))) for i, name in enumerate(self.names) if i >= 4}
+        h = self.desc.instantiate(C.cast(self.dptr, C.c_void_p), RATE)
+        for i, c in ctl.items():
+            self.desc.connect_port(h, i, C.addressof(c))
+        self.desc.activate(h)
+        return h, ctl
+
+    def _feed(self, h, signal):
+        n = len(signal)
+        inp = (C.c_float * n)(*signal)
+        out_l, out_r = (C.c_float * n)(), (C.c_float * n)()
+        for pos in range(0, n, BLOCK):
+            cnt = min(BLOCK, n - pos)
+            for port, arr in ((0, inp), (1, inp), (2, out_l), (3, out_r)):
+                self.desc.connect_port(h, port, C.addressof(arr) + pos * 4)
+            self.desc.run(h, cnt)
+
+    def test_meter_file_survives_cleanup_of_an_older_instance(self):
+        """#35: a graph reset creates the new instance before the old one is cleaned up."""
+        with tempfile.TemporaryDirectory() as d:
+            os.environ["CINEGAIN_METER_DIR"] = d
+            path = os.path.join(d, f"meter-{os.getpid()}.bin")
+
+            def level():
+                with open(path, "rb") as f:
+                    return struct.unpack("<IIffff", f.read(24))[2]
+            try:
+                old, old_ctl = self._open()
+                self._feed(old, self._sine(1000, -30, 0.1))
+                new, new_ctl = self._open()
+                self._feed(new, self._sine(1000, -10, 0.1))
+                self.assertAlmostEqual(level(), -10.0, delta=0.5)
+                # the old instance keeps running for a moment: it must not write into the new file
+                self._feed(old, self._sine(1000, -30, 0.1))
+                self.assertAlmostEqual(level(), -10.0, delta=0.5)
+                self.desc.cleanup(old)
+                self.assertTrue(os.path.exists(path), "cleanup of the old instance removed the new file")
+                self._feed(new, self._sine(1000, -20, 0.1))
+                self.assertAlmostEqual(level(), -20.0, delta=0.5)
+                self.desc.cleanup(new)
+                self.assertEqual(os.listdir(d), [])  # owner removes it, no temp files left
+            finally:
+                del os.environ["CINEGAIN_METER_DIR"]
+
     def _run_steps(self, steps, base=None):
         """
         Runs (seconds, params[, signal]) steps on one instance; returns the output per

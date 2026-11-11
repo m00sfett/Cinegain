@@ -246,6 +246,8 @@ typedef struct {
 	double rate;
 	meter_shm *shm;
 	char shm_path[512];
+	dev_t shm_dev;       /* identity of our meter file, so cleanup only removes our own */
+	ino_t shm_ino;
 	double lev_peak;     /* fast peak envelope for the leveler's cut path */
 
 	/* cached parameter values to detect changes */
@@ -299,18 +301,35 @@ static LADSPA_Handle instantiate(const LADSPA_Descriptor *d, unsigned long rate)
 		if (xdg && *xdg) { snprintf(buf, sizeof buf, "%s/cinegain", xdg); dir = buf; }
 	}
 	if (dir && *dir) {
+		/* Every instance gets a fresh inode under the stable name meter-<pid>.bin:
+		 * build it under a unique temp name, then rename it into place. The GUI keeps
+		 * reading meter-<pid>.bin, and an old instance cleaned up after a graph reset
+		 * in the same process sees a different inode and leaves the new file alone (#35). */
+		static unsigned meter_serial;
+		unsigned serial = __atomic_fetch_add(&meter_serial, 1, __ATOMIC_RELAXED);
+		char tmp[sizeof k->shm_path + 32];
+		struct stat st;
 		mkdir(dir, 0700);
 		snprintf(k->shm_path, sizeof k->shm_path, "%s/meter-%d.bin", dir, (int)getpid());
-		int fd = open(k->shm_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+		snprintf(tmp, sizeof tmp, "%s.%u.tmp", k->shm_path, serial);
+		unlink(tmp); /* leftover of a crashed process that had the same pid */
+		int fd = open(tmp, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
 		if (fd >= 0) {
-			if (ftruncate(fd, sizeof(meter_shm)) == 0) {
+			if (ftruncate(fd, sizeof(meter_shm)) == 0 && fstat(fd, &st) == 0) {
 				void *m = mmap(NULL, sizeof(meter_shm), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 				if (m != MAP_FAILED) {
 					k->shm = m;
 					k->shm->magic = METER_MAGIC;
+					k->shm_dev = st.st_dev;
+					k->shm_ino = st.st_ino;
 				}
 			}
 			close(fd);
+			if (k->shm && rename(tmp, k->shm_path) != 0) {
+				munmap(k->shm, sizeof(meter_shm));
+				k->shm = NULL;
+			}
+			if (!k->shm) unlink(tmp);
 		}
 		if (!k->shm) k->shm_path[0] = 0;
 	}
@@ -588,7 +607,13 @@ static void cleanup(LADSPA_Handle h)
 {
 	Cinegain *k = h;
 	if (k->shm) munmap(k->shm, sizeof(meter_shm));
-	if (k->shm_path[0]) unlink(k->shm_path);
+	if (k->shm_path[0]) {
+		/* only while the name still points at our file: a newer instance of this
+		 * process may have replaced it (small race window between stat and unlink) */
+		struct stat st;
+		if (stat(k->shm_path, &st) == 0 && st.st_dev == k->shm_dev && st.st_ino == k->shm_ino)
+			unlink(k->shm_path);
+	}
 	free(k);
 }
 
