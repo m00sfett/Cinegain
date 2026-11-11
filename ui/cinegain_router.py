@@ -40,7 +40,7 @@ class AppView:
     """Snapshot of one program for the UI."""
 
     __slots__ = ("key", "label", "name", "binary", "enabled", "own", "params", "playing",
-                 "paused", "last_seen", "sink", "volume_pct", "muted", "streams")
+                 "paused", "last_seen", "sink", "volume_pct", "muted", "streams", "mode", "hidden_db")
 
     def __init__(self, entry):
         self.key = entry["key"]
@@ -50,6 +50,8 @@ class AppView:
         self.enabled = entry["enabled"]
         self.params = entry["params"]
         self.own = entry["params"] is not None
+        self.mode = entry.get("mode")  # None: follows Standard
+        self.hidden_db = None  # secretly lowered stream volume (dB) that is only reported
         self.last_seen = entry["last_seen"]
         self.playing = False
         self.paused = False
@@ -64,7 +66,7 @@ class AppView:
 
 
 class Router:
-    def __init__(self, registry=None, sinks=None, pulse=None, clock=time.time):
+    def __init__(self, registry=None, sinks=None, pulse=None, clock=time.time, guard=None):
         self.registry = registry or AppRegistry()
         self.sinks = sinks or SinkProcesses()
         self.pulse = pulse or PulseControl()
@@ -78,6 +80,8 @@ class Router:
         self._seen_streams = {}   # stream index -> (key, sink name, corked)
         self._known_pids = {}     # profile id -> pid seen on the last tick
         self._meter_state = {}    # pid -> (last seq, last log time)
+        # Hidden-volume guard (cinegain_volume.VolumeGuard); None in tests and one-shot CLI calls.
+        self.guard = guard
 
     @staticmethod
     def target_profile(key, entry, active=True):
@@ -151,6 +155,14 @@ class Router:
                         current = target
                 view.sink = current
 
+        if self.guard is not None:
+            auto = {k for k, v in views.items() if v.streams and is_cinegain_name(v.sink or "")}
+            try:
+                for key, db in self.guard.update(auto, now).items():
+                    if key in views:
+                        views[key].hidden_db = db
+            except Exception:
+                log.exception("hidden volume guard failed")
         self._log_stream_changes(streams, sink_ids)
         if route:
             self._reap_idle(wanted, now, active)
@@ -287,3 +299,94 @@ class Router:
             self._meter_state[pid] = (seq, now)
         else:
             self._meter_state[pid] = (seq, last_t)
+
+    # -- full volume reset ----------------------------------------------------
+    def full_volume_reset(self, standard=None, clean_file=True, only=None):
+        """
+        "Full volume reset": every secretly lowered playback stream back to 0 dB,
+        normal stream volumes to 100 %, mute off, saved WirePlumber volumes cleaned.
+        Hardware and sink volumes stay untouched.
+
+        To avoid a sudden blast the gain a node gets back is first taken off the
+        Cinegain setting that owns it (Q13a): a program's own setting, or Standard
+        for Standard's output stream (min. -12 dB). Programs that follow Standard
+        are faded in instead, because lowering Standard would affect all of them.
+        `standard` = (load, save) callables for Standard's setting.
+        `only` = one program key: reset just that program's streams (and its own
+        Cinegain output), leave everything else and the saved file alone.
+        Returns a report dict.
+        """
+        import cinegain_modes as modes
+        from cinegain_volume import FADE_S, HIDDEN_EPS, VolumeGuard, clean_stream_properties
+
+        guard = self.guard or VolumeGuard()
+        nodes = guard.scanner()
+        profile_keys = {profile_id_for(k): k for k in self.registry.apps}
+        report = {"compensated": [], "faded": [], "volumes_100": 0, "file_entries": 0, "backup": None}
+        compensate = {}  # key or PROFILE_STANDARD -> dB to take off
+        instant, fade = [], []
+        only_profile = profile_id_for(only) if only else None
+        for n in nodes:
+            if n.volume >= HIDDEN_EPS:
+                continue
+            if only and n.key != only and not (
+                    n.is_cinegain_output and n.node_name.endswith(only_profile)):
+                continue
+            owner = None
+            if n.is_cinegain_output:
+                profile = n.node_name[len("cinegain_output"):].lstrip("_") or PROFILE_STANDARD
+                owner = PROFILE_STANDARD if profile == PROFILE_STANDARD else profile_keys.get(profile)
+            else:
+                entry = self.registry.get(n.key)
+                if entry and entry["params"] is not None:
+                    owner = n.key
+            if owner is not None:
+                compensate[owner] = max(compensate.get(owner, 0.0), -n.db)
+                instant.append(n)
+            else:
+                fade.append(n)
+
+        for owner, db in compensate.items():
+            if owner == PROFILE_STANDARD:
+                if standard is None:
+                    continue
+                state = standard[0]()
+                mode, sets = state["mode"], modes.clean_sets(state["sets"])
+            else:
+                entry = self.registry.get(owner)
+                mode, sets = entry["mode"], modes.clean_sets(entry["sets"])
+            before = sets[mode]["input_db"]
+            sets[mode]["input_db"] = round(max(-12.0, before - db), 1)  # slider resolution
+            if owner == PROFILE_STANDARD:
+                standard[1](mode, sets)
+            else:
+                self.registry.set_setting(owner, mode, sets)
+                self.push_program_params(owner)
+            report["compensated"].append({"target": owner, "hidden_db": round(-db, 1),
+                                          "input_db": [before, sets[mode]["input_db"]]})
+            log.info("full reset: %s input %.1f -> %.1f dB to offset %.1f dB coming back",
+                     owner, before, sets[mode]["input_db"], db)
+        for n in instant:
+            guard.reset_now(n.id)
+        now = self.clock()
+        for n in fade:
+            guard.fades[n.id] = (n.db, now)
+            report["faded"].append({"target": n.key, "hidden_db": round(n.db, 1)})
+            log.info("full reset: fading %s from %.1f dB over %.0f s", n.key, n.db, FADE_S)
+        if self.guard is None:
+            # one-shot use (CLI): run the fades here
+            end = now + FADE_S + 0.2
+            while guard.fades and time.time() < end:
+                guard.step()
+                time.sleep(0.1)
+            guard.step(end + 1)
+        for st in self.pulse.list_streams():
+            if only and make_key(st.app_name or st.node_name, st.binary) != only:
+                continue
+            if not st.is_own and (st.volume_pct != 100 or st.muted):
+                self.pulse.set_volume_100(st.index)
+                report["volumes_100"] += 1
+        if clean_file and not only:
+            report["file_entries"], report["backup"] = clean_stream_properties()
+        log.warning("full volume reset done: %s", report)
+        return report
