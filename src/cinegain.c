@@ -161,6 +161,14 @@ static const LADSPA_PortRangeHint port_hints[P_COUNT] = {
 #define LOOKAHEAD_MS 5.0
 #define MAX_LOOKAHEAD 2048
 #define DENORM 1e-20f
+#define DQ_MASK (MAX_LOOKAHEAD - 1) /* MAX_LOOKAHEAD is a power of two */
+/* A switched-off leveler this close to 0 dB is snapped to 0 dB and skipped (#41);
+ * 1e-4 dB is a gain error of about 1e-5, far below anything audible. */
+#define LEV_IDLE_DB 1e-4
+
+/* Building with -DCINEGAIN_REFERENCE keeps the plain O(n) limiter scan and runs
+ * every stage on every sample. Only the tests use it, as the oracle for the
+ * optimized build (#41). */
 
 typedef struct { double b0, b1, b2, a1, a2; } biquad_coef;
 typedef struct { double z1, z2; } biquad_state;
@@ -265,7 +273,16 @@ typedef struct {
 
 	/* limiter */
 	float delay[2][MAX_LOOKAHEAD];
+#ifdef CINEGAIN_REFERENCE
 	float need[MAX_LOOKAHEAD]; /* required gain per sample, ring buffer */
+#else
+	/* sliding minimum of the required gain over the look-ahead window: a monotone
+	 * deque (ring buffer) of (value, sample index), values rising from the front */
+	float dq_val[MAX_LOOKAHEAD];
+	uint32_t dq_idx[MAX_LOOKAHEAD];
+	unsigned dq_head, dq_len;
+	uint32_t lim_t;      /* running sample index (wraps; only differences are used) */
+#endif
 	unsigned la_len, la_pos;
 	double lim_gain;
 
@@ -342,12 +359,22 @@ static void connect_port(LADSPA_Handle h, unsigned long p, LADSPA_Data *data)
 	if (p < P_COUNT) k->port[p] = data;
 }
 
+static void lim_window_reset(Cinegain *k)
+{
+#ifdef CINEGAIN_REFERENCE
+	for (unsigned i = 0; i < MAX_LOOKAHEAD; i++) k->need[i] = 1.0f;
+#else
+	k->dq_head = k->dq_len = 0;
+	k->lim_t = 0;
+#endif
+}
+
 static void activate(LADSPA_Handle h)
 {
 	Cinegain *k = h;
 	memset(k->eqs, 0, sizeof(k->eqs));
 	memset(k->delay, 0, sizeof(k->delay));
-	for (unsigned i = 0; i < MAX_LOOKAHEAD; i++) k->need[i] = 1.0f;
+	lim_window_reset(k);
 	k->la_pos = 0;
 	k->lim_gain = 1.0;
 	k->lev_power = 0.0;
@@ -369,7 +396,7 @@ static void resume_after_bypass(Cinegain *k)
 {
 	memset(k->eqs, 0, sizeof(k->eqs));
 	memset(k->delay, 0, sizeof(k->delay));
-	for (unsigned i = 0; i < MAX_LOOKAHEAD; i++) k->need[i] = 1.0f;
+	lim_window_reset(k);
 	k->la_pos = 0;
 	k->lim_gain = 1.0;
 	if (k->lev_gain_db > 0.0) k->lev_gain_db = 0.0;
@@ -409,6 +436,19 @@ static double update_ramps(Cinegain *k, unsigned long n)
 	}
 	k->ramp_valid = 1;
 	return left;
+}
+
+/* Static soft-knee curve: gain reduction in dB (<= 0) for detector level e. */
+static inline double comp_curve(double e, double thr, double ratio, double knee)
+{
+	double over = e - thr, gr = 0.0;
+	if (knee > 0.0 && 2.0 * fabs(over) <= knee) {
+		double t = over + knee / 2.0;
+		gr = (1.0 / ratio - 1.0) * t * t / (2.0 * knee);
+	} else if (over > 0.0) {
+		gr = (1.0 / ratio - 1.0) * over;
+	}
+	return gr;
 }
 
 static void update_eq(Cinegain *k)
@@ -464,6 +504,13 @@ static void run(LADSPA_Handle h, unsigned long n)
 	const double side_g = db2lin(k->ramp[RG_SIDE]);
 
 	const int lev_on = ctl(k, P_LEVELER, 1) > 0.5f;
+#ifdef CINEGAIN_REFERENCE
+	const int lev_idle = 0;
+#else
+	/* switched off and back at 0 dB: the stage is the identity, skip it (#41) */
+	if (!lev_on && fabs(k->lev_gain_db) < LEV_IDLE_DB) k->lev_gain_db = 0.0;
+	const int lev_idle = !lev_on && k->lev_gain_db == 0.0;
+#endif
 	const double lev_target = ctl(k, P_LEV_TARGET_DB, -20);
 	const double lev_boost = ctl(k, P_LEV_MAX_BOOST_DB, 12);
 	const double lev_cut = ctl(k, P_LEV_MAX_CUT_DB, 6);
@@ -482,6 +529,13 @@ static void run(LADSPA_Handle h, unsigned long n)
 	const double knee = ctl(k, P_COMP_KNEE_DB, 6);
 	const double att = coef_ms(ctl(k, P_COMP_ATTACK_MS, 10), rate);
 	const double rel = coef_ms(ctl(k, P_COMP_RELEASE_MS, 250), rate);
+#ifdef CINEGAIN_REFERENCE
+	const int comp_idle = 0;
+#else
+	/* ratio 1:1 gives exactly 0 dB gain reduction at every level: skip the curve and
+	 * its db2lin. The detector keeps running, so leaving 1:1 behaves exactly as before. */
+	const int comp_idle = ratio == 1.0;
+#endif
 	const double makeup = db2lin(k->ramp[RG_MAKEUP]);
 	const double mk_start = mk_from < 0.0 ? makeup : mk_from;
 	const double mk_inc = n ? (makeup - mk_start) / (double)n : 0.0;
@@ -512,7 +566,9 @@ static void run(LADSPA_Handle h, unsigned long n)
 		if (pk > blk_peak) blk_peak = pk;
 
 		/* leveler: slow gated AGC towards a mean (RMS) target */
-		if (lev_on) {
+		if (lev_idle) {
+			/* identity */
+		} else if (lev_on) {
 			double p = 0.5 * (l * l + r * r);
 			double pdb = lin2db(sqrt(p));
 			if (pdb > lev_gate) /* freeze in silence: no noise pumping */
@@ -533,23 +589,23 @@ static void run(LADSPA_Handle h, unsigned long n)
 		} else {
 			k->lev_gain_db *= lev_gc; /* glide back to 0 dB */
 		}
-		double lg = db2lin(k->lev_gain_db);
-		l *= lg; r *= lg;
+		if (!lev_idle) {
+			double lg = db2lin(k->lev_gain_db);
+			l *= lg; r *= lg;
+		}
 
 		/* compressor: peak-ish detector in dB, soft knee, stereo-linked */
 		double x = fabs(l) > fabs(r) ? fabs(l) : fabs(r);
+		const double mk = mk_start + mk_inc * (double)(i + 1);
 		double xdb = lin2db(x);
 		double c = xdb > k->comp_env_db ? att : rel;
 		k->comp_env_db = c * k->comp_env_db + (1.0 - c) * xdb;
-		double e = k->comp_env_db, over = e - thr, gr = 0.0;
-		if (knee > 0.0 && 2.0 * fabs(over) <= knee) {
-			double t = over + knee / 2.0;
-			gr = (1.0 / ratio - 1.0) * t * t / (2.0 * knee);
-		} else if (over > 0.0) {
-			gr = (1.0 / ratio - 1.0) * over;
+		double cg = mk;
+		if (!comp_idle) {
+			double gr = comp_curve(k->comp_env_db, thr, ratio, knee);
+			if (gr < blk_gr) blk_gr = gr;
+			cg = db2lin(gr) * mk;
 		}
-		if (gr < blk_gr) blk_gr = gr;
-		double cg = db2lin(gr) * (mk_start + mk_inc * (double)(i + 1));
 		l *= cg; r *= cg;
 
 		/* look-ahead limiter: the gain needed for this sample is known
@@ -557,14 +613,32 @@ static void run(LADSPA_Handle h, unsigned long n)
 		double a = fabs(l) > fabs(r) ? fabs(l) : fabs(r);
 		float needed = a > ceil_lin ? (float)(ceil_lin / a) : 1.0f;
 		unsigned pos = k->la_pos;
-		k->need[pos] = needed;
 		float dl = k->delay[0][pos], dr = k->delay[1][pos];
 		k->delay[0][pos] = (float)l;
 		k->delay[1][pos] = (float)r;
 		k->la_pos = (pos + 1) % la;
+#ifdef CINEGAIN_REFERENCE
+		k->need[pos] = needed;
 		float target = 1.0f;
 		for (unsigned j = 0; j < la; j++)
 			if (k->need[j] < target) target = k->need[j];
+#else
+		/* Same value as the scan: the minimum of the last la required gains. Every
+		 * value is <= 1, so the 1.0 the scan starts from never wins; ties keep the
+		 * newest entry, which expires last. O(1) amortized per sample. */
+		const uint32_t t = k->lim_t++;
+		if (k->dq_len && t - k->dq_idx[k->dq_head] >= la) {
+			k->dq_head = (k->dq_head + 1) & DQ_MASK;
+			k->dq_len--;
+		}
+		while (k->dq_len && k->dq_val[(k->dq_head + k->dq_len - 1) & DQ_MASK] >= needed)
+			k->dq_len--;
+		const unsigned back = (k->dq_head + k->dq_len) & DQ_MASK;
+		k->dq_val[back] = needed;
+		k->dq_idx[back] = t;
+		k->dq_len++;
+		const float target = k->dq_val[k->dq_head];
+#endif
 		double gcoef = target < k->lim_gain ? lim_att : lim_rel;
 		k->lim_gain = gcoef * k->lim_gain + (1.0 - gcoef) * target;
 		if (k->lim_gain > target && gcoef == lim_att && target < 1.0f) {
@@ -588,6 +662,7 @@ static void run(LADSPA_Handle h, unsigned long n)
 		outL[i] = (float)ol;
 		outR[i] = (float)orr;
 	}
+
 
 	if (k->shm) {
 		k->shm->level_db = (float)lin2db(blk_peak);

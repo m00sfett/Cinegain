@@ -6,6 +6,7 @@ meter file the GUI reads. Builds the plugin into a temp dir; needs gcc only.
 import ctypes as C
 import math
 import os
+import random
 import shutil
 import struct
 import subprocess
@@ -302,6 +303,105 @@ class StageTests(unittest.TestCase):
             same(self._run(x, lim_ceiling_db=bad), self._run(x, lim_ceiling_db=-1), bad)
         # values inside the range are untouched
         self.assertTrue(self._run(x, lim_ceiling_db=-3) != self._run(x, lim_ceiling_db=-1))
+
+
+FIXED = dict(NEUTRAL, input_db=15, bass_db=3, dialog_db=4, treble_db=-2, side_db=-3,
+             lim_ceiling_db=-1)  # mode "Fest": leveler off, compressor 1:1
+DYNAMIC = dict(NEUTRAL, input_db=12, highpass_hz=55, bass_db=-6, dialog_db=9, dialog_q=1.1,
+               mid_db=3, side_db=-6, leveler=1, lev_target_db=-14, lev_max_boost_db=20,
+               lev_max_cut_db=10, lev_speed_s=1, lev_gate_db=-52, comp_thresh_db=-15,
+               comp_ratio=6, comp_knee_db=8, comp_attack_ms=6, comp_release_ms=150,
+               makeup_db=3, lim_ceiling_db=-1, lim_release_ms=60)  # night mode
+
+
+class OptimizedMatchesReferenceTests(unittest.TestCase):
+    """
+    #41: the O(1) limiter window and the skipped idle stages must give the same
+    output as the reference build (-DCINEGAIN_REFERENCE: O(n) scan, every stage on).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if shutil.which("gcc") is None:
+            raise unittest.SkipTest("gcc is required")
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.plugins = {}
+        for name, flags in (("opt", []), ("ref", ["-DCINEGAIN_REFERENCE"])):
+            so = os.path.join(cls._tmp.name, f"cinegain-{name}.so")
+            subprocess.run(["gcc", "-O2", "-fPIC", "-shared", "-Wall", "-Wextra", *flags,
+                            os.path.join(BASE_DIR, "src", "cinegain.c"), "-o", so, "-lm"], check=True)
+            lib = C.CDLL(so)
+            lib.ladspa_descriptor.restype = C.POINTER(Desc)
+            lib.ladspa_descriptor.argtypes = [C.c_ulong]
+            dptr = lib.ladspa_descriptor(0)
+            cls.plugins[name] = (lib, dptr, dptr.contents)
+        desc = cls.plugins["opt"][2]
+        cls.names = [desc.PortNames[i].decode() for i in range(desc.PortCount)]
+        rng = random.Random(41)
+        sig = []
+        while len(sig) < 6 * RATE:  # bursts from silence to well above the ceiling
+            amp = rng.choice([0.0, 0.001, 0.01, 0.05, 0.2, 0.5, 0.9])
+            freq = rng.choice([60, 440, 1000, 3000])
+            n = rng.randint(100, 6000)
+            ph = rng.random() * 6.3
+            sig += [amp * (0.7 * math.sin(ph + 2 * math.pi * freq * t / RATE) + 0.3 * rng.uniform(-1, 1))
+                    for t in range(n)]
+        cls.signal = sig
+        cls.blocks = [rng.choice([1, 7, 64, 240, 241, 256, 1024, 2048, 3000]) for _ in range(4000)]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def _process(self, which, steps):
+        """steps: [(seconds, params)]; plays the shared signal; returns the left output."""
+        _lib, dptr, desc = self.plugins[which]
+        ctl = {i: C.c_float(0.0) for i in range(4, len(self.names))}
+        h = desc.instantiate(C.cast(dptr, C.c_void_p), RATE)
+        for i, c in ctl.items():
+            desc.connect_port(h, i, C.addressof(c))
+        desc.activate(h)
+        n = sum(int(sec * RATE) for sec, _ in steps)
+        inp = (C.c_float * n)(*self.signal[:n])
+        out_l, out_r = (C.c_float * n)(), (C.c_float * n)()
+        pos, b = 0, 0
+        for sec, params in steps:
+            for i, name in enumerate(self.names):
+                if name in params:
+                    ctl[i].value = float(params[name])
+            end = pos + int(sec * RATE)
+            while pos < end:
+                cnt = min(self.blocks[b % len(self.blocks)], end - pos)
+                b += 1
+                for port, arr in ((0, inp), (1, inp), (2, out_l), (3, out_r)):
+                    desc.connect_port(h, port, C.addressof(arr) + pos * 4)
+                desc.run(h, cnt)
+                pos += cnt
+        desc.cleanup(h)
+        return list(out_l)
+
+    def _assert_identical(self, steps):
+        ref, opt = self._process("ref", steps), self._process("opt", steps)
+        self.assertGreater(sum(1 for v in ref if abs(v) > 0.85), 50, "limiter never engaged")
+        diff = next((i for i, (u, v) in enumerate(zip(ref, opt)) if u != v), None)
+        self.assertIsNone(diff, f"first difference at sample {diff}")
+
+    def test_fixed_mode_is_bit_identical(self):
+        self._assert_identical([(6.0, FIXED)])
+
+    def test_dynamic_mode_is_bit_identical(self):
+        self._assert_identical([(6.0, DYNAMIC)])
+
+    def test_mode_switches_stay_inaudibly_close(self):
+        """
+        Dynamic <-> Fest: skipping starts and ends without a level step. Only the
+        leveler's snap to 0 dB (below LEV_IDLE_DB) may differ from the reference.
+        """
+        steps = [(1.0, DYNAMIC), (1.0, FIXED), (1.0, DYNAMIC), (3.0, dict(FIXED, lev_speed_s=0.2)),
+                 (1.0, DYNAMIC)]
+        ref, opt = self._process("ref", steps), self._process("opt", steps)
+        worst = max(abs(u - v) for u, v in zip(ref, opt))
+        self.assertLess(worst, 1e-4, f"samples differ by up to {worst:.2e}")  # -80 dBFS
 
 
 if __name__ == "__main__":
