@@ -49,7 +49,7 @@ class TestProgramEditing(unittest.TestCase):
                 os.remove(p)
             except FileNotFoundError:
                 pass
-        paths.write_json_atomic(paths.CONFIG_FILE, {"lang": "en"})
+        paths.write_json_atomic(paths.CONFIG_FILE, {"lang": "en", "view_level": "advanced"})
         slot = {k: 1.0 for k in ("input_db",)}
         paths.write_json_atomic(paths.USER_PRESETS_FILE, {"user_1": {"name": "Music", "params": slot}})
         paths.write_json_atomic(paths.STATE_FILE, {
@@ -200,7 +200,7 @@ class TestProgramEditing(unittest.TestCase):
 
     def test_user_slot_stops_auto_saving_after_factory_preset_or_program_switch(self):
         self.win.on_user_preset_clicked("user_1")
-        self.win.apply_factory_preset("boost_20db")
+        self.win.apply_factory_preset("boost_12db")
         self.slider("input_db").setValue(33)
         self.win.flush_pending_params()
         self.assertEqual(paths.read_json(paths.USER_PRESETS_FILE)["user_1"]["params"]["input_db"], 1.0)
@@ -255,7 +255,7 @@ class TestProgramEditing(unittest.TestCase):
             self.assertIn({"bypass": 1.0}, pushed)
             # Loading a Standard preset while off must not switch processing back on.
             pushed.clear()
-            self.win.apply_standard_preset("boost_20db")
+            self.win.apply_standard_preset("boost_12db")
             self.assertEqual(pushed[-1], {"bypass": 1.0})
             self.win.toggle_power()
             self.assertFalse(self.router.bypass)
@@ -361,8 +361,8 @@ class TestProgramEditing(unittest.TestCase):
         self.win.flush_pending_params()
         self.win.set_mode("dynamic")
         self.assertEqual(self.slider().value(), 120)  # dynamic set untouched by the fixed edit
-        self.win.apply_factory_preset("boost_10db")
-        self.assertEqual((self.win._mode, self.slider().value()), ("fixed", 100))
+        self.win.apply_factory_preset("boost_9db")
+        self.assertEqual((self.win._mode, self.slider().value()), ("fixed", 90))
         self.assertEqual(AppRegistry().get(CHROME)["params"]["comp_ratio"], 1.0)
 
     def test_user_slot_remembers_its_mode(self):
@@ -370,7 +370,7 @@ class TestProgramEditing(unittest.TestCase):
         self.win.set_mode("dynamic")
         self.win._overwrite_user_slot("user_2")
         self.assertEqual(self.win.user_presets["user_2"]["mode"], "dynamic")
-        self.assertIn("β", self.win.user_preset_buttons["user_2"].text())
+        self.assertEqual(self.win.user_preset_buttons["user_2"].property("beta"), "true")  # dashed outline
         self.win.set_mode("fixed")
         self.win.on_user_preset_clicked("user_2")
         self.assertEqual(AppRegistry().get(CHROME)["mode"], "dynamic")
@@ -413,8 +413,8 @@ class TestProgramEditing(unittest.TestCase):
     def test_tray_preset_always_targets_standard(self):
         self.win.sidebar.select(SPOTIFY)
         before = self.slider().value()
-        self.win.apply_standard_preset("boost_20db")
-        self.assertIn(("preset", "boost_20db"), self.calls)
+        self.win.apply_standard_preset("boost_12db")
+        self.assertIn(("preset", "boost_12db"), self.calls)
         self.assertEqual(self.slider().value(), before)
         self.assertIsNone(AppRegistry().get(SPOTIFY)["params"])
 
@@ -499,6 +499,170 @@ class TestProgramEditing(unittest.TestCase):
                 mock.patch.object(self.gui.subprocess, "Popen") as popen:
             QTest.mouseClick(label, Qt.MouseButton.LeftButton)
         self.assertEqual(popen.call_args[0][0], ["xdg-open", "https://roteson.de"])
+
+    # -- 0.5.0 ---------------------------------------------------------------------
+    def test_steps_keys_wheel_and_buttons(self):
+        Qt = self.gui.Qt
+        mods = Qt.KeyboardModifier
+        self.assertEqual(self.gui.step_units("input_db", mods.NoModifier), 10)
+        self.assertEqual(self.gui.step_units("input_db", mods.ShiftModifier), 1)
+        self.assertEqual(self.gui.step_units("input_db", mods.ControlModifier), 50)
+        self.assertEqual(self.gui.step_units("comp_ratio", mods.NoModifier), 5)
+        s = self.slider()
+        s.setValue(0)
+        from PyQt6.QtGui import QKeyEvent
+        from PyQt6.QtCore import QEvent
+        s.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Right, mods.ControlModifier))
+        self.assertEqual(s.value(), 50)
+        s.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Left, mods.ShiftModifier))
+        self.assertEqual(s.value(), 49)
+        minus, plus = self.win.sliders["input_db"]["step_buttons"]
+        plus.click()
+        self.assertEqual(s.value(), 59)
+        minus.click()
+        minus.click()
+        self.assertEqual(s.value(), 39)
+        self.assertTrue(plus.autoRepeat())
+        s.setValue(145)
+        plus.click()  # clamped at the top of the normal scale
+        self.assertEqual(s.value(), 150)
+
+    def test_right_click_resets_to_neutral(self):
+        from PyQt6.QtTest import QTest
+        Qt = self.gui.Qt
+        s = self.slider("treble_db")
+        s.setValue(-55)
+        QTest.mouseClick(s, Qt.MouseButton.RightButton)
+        self.assertEqual(s.value(), 0)
+        self.win.set_mode("dynamic")
+        c = self.slider("comp_ratio")
+        c.setValue(60)
+        c.resetRequested.emit()
+        self.assertEqual(c.value(), 10)  # ratio 1:1
+        self.slider("lim_ceiling_db").resetRequested.emit()
+        self.assertEqual(self.slider("lim_ceiling_db").value(), -10)
+
+    def test_view_levels_show_and_hide_and_are_remembered(self):
+        self.win.set_view_level("simple")
+        w = self.win
+        visible = lambda wid: wid.isVisibleTo(w)  # noqa: E731
+        self.assertFalse(visible(w.grp_adv))
+        self.assertFalse(visible(w.sliders["dialog_db"]["row_frame"]))
+        self.assertTrue(visible(w.sliders["input_db"]["row_frame"]))
+        self.assertFalse(visible(w.film_row[0]))
+        self.assertFalse(visible(w.btn_mode_dynamic))
+        self.assertFalse(w.tabs.tabBar().isVisibleTo(w))
+        self.assertTrue(visible(w.btn_overdrive))  # Q17: everywhere
+        self.assertEqual(paths.config_get("view_level"), "simple")
+        self.assertEqual(paths.config_get("lang"), "en")  # other settings survive
+        w.set_view_level("advanced")
+        self.assertTrue(visible(w.grp_adv))
+        self.assertTrue(w.tabs.isTabVisible(1))
+        self.assertFalse(w.tabs.isTabVisible(2))
+        w.set_view_level("pro")
+        self.assertTrue(w.tabs.isTabVisible(2))
+        self.assertIn("pid", w.lbl_edit_state.text())
+
+    def test_simple_view_names_a_dynamic_target(self):
+        self.win.sidebar.select(CHROME)
+        self.win.set_mode("dynamic")
+        self.win.set_view_level("simple")
+        self.assertIn(self.gui.t("simple_dynamic_hint"), self.win.lbl_edit_state.text())
+
+    def test_overdrive_widens_the_scale_and_off_caps_at_once(self):
+        import cinegain_overdrive as od
+        s = self.slider()
+        self.assertEqual(s.maximum(), 150)
+        self.win.set_overdrive(True)
+        try:
+            self.assertTrue(od.is_on())
+            self.assertEqual(s.maximum(), 400)
+            self.assertEqual(s.danger_from, 150)
+            self.win.sidebar.select(CHROME)
+            s.setValue(300)
+            self.win.flush_pending_params()
+            self.assertEqual(AppRegistry().get(CHROME)["params"]["input_db"], 30.0)
+            self.assertIn("#FF8A1F", self.win.sliders["input_db"]["val_lbl"].styleSheet())
+        finally:
+            self.win.set_overdrive(False)
+        self.assertFalse(od.is_on())
+        self.assertEqual(s.maximum(), 150)
+        self.assertEqual(s.value(), 150)
+        self.assertEqual(AppRegistry().get(CHROME)["params"]["input_db"], 15.0)
+
+    def test_overdrive_needs_the_confirmed_dialog(self):
+        import cinegain_overdrive as od
+        Dlg = self.gui.OverdriveDialog
+        orig = Dlg.exec
+        Dlg.exec = lambda self_: self.gui.QDialog.DialogCode.Rejected
+        try:
+            self.win.toggle_overdrive()
+            self.assertFalse(od.is_on())
+            self.assertFalse(self.win.btn_overdrive.isChecked())
+        finally:
+            Dlg.exec = orig
+        dlg = Dlg(self.win)
+        self.assertFalse(dlg.btn_confirm.isEnabled())
+        dlg.check.setChecked(True)
+        self.assertTrue(dlg.btn_confirm.isEnabled())
+
+    def test_sidebar_width_is_adjustable_and_remembered(self):
+        w = self.win
+        self.assertEqual(w._sidebar_width(), 280)
+        w.resize(1400, 900)
+        w.show()
+        self.app.processEvents()
+        w.splitter.setSizes([400, 800])
+        w._save_sidebar_width()
+        self.assertGreaterEqual(paths.config_get("sidebar_width"), 300)
+        w.reset_sidebar_width()
+        self.assertEqual(paths.config_get("sidebar_width"), 280)
+        self.assertGreater(self.win.sidebar.maximumWidth(), 1000)
+
+    def test_beta_marks_are_dashed_not_symbols(self):
+        for b in self.win.film_row:
+            self.assertEqual(b.property("beta"), "true")
+            self.assertNotIn("β", b.text())
+        self.assertEqual(self.win.btn_mode_dynamic.property("beta"), "true")
+        self.assertIn("Beta", self.win.btn_mode_dynamic.text())
+
+    def test_header_shows_hidden_volume_even_at_0_db(self):
+        self.win.update_edit_header()
+        self.assertTrue(self.win.lbl_hidden.isVisibleTo(self.win))
+        self.assertEqual(self.win.lbl_hidden.text(), self.gui.t("hidden_none"))
+        self.assertFalse(self.win.btn_reset_hidden.isVisibleTo(self.win))
+
+    def test_analysis_panel_lists_sets_and_resets(self):
+        import cinegain_volume as vol
+        rows = [
+            {"id": 5, "kind": "stream", "label": "Spotify", "key": SPOTIFY, "node_name": "Spotify",
+             "hidden": 0.25, "normal": 1.0, "mute": False, "editable": True, "stored": 0.25},
+            {"id": 9, "kind": "hardware", "label": "Soundcard", "key": "hw", "node_name": "alsa",
+             "hidden": 1.0, "normal": 0.8, "mute": False, "editable": False, "stored": None},
+        ]
+        sets = []
+        panel = self.gui.AnalysisPanel(scanner=lambda: rows, setter=lambda *a: sets.append(a) or True,
+                                       history=lambda key=None: [])
+        panel.refresh()
+        self.assertEqual(panel.table.rowCount(), 2)
+        self.assertIn("−12.0 dB", panel.table.item(0, 2).text())
+        self.assertIsNotNone(panel.table.cellWidget(0, 6))   # reset button for the stream
+        self.assertIsNone(panel.table.cellWidget(1, 6))      # hardware: read-only
+        self.assertEqual(panel.table.item(1, 5).text(), self.gui.t("analysis_readonly"))
+        panel.table.cellWidget(0, 6).click()
+        self.assertEqual(sets[-1][:2], (5, 1.0))
+        panel.set_pro(True)
+        self.assertFalse(panel.table.isColumnHidden(7))
+        panel.refresh_history(force=True)
+        self.assertEqual(panel.timeline.item(0, 2).text(), self.gui.t("analysis_no_events"))
+        del vol
+
+    def test_auto_reset_switch_reaches_the_guard(self):
+        from cinegain_volume import VolumeGuard
+        self.router.guard = VolumeGuard(scanner=lambda: [], setter=lambda *a: True)
+        self.win.set_auto_reset(False)
+        self.assertFalse(self.router.guard.auto)
+        self.assertFalse(paths.config_get("volume_auto_reset"))
 
 
 if __name__ == "__main__":

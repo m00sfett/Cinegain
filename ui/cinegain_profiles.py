@@ -436,3 +436,18 @@ def read_meter(pid, runtime_dir=None):
     if magic != METER_MAGIC:
         return None
     return seq, level, leveler, gr, limit
+
+
+def read_ramp(pid, runtime_dir=None):
+    """dB a filter still has to glide up (0.5.0 meter field), or None when unknown."""
+    import struct
+    if not pid:
+        return None
+    path = os.path.join(runtime_dir or paths.RUNTIME_DIR, f"meter-{pid}.bin")
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(28)
+        magic, _seq, _a, _b, _c, _d, ramp = struct.unpack("<IIfffff", raw)
+    except (OSError, struct.error):
+        return None  # an older plugin writes only 24 bytes
+    return ramp if magic == METER_MAGIC else None
