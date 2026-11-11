@@ -59,6 +59,9 @@ Minor-Version mit Freigabe des Nutzers (Grill-Runde 0.5.0, Q14b). Die Produktaus
 - **Einstellungen:** `config.json` wird zusammengeführt statt überschrieben. Sprache, Ansichtsstufe, Sidebar-Breite und Automatik bleiben nebeneinander erhalten.
 - **Doku:** README, PRODUCT.md und DESIGN.md sind auf die neue Ausrichtung umgestellt. Untertitel und Tooltip nennen die neue Skala. Der Reset-Dialog spricht von 6 statt 8 Speicherplätzen.
 
+### Fixed
+- **Paketmetadaten (#21):** Die PipeWire-Mindestversion in .deb, .rpm und README steht wieder auf 0.3.50. Frühere Versionssprünge hatten sie über 0.3.60 auf 0.4.00 verbogen.
+
 ---
 
 ## [0.4.0] - 2026-11-11

@@ -8,7 +8,7 @@ URL:            https://roteson.de
 Source0:        https://github.com/m00sfett/cinegain/archive/refs/tags/v%{version}.tar.gz
 
 BuildRequires:  gcc
-Requires:       pipewire >= 0.4.00
+Requires:       pipewire >= 0.3.50
 Requires:       pipewire-pulseaudio
 Requires:       python3 >= 3.10
 Requires:       python3-pyqt6
