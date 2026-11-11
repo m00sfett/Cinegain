@@ -449,7 +449,31 @@ def cmd_volume_reset(args):
         print(f"Muted streams left muted: {report['muted_left']} (unmute them in the mixer)")
     if report["backup"]:
         print(f"Saved WirePlumber volumes cleaned: {report['file_entries']} (backup {report['backup']})")
+    if report.get("wireplumber") == "reloaded":
+        print("WirePlumber loaded the cleaned values (no restart needed).")
+    elif report.get("wireplumber") == "failed" and not getattr(args, "restart_wireplumber", False):
+        print("WirePlumber could not reload its saved values and may write the old ones back.\n"
+              "To make the reset permanent: cinegain volume reset --restart-wireplumber")
+    if getattr(args, "restart_wireplumber", False):
+        return _restart_wireplumber(args)
     return 0
+
+
+def _restart_wireplumber(args):
+    """Explicit, confirmed WirePlumber restart (#26): rebuilds every audio link."""
+    import cinegain_volume as vol
+    if not getattr(args, "yes", False):
+        if not sys.stdin.isatty():
+            print("Not restarting WirePlumber without confirmation (add --yes).", file=sys.stderr)
+            return 2
+        answer = input("Restart WirePlumber now? All audio links are rebuilt and playback may pause "
+                       "for a moment. [y/N] ").strip().lower()
+        if answer not in ("y", "yes", "j", "ja"):
+            print("WirePlumber not restarted.")
+            return 0
+    ok = vol.restart_wireplumber()
+    print("WirePlumber restarted." if ok else "Restarting WirePlumber failed (see the log).")
+    return 0 if ok else 1
 
 
 OVERDRIVE_WARNING = """\
@@ -659,6 +683,9 @@ def main(argv=None):
     p_vreset = sub.add_parser("volume-reset", help="Full volume reset: undo secretly lowered stream volumes")
     p_vreset.add_argument("--app", help="Only this program")
     p_vreset.add_argument("--json", action="store_true", help="Output report as JSON")
+    p_vreset.add_argument("--restart-wireplumber", action="store_true",
+                          help="Afterwards restart WirePlumber (asks first; playback may pause briefly)")
+    p_vreset.add_argument("--yes", "-y", action="store_true", help="Do not ask before restarting WirePlumber")
 
     p_od = sub.add_parser("overdrive", help="Show or switch overdrive (volume scale up to +40 dB)")
     p_od.add_argument("action", nargs="?", choices=["on", "off", "status"], default="status")
@@ -669,6 +696,9 @@ def main(argv=None):
     p_vol.add_argument("target", nargs="?", help="Node id or program (set, reset)")
     p_vol.add_argument("percent", nargs="?", type=float, help="Hidden volume in percent (0-100) for set")
     p_vol.add_argument("--json", action="store_true", help="Output as JSON")
+    p_vol.add_argument("--restart-wireplumber", action="store_true",
+                       help="reset: afterwards restart WirePlumber (asks first; playback may pause briefly)")
+    p_vol.add_argument("--yes", "-y", action="store_true", help="Do not ask before restarting WirePlumber")
 
     sub.add_parser("templates", aliases=["profiles"], help="List presets and user slots")
 

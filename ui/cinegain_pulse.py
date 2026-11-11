@@ -209,11 +209,26 @@ class PulseControl:
         _quiet(["pactl", "set-sink-mute", sink_name, "0"])
 
 
-def clean_wireplumber_targets(path):
+_TARGET = r'"target"\s*:\s*"(?P<name>(?:cinegain|kinoton)[^"]*)"'
+_TARGET_PATTERNS = (
+    (re.compile(r',\s*' + _TARGET), ""),
+    (re.compile(_TARGET + r'\s*,\s*'), ""),
+    (re.compile(r'\{\s*' + _TARGET + r'\s*\}'), "{}"),
+)
+
+
+def strip_cinegain_targets(text, keep=()):
+    """Drops saved `"target":"cinegain..."` entries, except targets named in keep."""
+    for rx, repl in _TARGET_PATTERNS:
+        text = rx.sub(lambda m, r=repl: m.group(0) if m.group("name") in keep else r, text)
+    return text
+
+
+def clean_wireplumber_targets(path, keep=()):
     """
     Removes sticky Cinegain targets from WirePlumber's stream-properties so that
-    streams are not trapped on a sink that no longer exists. Returns True if the
-    file changed.
+    streams are not trapped on a sink that no longer exists. `keep` = sink names
+    that still exist and may stay. Returns True if the file changed.
     """
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -222,9 +237,7 @@ def clean_wireplumber_targets(path):
         return False
     if "cinegain" not in content and "kinoton" not in content:
         return False
-    cleaned = re.sub(r',\s*"target"\s*:\s*"(?:cinegain|kinoton)[^"]*"', "", content)
-    cleaned = re.sub(r'"target"\s*:\s*"(?:cinegain|kinoton)[^"]*"\s*,\s*', "", cleaned)
-    cleaned = re.sub(r'\{\s*"target"\s*:\s*"(?:cinegain|kinoton)[^"]*"\s*\}', "{}", cleaned)
+    cleaned = strip_cinegain_targets(content, keep)
     if cleaned == content:
         return False
     try:

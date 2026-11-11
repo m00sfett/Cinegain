@@ -80,7 +80,8 @@ class FakeVolumes:
         self.sets = []
 
     def scan(self):
-        return [NodeVolume(n.id, n.app_name, n.binary, n.node_name, n.volume) for n in self.nodes.values()]
+        return [NodeVolume(n.id, n.app_name, n.binary, n.node_name, n.volume, n.is_sink, n.mixer, n.mute)
+                for n in self.nodes.values()]
 
     def set(self, node_id, value):
         self.sets.append((node_id, round(value, 6)))
@@ -177,6 +178,118 @@ class TestVolumeGuard(unittest.TestCase):
             self.assertTrue(os.path.exists(backup))
 
 
+SAMPLE_STREAM_PROPERTIES = (
+    "[stream-properties]\n"
+    'Output/Audio:application.name:Chromium={"mute":false, "channelMap":["FL", "FR"], "volume":0.000061, '
+    '"channelVolumes":[1.000000, 1.000000]}\n'
+    'Output/Audio:application.name:Google\\sChrome={"mute":false, "target":"cinegain_app_chrome_google_chrome_eb8b16", '
+    '"volume":1.000000, "channelMap":["FL", "FR"], "channelVolumes":[1.000000, 1.000000]}\n'
+    'Output/Audio:application.name:Firefox={"target":"cinegain_sink", "volume":1.000000}\n'
+    'Audio/Sink:media.name:Cinegain\\s\u00b7\\sGoogle\\sChrome={"volume":0.062500, "channelMap":["FL", "FR"], '
+    '"mute":false, "channelVolumes":[0.5, 0.5]}\n'
+    'Output/Audio:media.name:Cinegain\\s\u00b7\\sGoogle\\sChrome={"volume":0.062500, "mute":false}\n'
+    'Audio/Sink:node.name:alsa_output.usb={"volume":0.4, "mute":false}\n'
+    'Output/Audio:application.name:Spotify={"target":"alsa_output.hdmi", "volume":1.000000}\n'
+    'Input/Audio:application.name:Mic={"volume":0.4}\n'
+)
+
+
+class TestSavedVolumes(unittest.TestCase):
+    """#26: the full reset did not hold: Audio/Sink entries, stale targets, WirePlumber's copy in memory."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="cinegain-wp-")
+        self.path = os.path.join(self.tmp, "stream-properties")
+        with open(self.path, "w", encoding="utf-8") as f:
+            f.write(SAMPLE_STREAM_PROPERTIES)
+
+    def entries(self):
+        out = {}
+        for line in open(self.path, encoding="utf-8").read().splitlines()[1:]:
+            k, v = line.split("=", 1)
+            out[k] = v
+        return out
+
+    def test_cleanup_covers_cinegain_sinks_and_stale_targets_only(self):
+        n, backup = clean_stream_properties(self.path, backup_dir=os.path.join(self.tmp, "bk"), stamp="t",
+                                            existing_sinks={"cinegain_sink", "alsa_output.hdmi"})
+        e = self.entries()
+        sink = "Audio/Sink:media.name:Cinegain\\s\u00b7\\sGoogle\\sChrome"
+        self.assertIn('"volume":1.000000', e[sink])
+        self.assertIn('"channelVolumes":[1.000000, 1.000000]', e[sink])
+        self.assertIn('"volume":1.000000', e["Output/Audio:media.name:Cinegain\\s\u00b7\\sGoogle\\sChrome"])
+        self.assertIn('"volume":1.000000', e["Output/Audio:application.name:Chromium"])
+        # the target on a sink that is gone is dropped; one on a running sink and foreign ones stay
+        self.assertNotIn("target", e["Output/Audio:application.name:Google\\sChrome"])
+        self.assertIn('"target":"cinegain_sink"', e["Output/Audio:application.name:Firefox"])
+        self.assertIn('"target":"alsa_output.hdmi"', e["Output/Audio:application.name:Spotify"])
+        # hardware sinks and inputs are not Cinegain's business
+        self.assertEqual(e["Audio/Sink:node.name:alsa_output.usb"], '{"volume":0.4, "mute":false}')
+        self.assertEqual(e["Input/Audio:application.name:Mic"], '{"volume":0.4}')
+        self.assertEqual(n, 4)
+        self.assertEqual(open(backup, encoding="utf-8").read(), SAMPLE_STREAM_PROPERTIES)
+
+    def _runner(self, values, fail_set=False):
+        calls = []
+
+        class Res:
+            def __init__(self, rc=0, out=""):
+                self.returncode, self.stdout, self.stderr = rc, out, ""
+
+        def run(cmd, **kw):
+            calls.append(cmd)
+            if cmd[:2] != ["wpctl", "settings"]:
+                raise AssertionError(f"unexpected command {cmd}")
+            key = cmd[2]
+            if len(cmd) == 3:
+                return Res(0, f"Value: {'true' if values[key] else 'false'}\n")
+            if fail_set and cmd[3] == "false" and key == "node.stream.restore-props":
+                return Res(1)
+            values[key] = cmd[3] == "true"
+            return Res()
+        return run, calls
+
+    def test_wireplumber_reloads_the_cleaned_file_and_settings_come_back(self):
+        import cinegain_volume as vol
+        values = {"node.stream.restore-props": True, "node.stream.restore-target": True}
+        run, calls = self._runner(values)
+        seen = {}
+        slept = []
+
+        def clean():
+            seen.update(values)  # what WirePlumber had while the file was rewritten
+            seen["slept"] = sum(slept)  # a pending save of the old copy (1 s) must have landed
+            return clean_stream_properties(self.path, backup_dir=False)
+
+        (n, _), ok = vol.reload_wireplumber_state(clean, runner=run, sleep=slept.append)
+        self.assertTrue(ok)
+        self.assertGreater(n, 0)
+        self.assertGreater(seen.pop("slept"), 1.0)
+        self.assertEqual(seen, {"node.stream.restore-props": False, "node.stream.restore-target": False})
+        self.assertEqual(values, {"node.stream.restore-props": True, "node.stream.restore-target": True})
+        sets = [c[2:] for c in calls if len(c) == 4]
+        self.assertEqual(sets, [["node.stream.restore-target", "false"], ["node.stream.restore-props", "false"],
+                                ["node.stream.restore-props", "true"], ["node.stream.restore-target", "true"]])
+
+    def test_user_settings_are_respected_and_restored_after_a_failure(self):
+        import cinegain_volume as vol
+        values = {"node.stream.restore-props": True, "node.stream.restore-target": False}  # user turned one off
+        run, calls = self._runner(values, fail_set=True)
+        (n, _), ok = vol.reload_wireplumber_state(lambda: (1, None), runner=run, sleep=lambda s: None)
+        self.assertFalse(ok)                                    # reported, so the CLI offers the restart
+        self.assertEqual(values, {"node.stream.restore-props": True, "node.stream.restore-target": False})
+        self.assertNotIn(["wpctl", "settings", "node.stream.restore-target", "false"], calls)
+        self.assertNotIn(["wpctl", "settings", "node.stream.restore-target", "true"], calls)
+
+    def test_tests_never_reach_the_live_wireplumber(self):
+        import cinegain_volume as vol
+
+        def run(cmd, **kw):
+            raise AssertionError(f"live command {cmd}")
+        self.assertNotEqual(paths.WIREPLUMBER_STREAM_PROPS, paths.DEFAULT_WP_STREAM_PROPS)
+        self.assertEqual(vol.reset_saved_volumes(runner=run, sleep=lambda s: None)["wireplumber"], "skipped")
+
+
 class TestRouterVolume(tr.Base):
     def setUp(self):
         super().setUp()
@@ -191,7 +304,8 @@ class TestRouterVolume(tr.Base):
         self.router.full_volume_reset.__func__  # exists
         import cinegain_volume
         self._clean = cinegain_volume.clean_stream_properties
-        cinegain_volume.clean_stream_properties = lambda: (0, None)
+        cinegain_volume.clean_stream_properties = lambda *a, **k: (0, None)
+        self.router.saved_reset_in_background = False
 
     def tearDown(self):
         import cinegain_router
@@ -341,6 +455,24 @@ class TestRouterVolume(tr.Base):
         dbs = [mixer_db(20)] + [mixer_db(p) for p in series]
         self.assertLessEqual(max(y - x for x, y in zip(dbs, dbs[1:])), MAX_STEP_DB + 1e-6)
         self.assertGreaterEqual(len(series), 40)                  # ~4.2 s at 100 ms, from the quiet channel
+
+    def test_full_reset_includes_cinegain_sinks_not_hardware_and_passes_running_sinks(self):
+        import cinegain_volume
+        seen = {}
+        orig = cinegain_volume.reset_saved_volumes
+        cinegain_volume.reset_saved_volumes = lambda existing: seen.setdefault("sinks", set(existing)) and {
+            "file_entries": 0, "backup": None, "wireplumber": "skipped"}
+        try:
+            self.volumes.nodes[61] = NodeVolume(61, "", "", "cinegain_sink", 0.25, is_sink=True)
+            self.volumes.nodes[62] = NodeVolume(62, "", "", "alsa_output.analog-stereo", 0.25, is_sink=True)
+            report = self.router.full_volume_reset()
+        finally:
+            cinegain_volume.reset_saved_volumes = orig
+        self.assertIn(61, self.router.guard.fades)              # Cinegain's filter input fades back
+        self.assertNotIn(62, self.router.guard.fades)           # the sound card stays as it is
+        self.assertEqual(self._writes(62), [])
+        self.assertIn("cinegain_sink", seen["sinks"])           # targets on running sinks may stay
+        self.assertEqual(report["wireplumber"], "skipped")
 
     def test_reset_of_one_program_leaves_others(self):
         self.stream(1, "Chromium", "ChatGPT")

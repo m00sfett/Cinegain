@@ -68,9 +68,9 @@ RUNTIME_DIR = _runtime_dir()
 LOG_DIR = os.environ.get("CINEGAIN_LOG_DIR") or os.path.join(
     os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"), "cinegain"
 )
-WIREPLUMBER_STREAM_PROPS = os.environ.get("CINEGAIN_WP_STREAM_PROPS") or os.path.expanduser(
-    "~/.local/state/wireplumber/stream-properties"
-)
+DEFAULT_WP_STREAM_PROPS = os.path.expanduser("~/.local/state/wireplumber/stream-properties")
+# Tests point this elsewhere; only the real file makes Cinegain talk to the running WirePlumber.
+WIREPLUMBER_STREAM_PROPS = os.environ.get("CINEGAIN_WP_STREAM_PROPS") or DEFAULT_WP_STREAM_PROPS
 
 STATE_FILE = os.path.join(CONFIG_DIR, "state.json")
 USER_PRESETS_FILE = os.path.join(CONFIG_DIR, "user_presets.json")

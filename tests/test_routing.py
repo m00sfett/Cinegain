@@ -559,6 +559,13 @@ class TestReset(Base):
         self.assertNotIn("cinegain", content)
         self.assertIn("alsa_output.hdmi", content)
 
+    def test_wireplumber_cleanup_can_keep_targets_of_running_sinks(self):
+        with open(paths.WIREPLUMBER_STREAM_PROPS, "w") as f:
+            f.write('a={"target":"cinegain_sink", "mute":false}\nb={"mute":false, "target":"cinegain_app_x"}\n')
+        self.assertTrue(clean_wireplumber_targets(paths.WIREPLUMBER_STREAM_PROPS, keep={"cinegain_sink"}))
+        with open(paths.WIREPLUMBER_STREAM_PROPS) as f:
+            self.assertEqual(f.read(), 'a={"target":"cinegain_sink", "mute":false}\nb={"mute":false}\n')
+
 
 class TestUpdatedExecutable(Base):
     """Chrome after a package update reports binary "chrome (deleted)" (0.3.4 made a second program)."""

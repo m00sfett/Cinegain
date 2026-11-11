@@ -10,6 +10,7 @@ Router.tick() is called periodically by the GUI (and by `cinegain watch`).
 It only issues `pactl move-sink-input` for streams that are on the wrong sink,
 so steady state costs two pactl calls per tick.
 """
+import threading
 import time
 
 import cinegain_log
@@ -83,6 +84,7 @@ class Router:
         self._meter_state = {}    # pid -> (last seq, last log time)
         # Hidden-volume guard (cinegain_volume.VolumeGuard); None in tests and one-shot CLI calls.
         self.guard = guard
+        self.saved_reset_in_background = True  # full reset with a guard: WirePlumber reload in a thread
 
     @staticmethod
     def target_profile(key, entry, active=True):
@@ -352,7 +354,7 @@ class Router:
         Returns a report dict.
         """
         import cinegain_modes as modes
-        from cinegain_volume import HIDDEN_EPS, VolumeGuard, clean_stream_properties, from_db
+        from cinegain_volume import HIDDEN_EPS, VolumeGuard, from_db
 
         guard = self.guard or VolumeGuard()
         now = self.clock()
@@ -369,11 +371,12 @@ class Router:
         owners = {}   # node id -> owner
         lowered = []
         only_profile = profile_id_for(only) if only else None
+        only_sink = sink_name(only_profile) if only else None
         for n in nodes:
-            if n.volume >= HIDDEN_EPS:
-                continue
+            if n.volume >= HIDDEN_EPS or (n.is_sink and not n.is_cinegain_sink):
+                continue  # hardware sinks stay untouched
             if only and n.key != only and not (
-                    n.is_cinegain_output and n.node_name.endswith(only_profile)):
+                    n.is_cinegain_output and n.node_name.endswith(only_profile)) and n.node_name != only_sink:
                 continue
             lowered.append(n)
             owner = self._compensation_owner(n, streams_by_key, sink_ids, profile_keys, standard)
@@ -427,12 +430,29 @@ class Router:
             self._fade_mixer(guard, st, now)
             report["volumes_100"] += 1
 
+        if clean_file and not only:
+            existing = set(sink_ids.values())
+            if self.guard is not None and self.saved_reset_in_background:
+                # GUI / watch: WirePlumber's reload waits ~1.5 s, keep the UI and the fades going
+                threading.Thread(target=self._reset_saved, args=(existing,), name="wp-reset", daemon=True).start()
+                report["wireplumber"] = "reloading"
+            else:
+                report.update(self._reset_saved(existing))
         if self.guard is None:
             guard.run_fades()  # one-shot use (CLI): run the fades here
-        if clean_file and not only:
-            report["file_entries"], report["backup"] = clean_stream_properties()
         log.warning("full volume reset done: %s", report)
         return report
+
+    @staticmethod
+    def _reset_saved(existing_sinks):
+        import cinegain_volume
+        try:
+            result = cinegain_volume.reset_saved_volumes(existing_sinks)
+        except Exception:
+            log.exception("resetting the saved WirePlumber volumes failed")
+            return {"file_entries": 0, "backup": None, "wireplumber": "failed"}
+        log.info("full reset: saved volumes %s", result)
+        return result
 
     def _fade_mixer(self, guard, st, now):
         """Fades a stream's mixer volume (all channels) to 100 % from its quietest channel."""

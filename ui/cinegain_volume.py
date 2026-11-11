@@ -87,15 +87,22 @@ class Fade:
 
 
 class NodeVolume:
-    __slots__ = ("id", "key", "app_name", "binary", "node_name", "volume")
+    __slots__ = ("id", "key", "app_name", "binary", "node_name", "volume", "is_sink", "mixer", "mute")
 
-    def __init__(self, node_id, app_name, binary, node_name, volume):
+    def __init__(self, node_id, app_name, binary, node_name, volume, is_sink=False, mixer=1.0, mute=False):
         self.id = node_id
         self.app_name = app_name or ""
         self.binary = binary or ""
         self.node_name = node_name or ""
         self.volume = float(volume)
+        self.is_sink = bool(is_sink)   # Audio/Sink (hardware or Cinegain filter input)
+        self.mixer = float(mixer)      # loudest channel volume (linear), what mixers show
+        self.mute = bool(mute)
         self.key = make_key(self.app_name or self.node_name, self.binary)
+
+    @property
+    def is_cinegain_sink(self):
+        return self.is_sink and self.node_name.startswith("cinegain")
 
     @property
     def is_cinegain_output(self):
@@ -109,28 +116,33 @@ class NodeVolume:
         return f"NodeVolume({self.id}, {self.key!r}, {self.node_name!r}, {self.volume:.6f})"
 
 
-def parse_nodes(dump):
-    """Playback stream nodes with their hidden volume from `pw-dump` JSON."""
+def parse_nodes(dump, sinks=False):
+    """Playback stream nodes (and with sinks=True also Audio/Sink nodes) from `pw-dump` JSON."""
+    classes = ("Stream/Output/Audio", "Audio/Sink") if sinks else ("Stream/Output/Audio",)
     out = []
     for obj in dump if isinstance(dump, list) else []:
         if not isinstance(obj, dict) or obj.get("type") != "PipeWire:Interface:Node":
             continue
         info = obj.get("info") or {}
         props = info.get("props") or {}
-        if props.get("media.class") != "Stream/Output/Audio":
+        if props.get("media.class") not in classes:
             continue
         for p in (info.get("params") or {}).get("Props") or []:
             if isinstance(p, dict) and isinstance(p.get("volume"), (int, float)):
+                chans = [float(v) for v in p.get("channelVolumes") or [] if isinstance(v, (int, float))]
                 out.append(NodeVolume(obj.get("id"), props.get("application.name"),
                                       props.get("application.process.binary"),
-                                      props.get("node.name"), p["volume"]))
+                                      props.get("node.name"), p["volume"],
+                                      is_sink=props.get("media.class") == "Audio/Sink",
+                                      mixer=max(chans) if chans else 1.0, mute=p.get("mute")))
                 break
     return out
 
 
 def scan_nodes():
+    """Streams and sinks, one `pw-dump` per tick (the guard splits them)."""
     try:
-        return parse_nodes(json.loads(subprocess.check_output(["pw-dump"], stderr=subprocess.DEVNULL)))
+        return parse_nodes(json.loads(subprocess.check_output(["pw-dump"], stderr=subprocess.DEVNULL)), sinks=True)
     except (subprocess.CalledProcessError, ValueError, OSError) as e:
         log.warning("pw-dump for the volume guard failed: %s", e)
         return []
@@ -174,7 +186,8 @@ class VolumeGuard:
         self.auto = auto
         self.fades = {}      # node id (hidden volume) or ("mixer", stream) -> Fade
         self._last = {}      # node id -> last seen or written hidden volume
-        self.nodes = []
+        self.nodes = []      # playback streams of the last scan
+        self.sinks = []      # sinks of the last scan (hardware and Cinegain)
 
     def known_volume(self, node_id, current=None):
         """
@@ -232,8 +245,7 @@ class VolumeGuard:
     def refresh(self, now=None):
         """One scan that only learns the current levels (no logging, no fades)."""
         self._refreshed_at = self.clock() if now is None else now
-        self.nodes = self.scanner()
-        for n in self.nodes:
+        for n in self.scanner():
             if n.id not in self.fades:
                 self._last[n.id] = n.volume
 
@@ -267,7 +279,9 @@ class VolumeGuard:
         global _live
         now = self.clock() if now is None else now
         _live, self._alive = self, time.monotonic()
-        self.nodes = self.scanner()
+        scanned = self.scanner()
+        self.nodes = [n for n in scanned if not n.is_sink]
+        self.sinks = [n for n in scanned if n.is_sink]
         hidden = {}
         seen = set()
         for n in self.nodes:
@@ -322,14 +336,25 @@ class VolumeGuard:
         return False
 
 
-def clean_stream_properties(path=None, backup_dir=None, stamp=None):
+def _is_cinegain_sink_entry(line):
+    key = line.split("=", 1)[0].lower()
+    return key.startswith("audio/sink:") and ("cinegain" in key or "kinoton" in key)
+
+
+def clean_stream_properties(path=None, backup_dir=None, stamp=None, existing_sinks=None):
     """
     Resets saved playback volumes in WirePlumber's stream-properties (volume and
-    channel volumes to 1.0, mute off). Device routes and sinks stay untouched.
+    channel volumes to 1.0, mute off): every Output/Audio entry and the Audio/Sink
+    entries of Cinegain's own sinks, whose saved lowering came back with every
+    restart of a program sink (#26). With existing_sinks (sink names), saved
+    targets on Cinegain sinks that no longer exist are dropped too. Hardware
+    sinks and inputs stay untouched.
     Returns (number of changed entries, backup path or None).
-    Note: WirePlumber keeps its own copy in memory; entries of streams that are not
-    playing can come back until those programs play again (then the guard fixes them).
+    Note: the running WirePlumber keeps its own copy in memory and writes it back;
+    reset_saved_volumes() makes it load the cleaned file.
     """
+    from cinegain_pulse import strip_cinegain_targets
+
     path = path or paths.WIREPLUMBER_STREAM_PROPS
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -339,17 +364,19 @@ def clean_stream_properties(path=None, backup_dir=None, stamp=None):
     changed = 0
     out = []
     for line in lines:
-        if line.startswith("Output/Audio:"):
-            new = re.sub(r'"volume":\s*[0-9.eE+-]+', '"volume":1.000000', line)
+        new = line
+        if line.startswith("Output/Audio:") or _is_cinegain_sink_entry(line):
+            new = re.sub(r'"volume":\s*[0-9.eE+-]+', '"volume":1.000000', new)
             new = re.sub(r'"channelVolumes":\s*\[[^\]]*\]',
                          lambda m: '"channelVolumes":[' + ", ".join(
                              "1.000000" for _ in m.group(0).split(":", 1)[1].strip("[] ").split(",")) + "]",
                          new)
             new = re.sub(r'"mute":\s*true', '"mute":false', new)
-            if new != line:
-                changed += 1
-            line = new
-        out.append(line)
+        if existing_sinks is not None:
+            new = strip_cinegain_targets(new, existing_sinks)
+        if new != line:
+            changed += 1
+        out.append(new)
     if not changed:
         return 0, None
     backup = None
@@ -360,6 +387,107 @@ def clean_stream_properties(path=None, backup_dir=None, stamp=None):
     paths.write_text_atomic(path, "".join(out))
     log.info("cleaned %d saved stream volumes in %s (backup %s)", changed, path, backup)
     return changed, backup
+
+
+# -- WirePlumber's copy in memory (#26) -------------------------------------------
+# WirePlumber (0.5, state-stream.lua) loads stream-properties once and writes its
+# in-memory table back on the next save, so a cleaned file alone does not hold.
+# Live nodes are no problem: a Props change via pw-cli makes WirePlumber save the
+# new value itself (`wpctl set-volume` would only touch the mixer channelVolumes).
+# For programs that are not playing there is no API, but switching the settings
+# node.stream.restore-props/-target off drops the state object, and switching them
+# on again creates a new one that loads the file. Runtime settings only (no --save),
+# no restart, no rebuilt links.
+WP_SETTINGS = ("node.stream.restore-target", "node.stream.restore-props")
+WP_SAVE_GRACE_S = 1.5   # WirePlumber saves 1 s after a change; a pending save must land first
+
+
+def _wp_get(key, runner):
+    try:
+        res = runner(["wpctl", "settings", key], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r"^Value:\s*(true|false)\s*$", res.stdout or "", re.MULTILINE)
+    return None if res.returncode != 0 or not m else m.group(1) == "true"
+
+
+def _wp_set(key, value, runner):
+    try:
+        res = runner(["wpctl", "settings", key, "true" if value else "false"],
+                     capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return res.returncode == 0
+
+
+def reload_wireplumber_state(clean, runner=subprocess.run, sleep=time.sleep):
+    """
+    Runs clean() while WirePlumber's stream state is switched off, so the running
+    instance loads the cleaned file instead of writing its old copy back.
+    Returns (clean()'s result, True if the settings were switched and restored).
+    Every setting that was switched off is switched back on, whatever happens.
+    """
+    values = {key: _wp_get(key, runner) for key in WP_SETTINGS}
+    if None in values.values():
+        log.warning("wpctl settings not readable (%s): stream-properties cleaned without reload", values)
+        return clean(), False
+    if not any(values.values()):
+        return clean(), True  # stream state is off: WirePlumber holds no copy
+    switched = []
+    ok = True
+    try:
+        for key in WP_SETTINGS:
+            if values[key]:
+                if not _wp_set(key, False, runner):
+                    ok = False
+                    break
+                switched.append(key)
+        if ok:
+            sleep(WP_SAVE_GRACE_S)
+        result = clean()
+    finally:
+        for key in reversed(switched):
+            if not _wp_set(key, True, runner):
+                ok = False
+        restored = all(_wp_get(key, runner) is True for key in switched)
+        if not restored:
+            log.error("WirePlumber settings %s could not be switched back on", switched)
+    ok = ok and restored
+    log.info("WirePlumber stream state %s", "reloaded from the cleaned file" if ok else "NOT reloaded")
+    return result, ok
+
+
+def reset_saved_volumes(existing_sinks=None, runner=subprocess.run, sleep=time.sleep):
+    """
+    Full reset of the saved values: cleans stream-properties (with backup) and makes
+    the running WirePlumber load it. Only for the real file: tests point
+    CINEGAIN_WP_STREAM_PROPS elsewhere and never reach the live WirePlumber.
+    Returns {"file_entries", "backup", "wireplumber": reloaded|failed|skipped}.
+    """
+    path = paths.WIREPLUMBER_STREAM_PROPS
+
+    def clean():
+        return clean_stream_properties(path, existing_sinks=existing_sinks)
+
+    if os.path.abspath(path) != os.path.abspath(paths.DEFAULT_WP_STREAM_PROPS):
+        (n, backup), state = clean(), "skipped"
+    else:
+        (n, backup), ok = reload_wireplumber_state(clean, runner, sleep)
+        state = "reloaded" if ok else "failed"
+    return {"file_entries": n, "backup": backup, "wireplumber": state}
+
+
+def restart_wireplumber(runner=subprocess.run):
+    """Last resort, only on explicit request: rebuilds all audio links (playback may pause)."""
+    log.warning("restarting WirePlumber on request")
+    try:
+        res = runner(["systemctl", "--user", "restart", "wireplumber"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as e:
+        log.error("restarting WirePlumber failed: %s", e)
+        return False
+    if res.returncode != 0:
+        log.error("restarting WirePlumber failed: %s", (res.stderr or "").strip())
+    return res.returncode == 0
 
 
 # -- analysis view (0.5.0) ---------------------------------------------------------
