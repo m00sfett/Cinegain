@@ -23,10 +23,12 @@ elif os.path.exists(os.path.expanduser("~/.local/bin/cinegain")):
 else:
     BIN_PATH = "cinegain"
 
-APP_VERSION = "0.3.6"
+APP_VERSION = "0.4.0"
 
 os.environ.setdefault("CINEGAIN_BASE_DIR", BASE_DIR)
 import cinegain_log  # noqa: E402
+import cinegain_modes as modes  # noqa: E402
+from cinegain_volume import VolumeGuard  # noqa: E402
 from cinegain_lock import RouterLock, gui_socket_path  # noqa: E402
 import cinegain_paths as paths  # noqa: E402
 from cinegain_profiles import (  # noqa: E402
@@ -45,7 +47,10 @@ CONFIG_DIR = paths.CONFIG_DIR
 USER_PRESETS_FILE = paths.USER_PRESETS_FILE
 CONFIG_FILE = paths.CONFIG_FILE
 log = cinegain_log.get("gui")
-LEVELER_DEFAULT_CUT_DB = 6.0  # cut range given to a leveler the user switches on via the boost slider
+LEVELER_DEFAULT_CUT_DB = 6.0
+USER_SLOT_IDS = tuple(f"user_{i}" for i in range(1, 7))  # 6 slots since 0.4.0
+# Sliders of the left column (the rest is the right column); used for F6.
+LEFT_COLUMN = ("input_db", "dialog_db", "lev_max_boost_db", "mid_db")  # cut range given to a leveler the user switches on via the boost slider
 
 try:
     from PyQt6.QtWidgets import (
@@ -630,6 +635,9 @@ class CinegainMainWindow(QMainWindow):
         self.catalog = ProfileCatalog()
         self.selected_key = STANDARD  # None = Standard, otherwise a program key
         self._views = []  # AppView list from the last routing tick (meter source selection)
+        self._mode = modes.MODE_FIXED  # mode of the editing target
+        self._sets = modes.clean_sets(None)  # both value sets of the editing target
+        self._std_mode = None  # Standard's mode (sidebar beta marker)
         self._last_status = None  # last status line written to the debug log
         self._program_dirty = None  # program key whose own values wait for the debounced flush
         self._initial_selection_done = False
@@ -674,6 +682,12 @@ class CinegainMainWindow(QMainWindow):
         self.timer.timeout.connect(self.on_heartbeat)
         self.timer.start(1500)
 
+        # Smooth fade-ins of the hidden-volume guard (3 s, stepped every 100 ms).
+        self.fade_timer = QTimer(self)
+        self.fade_timer.setInterval(100)
+        self.fade_timer.timeout.connect(self._step_fades)
+        self.fade_timer.start()
+
         # Auto-start Cinegain engine on initial GUI launch if not running
         out, code = run_cinegain("status", "--json")
         try:
@@ -683,7 +697,12 @@ class CinegainMainWindow(QMainWindow):
         except ValueError:
             pass
 
+        if modes.load_standard()["migrated"]:
+            # 0.3.x state: Standard starts fixed and neutral (Q5, Q20b); save and apply that now.
+            log.info("Standard migrated to the 0.4.0 modes (fixed, neutral)")
+            run_cinegain("batch", "{}")
         self.on_heartbeat(sync_sliders=True)
+        self.refresh_editor()
         # Focus the primary Direct-Boost slider immediately for instant keyboard control
         self.set_focused_slider(0)
 
@@ -706,22 +725,14 @@ class CinegainMainWindow(QMainWindow):
             return {}
 
     def _load_user_presets(self):
-        slots = {f"user_{i}": {"name": f"Eigenes {i}", "params": None} for i in range(1, 9)}
-        if os.path.exists(USER_PRESETS_FILE):
-            try:
-                with open(USER_PRESETS_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                for sid, sdata in data.items():
-                    if sid in slots and isinstance(sdata, dict):
-                        slots[sid]["name"] = sdata.get("name", slots[sid]["name"])
-                        if isinstance(sdata.get("params"), dict) and sdata["params"]:
-                            slots[sid]["params"] = {
-                                k.replace("cinegain:", ""): float(v)
-                                for k, v in sdata["params"].items()
-                            }
-            except Exception:
-                pass
-        return slots
+        """6 user slots; each remembers its mode (0.3.x slots get one from their values)."""
+        slots = self.catalog.user_slots()
+        for i, sid in enumerate(USER_SLOT_IDS, start=1):
+            slot = slots.get(sid) or {"name": f"User {i}", "params": None, "mode": None}
+            if slot["params"]:
+                slot["params"] = modes.mode_values(slot["mode"], slot["params"])
+            slots[sid] = slot
+        return {sid: slots[sid] for sid in USER_SLOT_IDS}
 
     def _save_user_presets(self):
         try:
@@ -792,7 +803,9 @@ class CinegainMainWindow(QMainWindow):
             self.meter_strip.setToolTip(t("meter_tip"))
             self.meter_strip.update()
 
-        self.details.setText(t("details"))
+        self._retranslate_mode_switch()
+        self.btn_full_reset.setText(t("btn_full_reset"))
+        self.btn_full_reset.setToolTip(t("btn_full_reset_tip"))
         if hasattr(self, "grp_presets"):
             self.grp_presets.setTitle(amp(t("presets_group").partition("(")[0].partition("（")[0].strip()))
         if hasattr(self, "grp_main"):
@@ -807,7 +820,7 @@ class CinegainMainWindow(QMainWindow):
             self.btn_reset.setToolTip(t("btn_reset_tip"))
 
         for pid, b in self.preset_buttons.items():
-            b.setText(amp(t(f"preset_{pid}")))
+            b.setText(amp(self._preset_label(pid)))
 
         for param_name, meta in self.slider_ui_elements.items():
             lbl = meta["label"]
@@ -830,6 +843,7 @@ class CinegainMainWindow(QMainWindow):
             self.tray_toggle_action.setText(t("tray_toggle"))
             self.tray_quit_action.setText(t("tray_quit"))
             self.tray_log_action.setText(t("tray_log"))
+            self.tray_reset_action.setText(t("btn_full_reset"))
             for pid, act in self.tray_preset_actions.items():
                 act.setText(self._tray_preset_label(pid))
 
@@ -911,6 +925,29 @@ class CinegainMainWindow(QMainWindow):
                 hdr.addWidget(brand_label(path, 50, tip, link), 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(banner)
 
+        # Warning bar: programs secretly turned down by PipeWire (hidden node volume).
+        self.hidden_bar = QFrame()
+        self.hidden_bar.setObjectName("hidden_bar")
+        self.hidden_bar.setStyleSheet(
+            "QFrame#hidden_bar { background-color: #2A0E0E; border: 1px solid #A86B4A; border-radius: 8px; }"
+            "QLabel { background: transparent; color: #E8C462; font-weight: 700; }"
+            "QPushButton { background-color: #3D2C07; color: #FFD21F; border: 1px solid #FFD21F; "
+            "border-radius: 6px; padding: 5px 12px; font-weight: 800; }"
+            "QPushButton:hover { background-color: #8C1014; }"
+        )
+        hb = QHBoxLayout(self.hidden_bar)
+        hb.setContentsMargins(14, 6, 8, 6)
+        self.lbl_hidden_bar = QLabel()
+        self.lbl_hidden_bar.setWordWrap(True)
+        self.btn_full_reset = QPushButton()
+        self.btn_full_reset.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_full_reset.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.btn_full_reset.clicked.connect(lambda: self.full_volume_reset())
+        hb.addWidget(self.lbl_hidden_bar, 1)
+        hb.addWidget(self.btn_full_reset, 0)
+        self.hidden_bar.hide()
+        layout.addWidget(self.hidden_bar)
+
         # Body: program sidebar (left) selects what the editor (right) changes.
         body = QHBoxLayout()
         body.setSpacing(14)
@@ -930,55 +967,47 @@ class CinegainMainWindow(QMainWindow):
         presets_vbox.setSpacing(8)
         presets_vbox.setContentsMargins(10, 12, 10, 8)
 
-        # Row 1: Factory Presets
-        row1 = QGridLayout()
-        row1.setSpacing(6)
-
-        factory_row_def = [
-            ("clean_linear", t("preset_clean_linear"), "0 dB"),
-            ("boost_5db", t("preset_boost_5db"), "+5 dB"),
-            ("boost_10db", t("preset_boost_10db"), "+10 dB"),
-            ("boost_15db", t("preset_boost_15db"), "+15 dB"),
-            ("boost_20db", t("preset_boost_20db"), "+20 dB"),
-            ("boost_25db", t("preset_boost_25db"), "+25 dB"),
-            ("|", "", ""),
-            ("dialog_boost", t("preset_dialog_boost"), ""),
-            ("night_mode", t("preset_night_mode"), ""),
-            ("max_loudness", t("preset_max_loudness"), ""),
+        # Every preset and slot is always visible (0.4.0, "Weitere Einstellungen" is gone).
+        # Row 1: fixed volume steps · Row 2: dynamic film presets (beta) · Row 3: 6 user slots
+        grid = QGridLayout()
+        grid.setSpacing(6)
+        fixed_row = [
+            ("clean_linear", "0 dB"), ("boost_5db", "+5 dB"), ("boost_10db", "+10 dB"),
+            ("boost_15db", "+15 dB"), ("boost_20db", "+20 dB"), ("boost_25db", "+25 dB"),
         ]
+        dynamic_row = ["dialog_boost", "night_mode", "max_loudness"]
 
-        self.details = QCheckBox(t("details"))
-        self.details.toggled.connect(self.set_details_visible)
-        for index, (pid, text, tip) in enumerate(factory_row_def):
-            if pid == "|":
-                continue
-            b = QPushButton(amp(text))
+        def preset_button(pid, tip):
+            b = QPushButton(amp(self._preset_label(pid)))
             b.setToolTip(tip)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
             b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            b.setMinimumWidth(56)  # all rows are always visible: let them share narrow windows
             b.clicked.connect(lambda checked=False, p=pid: self.apply_factory_preset(p))
-            row1.addWidget(b, 1 if index < 6 else 0, index if index < 6 else index - 7)
             self.preset_buttons[pid] = b
+            return b
 
-        row1.addWidget(self.details, 0, 3, 1, 3)
-        presets_vbox.addLayout(row1)
+        for col, (pid, tip) in enumerate(fixed_row):
+            grid.addWidget(preset_button(pid, f"{t('mode_fixed')} · {tip}"), 0, col)
+        for i, pid in enumerate(dynamic_row):
+            grid.addWidget(preset_button(pid, t("mode_dynamic_tip")), 1, i * 2, 1, 2)
+        presets_vbox.addLayout(grid)
 
-        # Row 2: 8 User Preset Slots
         row2 = QGridLayout()
         row2.setSpacing(6)
-        for i in range(1, 9):
-            sid = f"user_{i}"
+        for i, sid in enumerate(USER_SLOT_IDS):
             b = QPushButton()
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
             b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             b.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            b.setMinimumWidth(56)
             b.clicked.connect(lambda checked=False, s=sid: self.on_user_preset_clicked(s))
             b.customContextMenuRequested.connect(
                 lambda pos, s=sid, btn=b: self.show_user_preset_menu(s, btn, pos)
             )
-            row2.addWidget(b, (i-1) // 4, (i-1) % 4)
+            row2.addWidget(b, 0, i)
             self.user_preset_buttons[sid] = b
 
         presets_vbox.addLayout(row2)
@@ -1013,17 +1042,6 @@ class CinegainMainWindow(QMainWindow):
 
         self.add_control_slider(
             gm_layout,
-            "lbl_lev_max_boost_db",
-            "lev_max_boost_db",
-            0.0,
-            24.0,
-            15.0,
-            " dB",
-            "tip_lev_max_boost_db",
-        )
-
-        self.add_control_slider(
-            gm_layout,
             "lbl_dialog_db",
             "dialog_db",
             -6.0,
@@ -1031,6 +1049,17 @@ class CinegainMainWindow(QMainWindow):
             6.5,
             " dB",
             "tip_dialog_db",
+        )
+
+        self.add_control_slider(
+            gm_layout,
+            "lbl_lev_max_boost_db",
+            "lev_max_boost_db",
+            0.0,
+            24.0,
+            15.0,
+            " dB",
+            "tip_lev_max_boost_db",
         )
 
         self.add_control_slider(
@@ -1044,16 +1073,6 @@ class CinegainMainWindow(QMainWindow):
             "tip_mid_db",
         )
 
-        self.add_control_slider(
-            gm_layout,
-            "lbl_side_db",
-            "side_db",
-            -15.0,
-            6.0,
-            -3.0,
-            " dB",
-            "tip_side_db",
-        )
         gm_layout.addStretch()
 
         # Right Column: Fine-Tuning (EQ, Compressor & Limiter)
@@ -1081,6 +1100,16 @@ class CinegainMainWindow(QMainWindow):
             1.5,
             " dB",
             "tip_treble_db",
+        )
+        self.add_control_slider(
+            adv_layout,
+            "lbl_side_db",
+            "side_db",
+            -15.0,
+            6.0,
+            -3.0,
+            " dB",
+            "tip_side_db",
         )
         self.add_control_slider(
             adv_layout,
@@ -1137,7 +1166,7 @@ class CinegainMainWindow(QMainWindow):
         cols_layout.addWidget(self.grp_main, 1)
         cols_layout.addWidget(self.grp_adv, 1)
         editor.addLayout(cols_layout, 1)
-        self.set_details_visible(False)
+        self.apply_mode_layout(modes.MODE_FIXED)
 
         # 5. Footer with Version, AGPLv3, and roteson.de link
         footer_layout = QHBoxLayout()
@@ -1196,6 +1225,7 @@ class CinegainMainWindow(QMainWindow):
         label_text = t(label_key) if label_key.startswith("lbl_") else label_key
         lbl = QLabel(label_text)
         lbl.setMinimumHeight(20 if is_hero else 18)
+        lbl.setWordWrap(True)  # both columns are always visible: long titles wrap in narrow windows
         if tip_key:
             tooltip = t(tip_key) if tip_key.startswith("tip_") else tip_key
             lbl.setToolTip(tooltip)
@@ -1218,8 +1248,7 @@ class CinegainMainWindow(QMainWindow):
             f'color: #FFD21F; font-family: "Fira Mono", monospace; font-size: {val_font_size}; font-weight: 800;'
         )
 
-        hdr.addWidget(lbl)
-        hdr.addStretch()
+        hdr.addWidget(lbl, 1)
         hdr.addWidget(val_lbl)
 
         slider = KeyNavSlider(Qt.Orientation.Horizontal, param_name)
@@ -1292,29 +1321,85 @@ class CinegainMainWindow(QMainWindow):
             if not target_slider.hasFocus():
                 target_slider.setFocus(Qt.FocusReason.OtherFocusReason)
 
-    def set_details_visible(self, visible):
-        self.grp_adv.setVisible(visible)
-        for pid, button in self.preset_buttons.items():
-            if pid == "clean_linear" or pid.startswith("boost_"):
-                button.setVisible(visible)
-        for button in self.user_preset_buttons.values():
-            button.setVisible(visible)
+    # -- modes -----------------------------------------------------------------
+    def _preset_label(self, pid):
+        label = t(f"preset_{pid}")
+        return label if modes.preset_mode(pid) == modes.MODE_FIXED else f"{label}  β"
+
+    def target_setting(self):
+        """(mode, sets, own) of the editing target; a program without own setting shows Standard's."""
+        if self.selected_key is not STANDARD:
+            entry = self.router.registry.get(self.selected_key)
+            if entry and entry["params"] is not None:
+                return entry["mode"], modes.clean_sets(entry["sets"]), True
+        st = modes.load_standard()
+        return st["mode"], st["sets"], False
+
+    def refresh_editor(self):
+        """Sliders, layout, mode switch and preset highlights from the current target."""
+        self._mode, self._sets, _ = self.target_setting()
+        self._set_sliders_silently(self._sets[self._mode])
+        self.apply_mode_layout(self._mode)
+        self.update_preset_highlights()
+        self.update_edit_header()
+
+    def apply_mode_layout(self, mode):
+        """Fixed mode hides the dynamic-only sliders; the five shared ones keep their place."""
+        self._mode = mode
+        for key in modes.DYNAMIC_ONLY_KEYS:
+            if key in self.sliders:
+                self.sliders[key]["row_frame"].setVisible(mode == modes.MODE_DYNAMIC)
+        if hasattr(self, "btn_mode_fixed"):
+            for btn, m in ((self.btn_mode_fixed, modes.MODE_FIXED), (self.btn_mode_dynamic, modes.MODE_DYNAMIC)):
+                btn.blockSignals(True)
+                btn.setChecked(m == mode)
+                btn.blockSignals(False)
+        if self.slider_order and not self._slider_visible(self.slider_order[self.focused_slider_idx]):
+            self.set_focused_slider(0, set_qt_focus=False)
+
+    def _slider_visible(self, name):
+        return self._mode == modes.MODE_DYNAMIC or name not in modes.DYNAMIC_ONLY_KEYS
+
+    def set_mode(self, mode):
+        """Switches the target between fixed and dynamic (beta). Each mode keeps its own values."""
+        if mode not in modes.MODES:
+            return
+        if mode == self._mode:
+            self.apply_mode_layout(mode)
+            return
+        log.info("mode of %s: %s -> %s", "Standard" if self.selected_key is STANDARD else self.selected_key,
+                 self._mode, mode)
+        self.param_timer.stop()
+        self.flush_pending_params()
+        if self.selected_key is STANDARD:
+            run_cinegain("batch", "{}", "--mode", mode)
+            self._reassert_bypass()
+        else:
+            key = self.selected_key
+            entry = self.router.registry.get(key)
+            # A program that follows Standard gets its own setting (Q15a), starting from Standard's values.
+            sets = modes.clean_sets(entry["sets"]) if entry["params"] is not None else modes.load_standard()["sets"]
+            self.router.registry.set_setting(key, mode, sets)
+            if not self.router.push_program_params(key):
+                self.refresh_apps()
+        self.refresh_editor()
+        self.refresh_apps()
 
     def navigate_slider(self, current_idx, delta):
-        total = len(self.slider_order) if self.details.isChecked() else 5
-        if total == 0:
+        """Up/Down walk the visible sliders; F6 (delta 100) jumps to the other column."""
+        visible = [i for i, n in enumerate(self.slider_order) if self._slider_visible(n)]
+        if not visible:
             return
-        if delta == 100 and total == 5:
-            self.details.setChecked(True)
-            total = len(self.slider_order)
         if delta == 100:
-            # Switch between Left column (0..4) and Right column (5..11)
-            if current_idx < 5:
-                next_idx = min(current_idx + 5, total - 1)
-            else:
-                next_idx = min(current_idx - 5, 4)
+            current = self.slider_order[current_idx]
+            want_left = current not in LEFT_COLUMN
+            column = [i for i in visible if (self.slider_order[i] in LEFT_COLUMN) == want_left]
+            mine = [i for i in visible if (self.slider_order[i] in LEFT_COLUMN) != want_left]
+            pos = mine.index(current_idx) if current_idx in mine else 0
+            next_idx = column[min(pos, len(column) - 1)] if column else current_idx
         else:
-            next_idx = (current_idx + delta) % total
+            pos = visible.index(current_idx) if current_idx in visible else 0
+            next_idx = visible[(pos + delta) % len(visible)]
         self.set_focused_slider(next_idx, set_qt_focus=True)
 
     def keyPressEvent(self, event: QKeyEvent):
@@ -1337,15 +1422,14 @@ class CinegainMainWindow(QMainWindow):
         return f"{val:+.1f}{unit}" if val > 0 else f"{val:.1f}{unit}"
 
     def get_current_slider_params(self):
-        return {
-            pname: round(info["slider"].value() / 10.0, 2)
-            for pname, info in self.sliders.items()
-        }
+        """Slider values of the active mode (fixed: the five shared ones)."""
+        keys = modes.FIXED_KEYS if self._mode == modes.MODE_FIXED else modes.DYNAMIC_KEYS
+        return {k: round(self.sliders[k]["slider"].value() / 10.0, 2) for k in keys if k in self.sliders}
 
-    def _params_match(self, p_a, p_b, tol=0.08):
+    def _params_match(self, p_a, p_b, keys=None, tol=0.08):
         if not p_a or not p_b:
             return False
-        for k in UI_PARAM_KEYS:
+        for k in keys or UI_PARAM_KEYS:
             if k not in p_a or k not in p_b:
                 return False
             if abs(float(p_a[k]) - float(p_b[k])) > tol:
@@ -1360,7 +1444,10 @@ class CinegainMainWindow(QMainWindow):
             if params:
                 in_db = params.get("input_db", 0.0)
                 sign = "+" if in_db > 0 else ""
-                btn.setText(amp(t("user_slot_saved", name=name, sign=sign, db=in_db)))
+                text = t("user_slot_saved", name=name, sign=sign, db=in_db)
+                if slot.get("mode") == modes.MODE_DYNAMIC:
+                    text += "  β"
+                btn.setText(amp(text))
                 btn.setToolTip(t("user_slot_saved_tip", name=name, sign=sign, db=in_db))
                 btn.setProperty("userSaved", "true")
             else:
@@ -1371,24 +1458,20 @@ class CinegainMainWindow(QMainWindow):
             btn.style().polish(btn)
 
     def update_preset_highlights(self):
-        """
-        Highlights ANY factory or user preset whose 12 parameters match the current sliders.
-        Also highlights the active user slot if it matches.
-        """
+        """A preset or slot lights up when its mode and its values match the current target."""
         current = self.get_current_slider_params()
-
-        # Check all factory presets
+        keys = modes.FIXED_KEYS if self._mode == modes.MODE_FIXED else modes.DYNAMIC_KEYS
         for pid, btn in self.preset_buttons.items():
+            pmode = modes.preset_mode(pid)
             f_params = self.factory_presets.get(pid, {}).get("params")
-            matched = self._params_match(current, f_params)
+            matched = pmode == self._mode and bool(f_params) and self._params_match(
+                current, modes.mode_values(pmode, f_params), keys)
             btn.setProperty("presetActive", "true" if matched else "false")
             btn.style().unpolish(btn)
             btn.style().polish(btn)
-
-        # Check all 8 user presets
         for sid, btn in self.user_preset_buttons.items():
-            u_params = self.user_presets.get(sid, {}).get("params")
-            matched = self._params_match(current, u_params)
+            slot = self.user_presets.get(sid, {})
+            matched = slot.get("mode") == self._mode and self._params_match(current, slot.get("params"), keys)
             btn.setProperty("presetActive", "true" if matched else "false")
             btn.style().unpolish(btn)
             btn.style().polish(btn)
@@ -1397,11 +1480,9 @@ class CinegainMainWindow(QMainWindow):
         val_lbl.setText(self._format_val(param_name, val, unit))
         if self.selected_key is STANDARD:
             self.pending_params[param_name] = val
-            if param_name == "lev_max_boost_db" and val > 0.05 and self.catalog.standard_params()["lev_max_cut_db"] <= 0.05:
-                # a leveler that can only boost never pulls loud scenes back
-                self.pending_params["lev_max_cut_db"] = LEVELER_DEFAULT_CUT_DB
+            self._sets = modes.apply_values(self._mode, self._sets, {param_name: val})
         else:
-            self._store_program_values(self.selected_key, self.get_current_slider_params())
+            self._store_program_values(self.selected_key, {param_name: val})
         self.update_preset_highlights()
         self.param_timer.start()
 
@@ -1464,21 +1545,19 @@ class CinegainMainWindow(QMainWindow):
         self.meter_strip.set_values(values, source)
 
     def _store_program_values(self, key, values):
-        """Gives the program its own setting (copied from Standard on first change)."""
+        """Values go into the program's active mode; a program following Standard gets its own setting."""
         entry = self.router.registry.get(key)
         if entry is None:
             return
         first_time = entry["params"] is None
-        base = entry["params"] or self.catalog.standard_params()
-        params = full_params(base)
-        params.update(values)
-        params["bypass"] = 0.0
-        if "lev_max_boost_db" in values and "leveler" not in values:
-            # Same rule as `cinegain batch` for Standard: boost > 0 means leveler on.
-            params["leveler"] = 1.0 if float(values["lev_max_boost_db"]) > 0.05 else 0.0
-            if params["leveler"] and params["lev_max_cut_db"] <= 0.05:
-                params["lev_max_cut_db"] = LEVELER_DEFAULT_CUT_DB
-        self.router.registry.set_params(key, params, save=False)
+        if first_time:
+            st = modes.load_standard()
+            mode, sets = st["mode"], st["sets"]
+        else:
+            mode, sets = entry["mode"], entry["sets"]
+        sets = modes.apply_values(mode, sets, values)
+        self.router.registry.set_setting(key, mode, sets, save=False)
+        self._mode, self._sets = mode, sets
         self._program_dirty = key
         if first_time:
             self.update_edit_header()
@@ -1514,13 +1593,13 @@ class CinegainMainWindow(QMainWindow):
                 s.blockSignals(False)
 
     def apply_factory_preset(self, preset_name):
-        """Loads a factory preset into whatever is selected in the sidebar."""
+        """Loads a factory preset into whatever is selected; it brings its mode along (Q6b)."""
         if self.selected_key is STANDARD:
             self.apply_standard_preset(preset_name)
             return
-        params = self.catalog.params(preset_name)
-        if params:
-            self._load_into_program(self.selected_key, params)
+        mode, values = self.catalog.template_setting(preset_name)
+        if mode:
+            self._load_into_program(self.selected_key, mode, values)
 
     def apply_standard_preset(self, preset_name):
         """Loads a factory preset into Standard (used by the tray, which has no selection)."""
@@ -1529,23 +1608,22 @@ class CinegainMainWindow(QMainWindow):
         run_cinegain("preset", preset_name)
         self._reassert_bypass()
         if self.selected_key is STANDARD:
-            f_params = self.factory_presets.get(preset_name, {}).get("params")
-            if f_params:
-                self._set_sliders_silently(f_params)
-            self.on_heartbeat(sync_sliders=True)
-        self.update_preset_highlights()
+            self.refresh_editor()
+        self.refresh_apps()
 
-    def _load_into_program(self, key, params):
-        log.info("load values into %s", key)
-        self._set_sliders_silently(params)
-        self._store_program_values(key, params)
+    def _load_into_program(self, key, mode, values):
+        log.info("load %s values into %s", mode, key)
+        entry = self.router.registry.get(key)
+        base = entry["sets"] if entry and entry["params"] is not None else modes.load_standard()["sets"]
+        self.router.registry.set_setting(key, mode, modes.apply_values(mode, base, values), save=False)
+        self._program_dirty = key
         self.flush_pending_params()
-        self.update_preset_highlights()
+        self.refresh_editor()
 
     def on_user_preset_clicked(self, slot_id):
         """
-        User slots are templates. An empty slot stores the current values; a filled
-        slot loads its values into whatever is selected in the sidebar.
+        User slots are templates. An empty slot stores the current mode and values;
+        a filled slot loads its mode and values into whatever is selected.
         """
         slot = self.user_presets.get(slot_id)
         if not slot:
@@ -1553,14 +1631,15 @@ class CinegainMainWindow(QMainWindow):
         if not slot.get("params"):
             self._overwrite_user_slot(slot_id)
             return
-        saved_p = dict(slot["params"])
+        mode, values = slot.get("mode") or modes.MODE_FIXED, dict(slot["params"])
         if self.selected_key is STANDARD:
             self.pending_params.clear()
-            self._set_sliders_silently(saved_p)
-            run_cinegain("batch", json.dumps(saved_p), "--preset-id", slot_id)
+            run_cinegain("batch", json.dumps(values), "--preset-id", slot_id, "--mode", mode)
+            self._reassert_bypass()
+            self.refresh_editor()
         else:
-            self._load_into_program(self.selected_key, full_params(saved_p))
-        self.update_preset_highlights()
+            self._load_into_program(self.selected_key, mode, values)
+        self.refresh_apps()
 
     def show_user_preset_menu(self, slot_id, button, pos):
         slot = self.user_presets.get(slot_id)
@@ -1585,6 +1664,7 @@ class CinegainMainWindow(QMainWindow):
 
     def _overwrite_user_slot(self, slot_id):
         self.user_presets[slot_id]["params"] = self.get_current_slider_params()
+        self.user_presets[slot_id]["mode"] = self._mode
         self._save_user_presets()
         self._refresh_user_preset_buttons_text()
         self.update_preset_highlights()
@@ -1607,6 +1687,7 @@ class CinegainMainWindow(QMainWindow):
         idx_num = slot_id.split("_")[-1]
         self.user_presets[slot_id]["name"] = f"User {idx_num}"
         self.user_presets[slot_id]["params"] = None
+        self.user_presets[slot_id]["mode"] = None
         self._save_user_presets()
         self._refresh_user_preset_buttons_text()
         self.update_preset_highlights()
@@ -1647,6 +1728,7 @@ class CinegainMainWindow(QMainWindow):
             if code != 0 and (code != 1 or st["active"]):
                 raise ValueError("Status command failed")
             self.is_active = st["active"]
+            self._std_mode = st.get("mode") or self._std_mode
             if not self.is_active and self.router.bypass:
                 self.router.bypass = False  # stopped from outside: the next start is a real "on"
             params = st.get("params", {})
@@ -1695,17 +1777,8 @@ class CinegainMainWindow(QMainWindow):
         self.btn_power.style().unpolish(self.btn_power)
         self.btn_power.style().polish(self.btn_power)
 
-        if sync_sliders and params and self.selected_key is STANDARD:
-            for pname, info in self.sliders.items():
-                if pname in params and not info["slider"].isSliderDown():
-                    val = float(params[pname])
-                    s = info["slider"]
-                    vl = info["val_lbl"]
-                    u = info["unit"]
-                    s.blockSignals(True)
-                    s.setValue(int(round(val * 10)))
-                    vl.setText(self._format_val(pname, val, u))
-                    s.blockSignals(False)
+        if sync_sliders and self.selected_key is STANDARD:
+            self.refresh_editor()
 
         self.update_preset_highlights()
 
@@ -1719,7 +1792,12 @@ class CinegainMainWindow(QMainWindow):
             log.exception("routing tick failed")
             return
         self._views = views
-        self.sidebar.update_views(views, self.processing)
+        self.sidebar.update_views(views, self.processing, self._std_mode)
+        affected = [v for v in views if v.hidden_db is not None]
+        self.hidden_bar.setVisible(bool(affected))
+        if affected:
+            self.lbl_hidden_bar.setText("⚠  " + t("hidden_bar", n=len(affected)) + "  " +
+                                        ", ".join(f"{v.label} {v.hidden_db:.0f} dB" for v in affected))
         if not self._initial_selection_done:
             # Open on the program that is playing right now, if it is the only one.
             self._initial_selection_done = True
@@ -1741,6 +1819,14 @@ class CinegainMainWindow(QMainWindow):
             "QPushButton#btn_back_standard { background-color: #14100D; color: #FFD21F; "
             "border: 1px solid #A86B4A; border-radius: 6px; padding: 6px 14px; font-weight: 700; }"
             "QPushButton#btn_back_standard:hover { background-color: #8C1014; border-color: #FFD21F; }"
+            "QPushButton#mode_seg { background-color: #14100D; color: #E2C89B; border: 1px solid #6E1516; "
+            "padding: 6px 14px; font-weight: 700; min-width: 72px; }"
+            "QPushButton#mode_seg:hover { color: #FFD21F; border-color: #A86B4A; }"
+            "QPushButton#mode_seg:checked { background-color: #3D2C07; color: #FFD21F; border: 1px solid #FFD21F; }"
+            "QPushButton#mode_seg:focus { border: 2px solid #FFD21F; }"
+            "QPushButton#btn_reset_hidden { background-color: #2A0E0E; color: #E8C462; border: 1px solid #A86B4A; "
+            "border-radius: 6px; padding: 4px 10px; font-weight: 700; }"
+            "QPushButton#btn_reset_hidden:hover { background-color: #8C1014; color: #FFD21F; border-color: #FFD21F; }"
         )
         lay = QHBoxLayout(frame)
         lay.setContentsMargins(16, 10, 12, 10)
@@ -1755,22 +1841,75 @@ class CinegainMainWindow(QMainWindow):
         self.lbl_edit_state = QLabel()
         self.lbl_edit_state.setStyleSheet("font-size: 12px; color: #E2C89B;")
         self.lbl_edit_state.setWordWrap(True)
+        for label in (self.lbl_edit_target, self.lbl_edit_state):
+            label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         text.addWidget(self.lbl_edit_target)
         text.addWidget(self.lbl_edit_state)
+        hidden_row = QHBoxLayout()
+        hidden_row.setSpacing(8)
+        self.lbl_hidden = QLabel()
+        self.lbl_hidden.setStyleSheet("font-size: 12px; font-weight: 700; color: #E8C462;")
+        self.lbl_hidden.setWordWrap(True)
+        self.btn_reset_hidden = QPushButton()
+        self.btn_reset_hidden.setObjectName("btn_reset_hidden")
+        self.btn_reset_hidden.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_reset_hidden.clicked.connect(lambda: self.full_volume_reset(only=self.selected_key))
+        hidden_row.addWidget(self.lbl_hidden, 1)
+        hidden_row.addWidget(self.btn_reset_hidden, 0)
+        text.addLayout(hidden_row)
+        self.lbl_hidden.hide()
+        self.btn_reset_hidden.hide()
+
+        # Mode switch: Fixed | Dynamic · Beta (segmented, keyboard reachable)
+        self.btn_mode_fixed = QPushButton()
+        self.btn_mode_dynamic = QPushButton()
+        for btn, mode, side in ((self.btn_mode_fixed, modes.MODE_FIXED, "left"),
+                                (self.btn_mode_dynamic, modes.MODE_DYNAMIC, "right")):
+            btn.setObjectName("mode_seg")
+            btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            radius = ("border-top-left-radius: 6px; border-bottom-left-radius: 6px;" if side == "left"
+                      else "border-top-right-radius: 6px; border-bottom-right-radius: 6px;")
+            btn.setStyleSheet(f"QPushButton#mode_seg {{ {radius} }}")
+            btn.clicked.connect(lambda checked=False, m=mode: self.set_mode(m))
+            btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        mode_box = QHBoxLayout()
+        mode_box.setSpacing(0)
+        mode_box.addWidget(self.btn_mode_fixed)
+        mode_box.addWidget(self.btn_mode_dynamic)
+        self._retranslate_mode_switch()
         self.btn_back_standard = QPushButton()
         self.btn_back_standard.setObjectName("btn_back_standard")
         self.btn_back_standard.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_back_standard.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.btn_back_standard.clicked.connect(self.back_to_standard)
+        self.btn_back_standard.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         lay.addLayout(text, 1)
+        lay.addLayout(mode_box, 0)
         lay.addWidget(self.btn_back_standard, 0, Qt.AlignmentFlag.AlignVCenter)
         return frame
+
+    def _retranslate_mode_switch(self):
+        self.btn_mode_fixed.setText(t("mode_fixed"))
+        self.btn_mode_fixed.setToolTip(t("mode_fixed_tip"))
+        self.btn_mode_dynamic.setText(f"{t('mode_dynamic')} · {t('mode_beta')}")
+        self.btn_mode_dynamic.setToolTip(t("mode_dynamic_tip"))
+        self.btn_reset_hidden.setText(t("btn_reset_hidden"))
+        self.btn_reset_hidden.setToolTip(t("btn_full_reset_tip"))
 
     def update_edit_header(self):
         if not hasattr(self, "lbl_edit_target"):
             return
         key = self.selected_key
         entry = self.router.registry.get(key) if key is not STANDARD else None
+        view = next((v for v in self._views if v.key == key), None) if entry is not None else None
+        hidden_db = view.hidden_db if view is not None else None
+        self.lbl_hidden.setVisible(hidden_db is not None)
+        self.btn_reset_hidden.setVisible(hidden_db is not None)
+        if hidden_db is not None:
+            self.lbl_hidden.setText(t("hidden_edit", db=f"{abs(hidden_db):.0f}"))
         if entry is None:
             self.lbl_edit_target.setText(amp(t("prog_standard")).upper())
             self.lbl_edit_state.setText(t("edit_state_standard"))
@@ -1789,12 +1928,9 @@ class CinegainMainWindow(QMainWindow):
         self.btn_back_standard.setVisible(entry["params"] is not None)
 
     def target_values(self):
-        """Parameter values of the current editing target."""
-        if self.selected_key is not STANDARD:
-            entry = self.router.registry.get(self.selected_key)
-            if entry and entry["params"]:
-                return full_params(entry["params"])
-        return self.catalog.standard_params()
+        """Effective parameter values of the current editing target."""
+        mode, sets, _ = self.target_setting()
+        return modes.effective(mode, sets)
 
     def on_selection_changed(self, key):
         log.info("edit target: %s", "Standard" if key is STANDARD else key)
@@ -1802,19 +1938,16 @@ class CinegainMainWindow(QMainWindow):
         self.param_timer.stop()
         self.flush_pending_params()
         self.selected_key = key
-        self._set_sliders_silently(self.target_values())
-        self.update_edit_header()
-        self.update_preset_highlights()
+        self.refresh_editor()
 
     def back_to_standard(self):
         if self.selected_key is STANDARD:
             return
         log.info("%s back to Standard", self.selected_key)
         self._program_dirty = None
-        self.router.registry.set_params(self.selected_key, None)
-        self._set_sliders_silently(self.catalog.standard_params())
+        self.router.registry.set_setting(self.selected_key, None, None)
         self.refresh_apps()
-        self.update_preset_highlights()
+        self.refresh_editor()
 
     def reset_everything(self):
         box = QMessageBox(self)
@@ -1877,6 +2010,9 @@ class CinegainMainWindow(QMainWindow):
             self.tray_preset_actions[pid] = act
 
         menu.addSeparator()
+        self.tray_reset_action = QAction(t("btn_full_reset"), self)
+        self.tray_reset_action.triggered.connect(lambda: self.full_volume_reset())
+        menu.addAction(self.tray_reset_action)
         self.tray_log_action = QAction(t("tray_log"), self)
         self.tray_log_action.triggered.connect(self.open_debug_log)
         menu.addAction(self.tray_log_action)
@@ -1888,6 +2024,33 @@ class CinegainMainWindow(QMainWindow):
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self.on_tray_activated)
         self.tray.show()
+
+    def _step_fades(self):
+        guard = self.router.guard
+        if guard is not None and guard.fades:
+            try:
+                guard.step()
+            except Exception:
+                log.exception("volume fade step failed")
+
+    def _save_standard_and_push(self, mode, sets):
+        run_cinegain("batch", json.dumps(sets[mode]), "--mode", mode)
+        self._reassert_bypass()
+
+    def full_volume_reset(self, only=None):
+        """Full volume reset (all programs) or the reset of one program's hidden volume."""
+        log.warning("full volume reset requested%s", f" for {only}" if only else "")
+        self.param_timer.stop()
+        self.flush_pending_params()
+        try:
+            report = self.router.full_volume_reset(standard=(modes.load_standard, self._save_standard_and_push),
+                                                   only=only)
+        except Exception:
+            log.exception("full volume reset failed")
+            return None
+        self.refresh_apps()
+        self.refresh_editor()
+        return report
 
     @staticmethod
     def _tray_preset_label(pid):
@@ -2000,7 +2163,7 @@ def main():
         QMessageBox.warning(None, "Cinegain", t("already_running", holder=lock.holder() or "?"))
         sys.exit(1)
 
-    win = CinegainMainWindow(Router())
+    win = CinegainMainWindow(Router(guard=VolumeGuard()))
     win.router_lock = lock
     win.raise_server = start_raise_server(win)
     win.show()

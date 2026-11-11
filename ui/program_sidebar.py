@@ -71,6 +71,10 @@ QLabel#program_name[selected="true"] {{ color: {YELLOW}; }}
 QLabel#program_name[idle="true"] {{ color: #B8AC9E; font-weight: 600; }}
 QLabel#program_sub {{ font-size: 11px; color: {IDLE}; background: transparent; }}
 QLabel#program_sub[own="true"] {{ color: {INK_MUTED}; }}
+QLabel#beta_pill {{ background: #3D2C07; color: {YELLOW}; border: 1px solid #E0B83A; border-radius: 4px;
+    padding: 0px 4px; font-size: 10px; font-weight: 800; }}
+QLabel#hidden_badge {{ background: #2A0E0E; color: {WAITING}; border: 1px solid #A86B4A; border-radius: 4px;
+    padding: 0px 4px; font-family: "Fira Mono", monospace; font-size: 10px; font-weight: 800; }}
 QPushButton#volume_badge {{
     background-color: #2A1C16; color: {WAITING}; border: 1px solid #A86B4A;
     border-radius: 5px; padding: 1px 6px 1px 3px; font-size: 11px; font-weight: 700;
@@ -256,8 +260,21 @@ class ProgramRow(QFrame):
         self.name.setObjectName("program_name")
         self.sub = ElidedLabel()
         self.sub.setObjectName("program_sub")
+        # Second line: setting, then the dynamic (beta) marker and the
+        # secretly-lowered-volume warning, so the name keeps its full width.
+        self.beta = QLabel("β")
+        self.beta.setObjectName("beta_pill")
+        self.beta.hide()
+        self.hidden = QLabel()
+        self.hidden.setObjectName("hidden_badge")
+        self.hidden.hide()
+        sub_row = QHBoxLayout()
+        sub_row.setSpacing(4)
+        sub_row.addWidget(self.sub, 1)
+        sub_row.addWidget(self.hidden, 0)
+        sub_row.addWidget(self.beta, 0)
         text.addWidget(self.name)
-        text.addWidget(self.sub)
+        text.addLayout(sub_row)
         lay.addWidget(self.dot, 0, Qt.AlignmentFlag.AlignVCenter)
         lay.addLayout(text, 1)
 
@@ -299,12 +316,31 @@ class ProgramRow(QFrame):
         self.setAccessibleName(label)
         self.name.setText(f"▶ {label}" if selected else label)
 
-    def update_standard(self, selected):
+    def update_standard(self, selected, mode=None):
         self.dot.set_state("standard", YELLOW)
         self.set_selected(selected, t("prog_standard"))
         self.sub.setText(t("prog_standard_sub"))
+        self._show_mode(mode)
 
-    def update_program(self, view, selected, is_active, now):
+    def _show_mode(self, mode):
+        self.beta.setVisible(mode == "dynamic")
+        self.beta.setToolTip(t("mode_dynamic_tip"))
+
+    def _show_hidden(self, db):
+        if db is None:
+            self.hidden.hide()
+            return
+        self.hidden.setText(f"{db:.0f} dB")
+        self.hidden.setToolTip(t("hidden_badge_tip", db=f"{abs(db):.0f}"))
+        self.hidden.show()
+
+    def update_program(self, view, selected, is_active, now, standard_mode=None):
+        # A program shows the mode it actually sounds with: its own, or Standard's.
+        if view.enabled:
+            self._show_mode(view.mode if view.own else standard_mode)
+        else:
+            self._show_mode(None)
+        self._show_hidden(getattr(view, "hidden_db", None))
         if view.playing:
             self.dot.set_state("playing", RUNNING if (view.routed and is_active) else INK_MUTED)
         elif view.streams:
@@ -363,6 +399,7 @@ class ProgramSidebar(QGroupBox):
         self.views = {}
         self.show_silent = False
         self.is_active = False
+        self.standard_mode = None
         self.setStyleSheet(SIDEBAR_STYLE)
         self.setMinimumWidth(190)
         self.setMaximumWidth(300)
@@ -402,9 +439,10 @@ class ProgramSidebar(QGroupBox):
         self.standard_row.update_standard(True)
 
     # -- updates ------------------------------------------------------------
-    def update_views(self, views, is_active):
+    def update_views(self, views, is_active, standard_mode=None):
         now = time.time()
         self.is_active = is_active
+        self.standard_mode = standard_mode
         self.views = {v.key: v for v in views}
         recent = [v for v in views if v.streams or now - v.last_seen <= LONG_SILENT_S]
         silent = [v for v in views if v not in recent]
@@ -426,7 +464,7 @@ class ProgramSidebar(QGroupBox):
                 row.menu_requested.connect(self._on_menu)
                 row.volume_clicked.connect(self._on_volume)
                 self.rows[v.key] = row
-            self.rows[v.key].update_program(v, v.key == self.selected, is_active, now)
+            self.rows[v.key].update_program(v, v.key == self.selected, is_active, now, standard_mode)
 
         visible = [v.key for v in recent] + ([v.key for v in silent] if self.show_silent else [])
         layout_order = [v.key for v in recent] + ["__silent__"] + [v.key for v in silent]
@@ -450,7 +488,7 @@ class ProgramSidebar(QGroupBox):
         self.silent_toggle.setText(t("prog_long_silent", n=len(silent)))
         self.empty.setVisible(not views)
         self.order = visible
-        self.standard_row.update_standard(self.selected is STANDARD)
+        self.standard_row.update_standard(self.selected is STANDARD, standard_mode)
 
         if self.selected is not STANDARD and self.selected not in self.views:
             self.select(STANDARD)
@@ -460,7 +498,8 @@ class ProgramSidebar(QGroupBox):
         self.empty.setText(t("apps_empty"))
         for row in self.rows.values():
             row.switch.setToolTip(t("prog_switch_tip"))
-        self.standard_row.update_standard(self.selected is STANDARD)
+            row.beta.setToolTip(t("mode_dynamic_tip"))
+        self.standard_row.update_standard(self.selected is STANDARD, getattr(self, "standard_mode", None))
 
     # -- selection ------------------------------------------------------------
     def select(self, key):
@@ -472,9 +511,9 @@ class ProgramSidebar(QGroupBox):
             self.rows[old].set_selected(False, self.views[old].label)
             _set_prop(self.rows[old].name, "idle", not self.views[old].streams)
         if key is STANDARD:
-            self.standard_row.update_standard(True)
+            self.standard_row.update_standard(True, self.standard_mode)
         else:
-            self.standard_row.update_standard(False)
+            self.standard_row.update_standard(False, self.standard_mode)
             if key in self.rows:
                 self.rows[key].set_selected(True, self.views[key].label)
                 _set_prop(self.rows[key].name, "idle", False)
