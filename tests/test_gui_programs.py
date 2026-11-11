@@ -294,6 +294,24 @@ class TestProgramEditing(unittest.TestCase):
         finally:
             self.sinks.pid, self.gui.read_meter = orig_pid, orig_read
 
+    def test_second_gui_start_raises_the_running_window(self):
+        """#18: a second start brings the first window to the front instead of opening a second router."""
+        import tempfile
+        raised = []
+        self.win.show_and_raise = lambda: raised.append(True)
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "gui.sock")
+            self.assertFalse(self.gui.ask_running_gui_to_raise(path))  # nobody listening
+            server = self.gui.start_raise_server(self.win, path)
+            self.assertIsNotNone(server)
+            self.assertTrue(self.gui.ask_running_gui_to_raise(path))
+            for _ in range(50):
+                self.app.processEvents()
+                if raised:
+                    break
+            server.close()
+        self.assertEqual(raised, [True])
+
     def test_read_meter_parses_plugin_file(self):
         import struct
         import tempfile

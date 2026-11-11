@@ -660,5 +660,35 @@ class TestDebugLog(Base):
         self.assertTrue(cinegain_log.tail(lines=1)[0].endswith("hello log\n"))
 
 
+class TestRouterLock(unittest.TestCase):
+    """#18: only one process (GUI or `cinegain watch`) may distribute streams."""
+
+    def test_second_owner_is_refused_until_release(self):
+        from cinegain_lock import RouterLock
+        first, second = RouterLock("gui"), RouterLock("watch")
+        self.assertTrue(first.acquire())
+        try:
+            self.assertFalse(second.acquire())
+            self.assertEqual(second.holder(), f"gui {os.getpid()}")
+            self.assertEqual(second.holder_owner(), "gui")
+        finally:
+            first.release()
+        self.assertTrue(second.acquire())
+        second.release()
+
+    def test_watch_refuses_while_the_gui_routes(self):
+        import subprocess
+        from cinegain_lock import RouterLock
+        gui = RouterLock("gui")
+        self.assertTrue(gui.acquire())
+        try:
+            res = subprocess.run([sys.executable, os.path.join(BASE_DIR, "bin", "cinegain"), "watch"],
+                                 capture_output=True, text=True, timeout=20)
+        finally:
+            gui.release()
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("already handled by gui", res.stderr)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -15,7 +15,7 @@ import subprocess
 import sys
 import time
 
-__version__ = "0.3.5"
+__version__ = "0.3.6"
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if os.path.exists(os.path.join(SCRIPT_DIR, "..", "share", "cinegain")):
@@ -34,6 +34,7 @@ os.environ.setdefault("CINEGAIN_BASE_DIR", os.path.abspath(BASE_DIR))
 sys.path.insert(0, os.path.join(os.path.abspath(BASE_DIR), "ui"))
 
 import cinegain_log  # noqa: E402
+from cinegain_lock import RouterLock  # noqa: E402
 import cinegain_paths as paths  # noqa: E402
 from cinegain_profiles import (  # noqa: E402
     DEFAULT_PARAMS,
@@ -293,6 +294,11 @@ def cmd_route(args):
 
 def cmd_watch(args):
     """Keeps routing applied without the GUI (Ctrl+C to stop)."""
+    lock = RouterLock("watch")
+    if not lock.acquire():
+        print(f"Routing is already handled by {lock.holder() or 'another Cinegain process'} "
+              "(the GUI or another `cinegain watch`); only one may run.", file=sys.stderr)
+        return 1
     router = make_router()
     print("Watching audio streams (Ctrl+C to stop)...")
     try:

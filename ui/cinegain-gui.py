@@ -23,10 +23,11 @@ elif os.path.exists(os.path.expanduser("~/.local/bin/cinegain")):
 else:
     BIN_PATH = "cinegain"
 
-APP_VERSION = "0.3.5"
+APP_VERSION = "0.3.6"
 
 os.environ.setdefault("CINEGAIN_BASE_DIR", BASE_DIR)
 import cinegain_log  # noqa: E402
+from cinegain_lock import RouterLock, gui_socket_path  # noqa: E402
 import cinegain_paths as paths  # noqa: E402
 from cinegain_profiles import (  # noqa: E402
     DEFAULT_PARAMS, PROFILE_STANDARD, STANDARD_SINK, ProfileCatalog, SinkProcesses, full_params, read_meter,
@@ -1937,6 +1938,46 @@ def _qt_message(mode, context, message):
     cinegain_log.get("qt").log(level, "%s", message)
 
 
+def ask_running_gui_to_raise(path=None):
+    """Asks an already running GUI to show its window. True if one answered."""
+    try:
+        from PyQt6.QtNetwork import QLocalSocket
+    except ImportError:
+        return False
+    sock = QLocalSocket()
+    sock.connectToServer(path or gui_socket_path())
+    if not sock.waitForConnected(1000):
+        return False
+    sock.write(b"raise\n")
+    sock.waitForBytesWritten(1000)
+    sock.disconnectFromServer()
+    return True
+
+
+def start_raise_server(win, path=None):
+    """Lets a second GUI start bring this window to the front instead of opening a second router."""
+    try:
+        from PyQt6.QtNetwork import QLocalServer
+    except ImportError:
+        return None
+    path = path or gui_socket_path()
+    server = QLocalServer(win)
+    QLocalServer.removeServer(path)  # left behind by a crashed instance
+    if not server.listen(path):
+        log.warning("raise socket %s not available: %s", path, server.errorString())
+        return None
+
+    def on_connection():
+        conn = server.nextPendingConnection()
+        if conn is not None:
+            conn.disconnected.connect(conn.deleteLater)
+        log.info("second GUI start: bringing the window to the front")
+        win.show_and_raise()
+
+    server.newConnection.connect(on_connection)
+    return server
+
+
 def main():
     cinegain_log.setup("gui")
     log.info("Cinegain GUI %s starting (python %s, pid %s)", APP_VERSION, sys.version.split()[0], os.getpid())
@@ -1946,7 +1987,22 @@ def main():
     app.setQuitOnLastWindowClosed(False)
     app.setStyleSheet(CI_STYLESHEET)
 
+    # One router only (#18): a second GUI (or `cinegain watch`) would move the
+    # same streams back and forth.
+    lock = RouterLock("gui")
+    if not lock.acquire():
+        if lock.holder_owner() == "gui" and ask_running_gui_to_raise():
+            log.info("GUI already running (%s): raised it, exiting", lock.holder())
+            sys.exit(0)
+        cfg = paths.read_json(CONFIG_FILE, default={}) or {}
+        if isinstance(cfg, dict) and cfg.get("lang"):
+            set_language(cfg["lang"])
+        QMessageBox.warning(None, "Cinegain", t("already_running", holder=lock.holder() or "?"))
+        sys.exit(1)
+
     win = CinegainMainWindow(Router())
+    win.router_lock = lock
+    win.raise_server = start_raise_server(win)
     win.show()
     sys.exit(app.exec())
 
