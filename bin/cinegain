@@ -145,6 +145,20 @@ def standard_sinks():
 
 # -- commands ----------------------------------------------------------------------
 
+def _init_sink_volume():
+    """
+    Sets the Standard sink to 100 % once, when Cinegain creates it for the first
+    time. Later starts keep what the user (or WirePlumber's restore) chose (#36).
+    """
+    if paths.config_get("sink_volume_initialized"):
+        return
+    PulseControl().set_sink_volume_100(STANDARD_SINK)
+    try:
+        paths.config_set(sink_volume_initialized=True)
+    except OSError as e:
+        log.warning("could not remember the sink volume init: %s", e)
+
+
 def cmd_start(args):
     node_id = get_cinegain_node_id()
     saved = load_saved_state()
@@ -159,7 +173,7 @@ def cmd_start(args):
         if not node_id:
             print("Failed to start Cinegain.", file=sys.stderr)
             return 1
-        PulseControl().set_sink_volume_100(STANDARD_SINK)
+        _init_sink_volume()
         set_params_batch(node_id, saved["params"], preset=saved.get("preset"))
         print(f"Cinegain started successfully (Node ID: {node_id}).")
     if getattr(args, "route", False):

@@ -231,6 +231,60 @@ class TestCliModes(unittest.TestCase):
         self.assertEqual(modes.load_standard()["params"]["comp_ratio"], 6.0)
 
 
+class TestStartKeepsSinkVolume(unittest.TestCase):
+    """#36: `cinegain start` sets the sink to 100 % only the first time it creates it."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cli = SourceFileLoader("cinegain_cli_start", os.path.join(tr.BASE_DIR, "bin", "cinegain")).load_module()
+
+    def setUp(self):
+        for p in paths.USER_STATE_FILES:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(p)
+        cli = self.cli
+        self.volume_calls = []
+        outer = self
+
+        class FakePulse:
+            def set_sink_volume_100(self, name):
+                outer.volume_calls.append(name)
+
+        class FakeSinks:
+            def start(self, *a, **kw):
+                return 1
+
+        self.saved = (cli.get_cinegain_node_id, cli.wait_for_node, cli.PulseControl, cli.standard_sinks,
+                      cli.set_params_batch)
+        cli.get_cinegain_node_id = lambda: None  # sink does not exist yet: every start creates it
+        cli.wait_for_node = lambda name: 7
+        cli.PulseControl = FakePulse
+        cli.standard_sinks = FakeSinks
+        cli.set_params_batch = lambda *a, **kw: True
+
+    def tearDown(self):
+        cli = self.cli
+        (cli.get_cinegain_node_id, cli.wait_for_node, cli.PulseControl, cli.standard_sinks,
+         cli.set_params_batch) = self.saved
+
+    def start(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return self.cli.main(["start"])
+
+    def test_first_creation_sets_100_percent_later_starts_keep_the_users_volume(self):
+        self.assertEqual(self.start(), 0)
+        self.assertEqual(self.volume_calls, ["cinegain_sink"])  # first creation: set once
+        self.assertEqual(self.start(), 0)
+        self.assertEqual(self.start(), 0)
+        self.assertEqual(self.volume_calls, ["cinegain_sink"])  # restarts leave it alone
+
+    def test_a_reset_counts_as_a_new_first_creation(self):
+        self.start()
+        os.remove(paths.CONFIG_FILE)  # `cinegain reset` removes config.json
+        self.start()
+        self.assertEqual(self.volume_calls, ["cinegain_sink", "cinegain_sink"])
+
+
 class TestParameterRange(unittest.TestCase):
     """#37: values are finite and inside the plugin's port ranges before they are saved or pushed."""
 
