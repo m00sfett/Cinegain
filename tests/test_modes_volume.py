@@ -404,5 +404,96 @@ class TestAnalysis(unittest.TestCase):
         self.assertIn(nodes[0].key, hidden)
 
 
+def rises(values, start):
+    """Largest single upward step in dB of a series of linear writes."""
+    dbs = [to_db(start)] + [to_db(v) for v in values]
+    return max([b - a for a, b in zip(dbs, dbs[1:])] or [0.0])
+
+
+class TestSetHidden(unittest.TestCase):
+    """#27: the analysis view and `cinegain volume set` raised the hidden volume in one jump."""
+
+    def setUp(self):
+        import cinegain_volume as vol
+        self.vol = vol
+        vol._live = None
+        self.fake = FakeVolumes([NodeVolume(5, "Chromium", "ChatGPT", "Chromium", 10 ** (-84 / 20))])
+        self.clock = tr.Clock(0.0)
+
+    def test_raise_fades_in_and_lowering_is_instant(self):
+        vol = self.vol
+        guard = VolumeGuard(scanner=self.fake.scan, setter=self.fake.set, clock=self.clock)
+        start = self.fake.nodes[5].volume
+        self.assertTrue(vol.set_hidden(5, 1.0, "Chromium", "user", start, guard))
+        self.assertEqual(self.fake.sets, [])                    # nothing jumps on the click
+        self.assertIn(5, guard.fades)
+        drain(guard, self.clock, dt=0.05)
+        self.assertEqual(self.fake.nodes[5].volume, 1.0)
+        self.assertLessEqual(rises([v for _, v in self.fake.sets], start), MAX_STEP_DB + 1e-6)
+        self.assertGreaterEqual(self.clock.t, 84 / MAX_RISE_DB_S - 0.06)  # 8.4 s, not instant
+        # lowering: one write, at once, and a running fade is dropped
+        vol.set_hidden(5, 0.5, "Chromium", "user", None, guard)
+        self.assertEqual(self.fake.sets[-1], (5, 0.5))
+        self.assertEqual(guard.fades, {})
+
+    def test_stale_higher_reading_cannot_cause_a_jump(self):
+        vol = self.vol
+        guard = VolumeGuard(scanner=self.fake.scan, setter=self.fake.set, clock=self.clock)
+        guard.update()                                           # guard saw -84 dB
+        vol.set_hidden(5, 1.0, "Chromium", "user", 0.5, guard)   # caller thinks -6 dB
+        self.clock.t += 0.05
+        guard.step()
+        self.assertLess(to_db(self.fake.sets[0][1]), -82.0)      # starts from what the guard saw
+
+    def test_without_a_running_guard_the_cli_fades_here(self):
+        vol = self.vol
+        orig = vol.set_node_volume
+        vol.set_node_volume = self.fake.set
+        try:
+            def sleep(dt):
+                self.clock.t += dt
+            start = self.fake.nodes[5].volume
+            self.assertTrue(vol.set_hidden(5, 1.0, "Chromium", "cli", start, clock=self.clock, sleep=sleep))
+        finally:
+            vol.set_node_volume = orig
+        self.assertEqual(self.fake.nodes[5].volume, 1.0)
+        self.assertLessEqual(rises([v for _, v in self.fake.sets], start), MAX_STEP_DB + 1e-6)
+        self.assertGreaterEqual(self.clock.t, 8.3)
+
+    def test_analysis_panel_reset_fades_in(self):
+        try:
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+            from PyQt6.QtWidgets import QApplication
+            import analysis_panel
+        except ImportError as e:  # pragma: no cover - PyQt6 missing
+            self.skipTest(f"PyQt6 not available: {e}")
+        app = QApplication.instance() or QApplication([])
+        vol = self.vol
+        start = self.fake.nodes[5].volume
+        rows = [{"id": 5, "kind": "stream", "label": "Chromium", "key": "chatgpt::chromium",
+                 "node_name": "Chromium", "hidden": start, "normal": 1.0, "mute": False,
+                 "editable": True, "stored": None}]
+        panel = analysis_panel.AnalysisPanel(scanner=lambda: rows, setter=vol.set_hidden,
+                                             history=lambda key=None: [])
+        panel._own_guard.setter = self.fake.set
+        panel._own_guard.clock = self.clock
+        panel.refresh()
+        orig = vol.set_node_volume
+        vol.set_node_volume = self.fake.set  # never pw-cli, whatever path the panel takes
+        try:
+            panel.table.cellWidget(0, analysis_panel.COL_RESET).click()
+        finally:
+            vol.set_node_volume = orig
+        self.assertEqual(self.fake.sets, [])                     # no jump on the click
+        self.assertTrue(panel.fade_timer.isActive())
+        while panel._own_guard.fades:
+            self.clock.t += 0.05
+            panel._step_own_fades()
+        self.assertFalse(panel.fade_timer.isActive())
+        self.assertEqual(self.fake.nodes[5].volume, 1.0)
+        self.assertLessEqual(rises([v for _, v in self.fake.sets], start), MAX_STEP_DB + 1e-6)
+        del app
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

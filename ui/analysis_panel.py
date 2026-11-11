@@ -90,6 +90,11 @@ class AnalysisPanel(QWidget):
         self.history_source = history
         self.pro = False
         self.rows = []
+        # Raises fade in (#27): on the router's guard while it runs, else on this one.
+        self._own_guard = vol.VolumeGuard(scanner=lambda: [])
+        self.fade_timer = QTimer(self)
+        self.fade_timer.setInterval(50)
+        self.fade_timer.timeout.connect(self._step_own_fades)
         self._ids = []
         self._history_at = 0.0
 
@@ -290,19 +295,31 @@ class AnalysisPanel(QWidget):
     def _row(self, node_id):
         return next((r for r in self.rows if r["id"] == node_id), None)
 
-    def _set_from_slider(self, node_id, slider):
+    def _apply(self, node_id, fraction):
+        """Lowering is instant, raising fades in at <= 10 dB/s (#27)."""
         r = self._row(node_id)
         if r is not None:
-            self.setter(node_id, slider.value() / 100.0, r["label"], "user")
+            guard = vol.live_guard() or self._own_guard
+            self.setter(node_id, fraction, r["label"], "user", r["hidden"], guard)
+            if guard is self._own_guard and guard.fades:
+                self.fade_timer.start()
         self.refresh()
         self.refresh_history(force=True)
 
+    def _step_own_fades(self):
+        try:
+            self._own_guard.step()
+        except Exception:
+            log.exception("hidden volume fade step failed")
+            self._own_guard.fades.clear()
+        if not self._own_guard.fades:
+            self.fade_timer.stop()
+
+    def _set_from_slider(self, node_id, slider):
+        self._apply(node_id, slider.value() / 100.0)
+
     def _reset(self, node_id):
-        r = self._row(node_id)
-        if r is not None:
-            self.setter(node_id, 1.0, r["label"], "user")
-        self.refresh()
-        self.refresh_history(force=True)
+        self._apply(node_id, 1.0)
 
     # -- timeline ---------------------------------------------------------------
     def _refill_filter(self):

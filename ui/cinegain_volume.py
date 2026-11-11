@@ -139,8 +139,23 @@ def set_node_volume(node_id, value):
     return True
 
 
+# The guard a running GUI or `cinegain watch` keeps updating and stepping. Raises
+# from the analysis view and the CLI go through it, so no second fade fights it.
+LIVE_S = 5.0
+_live = None
+
+
+def live_guard():
+    """The guard of the router owner in this process, if it is still being ticked."""
+    g = _live
+    if g is not None and g._alive is not None and time.monotonic() - g._alive <= LIVE_S:
+        return g
+    return None
+
+
 class VolumeGuard:
     def __init__(self, scanner=scan_nodes, setter=set_node_volume, clock=time.time, auto=True):
+        self._alive = None
         self.scanner = scanner
         self.setter = setter
         self.clock = clock
@@ -209,7 +224,9 @@ class VolumeGuard:
         Scans the nodes, starts fades for auto-managed ones and returns
         {program key: hidden dB} for the ones that are only reported.
         """
+        global _live
         now = self.clock() if now is None else now
+        _live, self._alive = self, time.monotonic()
         self.nodes = self.scanner()
         hidden = {}
         seen = set()
@@ -395,13 +412,30 @@ def scan_analysis():
     return inspect_nodes(dump, read_stored())
 
 
-def set_hidden(node_id, fraction, label="", who="user"):
-    """Sets a node's hidden volume to 0..100 % (never above: boosting is Cinegain's job, Q19)."""
+def set_hidden(node_id, fraction, label="", who="user", current=None, guard=None,
+               clock=time.time, sleep=time.sleep):
+    """
+    Sets a node's hidden volume to 0..100 % (never above: boosting is Cinegain's job,
+    Q19). Lowering is instant; raising fades in at <= 10 dB/s (#27). The fade runs
+    on `guard` or on the guard a GUI / `cinegain watch` keeps stepping; without one
+    (CLI) it runs here and blocks until done. `current` is the caller's reading of
+    the node; unknown levels fade in from silence.
+    """
     value = max(0.0, min(1.0, float(fraction)))
-    ok = set_node_volume(node_id, value)
+    g = guard or live_guard()
+    local = g is None
+    if local:
+        g = VolumeGuard(scanner=lambda: [], setter=set_node_volume, clock=clock)  # looked up now: patchable
+    start = g.known_volume(node_id, current)
+    if start is None:
+        start = from_db(FLOOR_DB)
+    raising = value > start * 1.0001
+    ok = g.fade_hidden(node_id, start, value, what=f"node {node_id} ({label})")
     if ok:
-        log.info("hidden volume of node %s (%s) set to %.6f = %.1f dB by %s",
-                 node_id, label, value, to_db(value), who)
+        log.info("hidden volume of node %s (%s) set to %.6f = %.1f dB by %s%s", node_id, label, value,
+                 to_db(value), who, f", fading in from {to_db(start):.1f} dB" if raising else "")
+    if local:
+        g.run_fades(sleep=sleep)
     return ok
 
 

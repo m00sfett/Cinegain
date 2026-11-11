@@ -517,8 +517,11 @@ def cmd_volume(args):
         if not row["editable"]:
             print(f"{row['label']} is a hardware output; Cinegain leaves it untouched.", file=sys.stderr)
             return 1
-        ok = vol.set_hidden(row["id"], args.percent / 100.0, row["label"], who="cli")
-        print(f"{row['label']}: hidden volume {max(0.0, min(100.0, args.percent)):.1f} %" if ok
+        value = max(0.0, min(100.0, args.percent)) / 100.0
+        if value > row["hidden"] * 1.0001:
+            print(f"{row['label']}: fading in from {vol.to_db(row['hidden']):+.1f} dB (at most 10 dB/s) ...")
+        ok = vol.set_hidden(row["id"], value, row["label"], "cli", row["hidden"])
+        print(f"{row['label']}: hidden volume {value * 100:.1f} %" if ok
               else f"Setting the hidden volume of {row['label']} failed.")
         return 0 if ok else 1
     if args.json:
