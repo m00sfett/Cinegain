@@ -499,18 +499,19 @@ class TestPulseParsing(unittest.TestCase):
         data = [{"index": 7, "sink": 53, "mute": False, "corked": True,
                  "volume": {"front-left": {"value_percent": "40%"}, "front-right": {"value_percent": "40%"}},
                  "properties": {"application.name": "Chromium", "application.process.binary": "ChatGPT",
-                                "node.name": "Chromium"}}]
+                                "node.name": "Chromium", "object.id": "95", "object.serial": "376059"}}]
         (s,) = parse_streams_json(json.dumps(data))
-        self.assertEqual((s.index, s.sink, s.app_name, s.binary, s.volume_pct, s.corked),
-                         ("7", "53", "Chromium", "ChatGPT", 40, True))
+        self.assertEqual((s.index, s.sink, s.app_name, s.binary, s.volume_pct, s.corked, s.node_id),
+                         ("7", "53", "Chromium", "ChatGPT", 40, True, 95))
 
     def test_text(self):
         text = ('Sink Input #150371\n\tDriver: PipeWire\n\tSink: 134557\n\tCorked: no\n\tMute: no\n'
                 '\tVolume: front-left: 65536 / 100% / 0,00 dB,   front-right: 65536 / 100% / 0,00 dB\n'
                 '\tProperties:\n\t\tapplication.name = "Chromium"\n'
-                '\t\tapplication.process.binary = "ChatGPT"\n\t\tnode.name = "Chromium"\n')
+                '\t\tapplication.process.binary = "ChatGPT"\n\t\tnode.name = "Chromium"\n'
+                '\t\tobject.id = "95"\n')
         (s,) = parse_streams_text(text)
-        self.assertEqual((s.index, s.sink, s.binary, s.volume_pct), ("150371", "134557", "ChatGPT", 100))
+        self.assertEqual((s.index, s.sink, s.binary, s.volume_pct, s.node_id), ("150371", "134557", "ChatGPT", 100, 95))
 
 
 class TestReset(Base):

@@ -32,6 +32,7 @@ FADE_S = 3.0            # a fade-in takes at least this long ...
 MAX_RISE_DB_S = 10.0    # ... and never rises faster than this (SPEC 3.3 policy, #40)
 MAX_STEP_DB = 1.0       # largest raise per step, fine enough against zipper noise (#40)
 FLOOR_DB = -90.0        # a fade from silence (or an unknown level) starts here
+DUCK_VOLUME = 0.03      # a stream drops to this (-30 dB) right before it changes sinks (#40)
 OUTPUT_PREFIX = "cinegain_output"
 
 
@@ -218,6 +219,36 @@ class VolumeGuard:
 
     def cancel(self, key):
         self.fades.pop(key, None)
+
+    def refresh(self, now=None):
+        """One scan that only learns the current levels (no logging, no fades)."""
+        self._refreshed_at = self.clock() if now is None else now
+        self.nodes = self.scanner()
+        for n in self.nodes:
+            if n.id not in self.fades:
+                self._last[n.id] = n.volume
+
+    def duck(self, node_id, now=None):
+        """
+        #40: right before a stream moves to another sink (whose boost may already be
+        up) its hidden volume drops to DUCK_VOLUME and fades back to where it was, or
+        to where a running fade was heading. Quieter streams are left alone.
+        """
+        now = self.clock() if now is None else now
+        level = self.known_volume(node_id)
+        if level is None and getattr(self, "_refreshed_at", None) != now:
+            self.refresh(now)
+            level = self.known_volume(node_id)
+        if level is None or level <= DUCK_VOLUME:
+            return False
+        running = self.fades.get(node_id)
+        target = from_db(running.target_db) if running is not None else level
+        ok = self.fade_hidden(node_id, DUCK_VOLUME, target, now, apply_start=True,
+                              what=f"node {node_id} (after a sink change)")
+        if ok:
+            log.info("ducked node %s to %.1f dB before a sink change, fading back to %.1f dB",
+                     node_id, to_db(DUCK_VOLUME), to_db(target))
+        return ok
 
     def update(self, auto_keys=(), now=None):
         """

@@ -230,6 +230,45 @@ class TestRouterVolume(tr.Base):
         self.assertEqual([f["target"] for f in report["faded"]], ["spotify::spotify"])
         self.assertEqual(len(report["compensated"]), 2)
 
+    def _record_order(self):
+        events = []
+        move, setter = self.pulse.move, self.volumes.set
+        self.pulse.move = lambda i, sink: events.append(("move", i)) or move(i, sink)
+        self.router.guard.setter = lambda n, v: events.append(("set", n, round(v, 6))) or setter(n, v)
+        return events
+
+    def test_stream_is_ducked_before_it_moves_and_fades_in_on_the_new_sink(self):
+        """#40.1: a stream moved onto a sink that is already boosted fades in instead of jumping."""
+        from cinegain_volume import DUCK_VOLUME
+        self.stream(1, "Spotify", "spotify", node_id=41)
+        self.volumes.nodes[41] = NodeVolume(41, "Spotify", "spotify", "Spotify", 1.0)
+        events = self._record_order()
+        self.router.tick()
+        moves = [i for i, e in enumerate(events) if e[0] == "move"]
+        self.assertEqual(len(moves), 1)
+        self.assertGreaterEqual(moves[0], 1)
+        self.assertEqual(events[moves[0] - 1], ("set", 41, DUCK_VOLUME))  # ducked right before the move
+        self.assertIn(41, self.router.guard.fades)
+        drain(self.router.guard, self.clock)
+        self.assertEqual(self.volumes.nodes[41].volume, 1.0)
+        writes = [e[2] for e in events if e[0] == "set"]
+        self.assertLessEqual(rises(writes[1:], writes[0]), MAX_STEP_DB + 1e-3)  # writes are rounded
+        self.assertGreaterEqual(len(writes), 30)  # about 3 s at 100 ms steps, not a jump
+
+    def test_duck_never_raises_a_quieter_stream_and_streams_without_node_id_still_move(self):
+        self.stream(1, "Chromium", "ChatGPT", node_id=42)
+        self.stream(2, "Spotify", "spotify")  # no object.id known
+        self.registry.observe("Chromium", "ChatGPT")
+        self.registry.set_enabled("chatgpt::chromium", True)
+        quiet = 10 ** (-84 / 20)
+        self.volumes.nodes[42] = NodeVolume(42, "Chromium", "ChatGPT", "Chromium", quiet)
+        events = self._record_order()
+        self.router.guard.auto = False  # watch the duck alone, not the auto reset
+        self.router.tick()
+        self.assertEqual(sorted(e[1] for e in events if e[0] == "move"), ["1", "2"])
+        self.assertTrue(all(v <= quiet for _, n, v in [e for e in events if e[0] == "set"] if n == 42))
+        self.assertNotIn(42, self.router.guard.fades)
+
     def test_reset_of_one_program_leaves_others(self):
         self.stream(1, "Chromium", "ChatGPT")
         self.stream(2, "Discord", "discord")

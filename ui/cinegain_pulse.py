@@ -25,11 +25,14 @@ def is_cinegain_name(name):
 class Stream:
     """One playback stream (PulseAudio sink-input)."""
 
-    __slots__ = ("index", "sink", "app_name", "binary", "node_name", "volume_pct", "muted", "corked")
+    __slots__ = ("index", "sink", "app_name", "binary", "node_name", "volume_pct", "muted", "corked",
+                 "node_id")
 
     def __init__(self, index, sink, app_name="", binary="", node_name="", volume_pct=100,
-                 muted=False, corked=False):
+                 muted=False, corked=False, node_id=None):
         self.index = str(index)
+        # PipeWire node id ("object.id"); the pulse index is the object serial, not the id.
+        self.node_id = int(node_id) if str(node_id or "").isdigit() else None
         self.sink = str(sink)
         self.app_name = app_name or ""
         self.binary = binary or ""
@@ -94,6 +97,7 @@ def parse_streams_json(text):
                 volume_pct=max(vols) if vols else 100,
                 muted=item.get("mute", False),
                 corked=item.get("corked", False),
+                node_id=props.get("object.id"),
             )
         )
     return streams
@@ -106,7 +110,7 @@ def parse_streams_text(text):
         if not lines:
             continue
         fields = {"index": lines[0].strip(), "sink": "", "app_name": "", "binary": "",
-                  "node_name": "", "volume_pct": 100, "muted": False, "corked": False}
+                  "node_name": "", "volume_pct": 100, "muted": False, "corked": False, "node_id": None}
         for raw in lines[1:]:
             s = raw.strip()
             if s.startswith("Sink:"):
@@ -122,7 +126,8 @@ def parse_streams_text(text):
             else:
                 for key, prop in (("app_name", "application.name"),
                                   ("binary", "application.process.binary"),
-                                  ("node_name", "node.name")):
+                                  ("node_name", "node.name"),
+                                  ("node_id", "object.id")):
                     m = re.match(re.escape(prop) + r'\s*=\s*"(.*)"$', s)
                     if m:
                         fields[key] = m.group(1)

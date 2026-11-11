@@ -134,6 +134,7 @@ class Router:
                         if is_cinegain_name(current):
                             why = "Cinegain off" if not active else "program switched off"
                             log.info("move stream #%s (%s) %s -> %s: %s", s.index, key, current, hw, why)
+                            self._duck(s, now)
                             self.pulse.move(s.index, hw)
                             current = hw
                     elif target_id is None:
@@ -152,6 +153,7 @@ class Router:
                     elif s.sink != target_id:
                         why = "own setting" if profile != PROFILE_STANDARD else "follows Standard"
                         log.info("move stream #%s (%s) %s -> %s: %s", s.index, key, current, target, why)
+                        self._duck(s, now)
                         self.pulse.move(s.index, target)
                         current = target
                 view.sink = current
@@ -170,6 +172,15 @@ class Router:
         self._watch_processes(now)
         self.registry.flush()
         return sorted(views.values(), key=lambda v: (not v.playing, not v.streams, -v.last_seen, v.label.lower()))
+
+    def _duck(self, stream, now):
+        """#40: the target sink may already be boosted; the stream fades in there instead of jumping."""
+        if self.guard is None or stream.node_id is None:
+            return
+        try:
+            self.guard.duck(stream.node_id, now)
+        except Exception:
+            log.exception("ducking stream #%s before the move failed", stream.index)
 
     def _reap_idle(self, wanted, now, active):
         for pid in wanted:
