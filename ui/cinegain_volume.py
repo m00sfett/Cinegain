@@ -197,12 +197,10 @@ def clean_stream_properties(path=None, backup_dir=None, stamp=None):
         return 0, None
     backup = None
     if backup_dir is not False:
-        backup_dir = backup_dir or paths.BACKUP_DIR
-        os.makedirs(backup_dir, exist_ok=True)
+        backup_dir = paths.private_dir(backup_dir or paths.BACKUP_DIR)
         backup = os.path.join(backup_dir, f"stream-properties-{stamp or time.strftime('%Y%m%d-%H%M%S')}")
         shutil.copy2(path, backup)
-    with open(path, "w", encoding="utf-8") as f:
-        f.writelines(out)
+    paths.write_text_atomic(path, "".join(out))
     log.info("cleaned %d saved stream volumes in %s (backup %s)", changed, path, backup)
     return changed, backup
 
@@ -311,7 +309,7 @@ _HIST_PATTERNS = (
     ("lowered", re.compile(r"hidden volume of node (\d+) \(([^,]*), ([^)]*)\) is [0-9.]+ = (-?[0-9.]+|-inf) dB(?: \(was (-?[0-9.]+) dB\))?")),
     ("auto", re.compile(r"fading node (\d+) \(([^)]*)\) from (-?[0-9.]+) dB")),
     ("set", re.compile(r"hidden volume of node (\d+) \(([^)]*)\) set to [0-9.]+ = (-?[0-9.]+|-inf) dB by (\w+)")),
-    ("full_reset", re.compile(r"full volume reset")),
+    ("full_reset", re.compile(r"full volume reset done")),
 )
 _LOG_LINE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)[.,]\d+ \d+ \S+ \S+\s+(\S+): (.*)$")
 
@@ -339,11 +337,11 @@ def history(log_path=None, days=7, limit=500, key=None, now=None):
                 ts = time.mktime(time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"))
             except ValueError:
                 continue
-            if ts < cutoff:
+            if ts < cutoff or m.group(2) not in ("cinegain.volume", "cinegain.router"):
                 continue
             msg = m.group(3)
             for kind, rx in _HIST_PATTERNS:
-                hit = rx.search(msg)
+                hit = rx.match(msg)  # anchored: names inside a message never count (#42)
                 if not hit:
                     continue
                 ev = {"time": ts, "kind": kind, "key": "", "db": None, "was_db": None, "who": ""}

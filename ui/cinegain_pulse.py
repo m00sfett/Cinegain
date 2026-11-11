@@ -11,6 +11,7 @@ import re
 import subprocess
 
 import cinegain_log
+import cinegain_paths as paths
 
 log = cinegain_log.get("pulse")
 
@@ -212,8 +213,7 @@ def clean_wireplumber_targets(path):
     if cleaned == content:
         return False
     try:
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(cleaned)
+        paths.write_text_atomic(path, cleaned)  # WirePlumber may read it any moment (#42)
     except OSError:
         return False
     return True
