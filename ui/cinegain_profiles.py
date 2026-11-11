@@ -178,14 +178,22 @@ def full_params(params):
     return full
 
 
+def _spa_string(text):
+    """Text safe inside a double-quoted PipeWire (SPA JSON) string: no control characters."""
+    text = "".join(ch for ch in str(text) if ch >= " " and ch != "\x7f")
+    return text.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def build_runtime_conf(template, plugin_so, profile_id, params, description):
     """Fills the filter-chain template with names and parameters of one profile."""
-    text = re.sub(r'plugin\s*=\s*"[^"]+"', f'plugin = "{plugin_so}"', template)
+    text = re.sub(r'plugin\s*=\s*"[^"]+"', lambda m: f'plugin = "{plugin_so}"', template)
     text = text.replace('"cinegain_sink"', f'"{sink_name(profile_id)}"')
     text = text.replace('"cinegain_output"', f'"{output_name(profile_id)}"')
-    desc = description.replace('"', "'")
-    text = re.sub(r'node\.description\s*=\s*"[^"]*"', f'node.description = "{desc}"', text)
-    text = re.sub(r'media\.name\s*=\s*"[^"]*"', f'media.name       = "{desc}"', text)
+    # The label comes from the outside (application.name, rename): the replacement
+    # must be literal (no re escapes) and a valid SPA string (#31).
+    desc = _spa_string(description)
+    text = re.sub(r'node\.description\s*=\s*"[^"]*"', lambda m: f'node.description = "{desc}"', text)
+    text = re.sub(r'media\.name\s*=\s*"[^"]*"', lambda m: f'media.name       = "{desc}"', text)
     if profile_id != PROFILE_STANDARD:
         # Profile sinks must never win the default-sink election.
         text = re.sub(r"priority\.session\s*=\s*\d+", "priority.session   = 0", text)

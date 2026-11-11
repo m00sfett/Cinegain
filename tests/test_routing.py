@@ -449,6 +449,32 @@ class TestRuntimeConf(unittest.TestCase):
         self.assertIn("priority.session   = 0", conf)
         self.assertIn('node.description = "Cinegain · Nacht"', conf)
 
+    def _descriptions(self, label, profile="app_x_abc"):
+        """node.description / media.name values as a JSON-style parser reads them back."""
+        import json
+        conf = build_runtime_conf(self.template, "/x/cinegain.so", profile, {"input_db": 3.0}, label)
+        out = []
+        for line in conf.splitlines():
+            for key in ("node.description", "media.name"):
+                if line.strip().startswith(key):
+                    out.append(json.loads(line.split("=", 1)[1].strip()))
+        return conf, out
+
+    def test_label_with_backslash_quote_or_newline_cannot_break_the_conf(self):
+        """#31: a Windows path as program name raised re.error and froze the whole router."""
+        for label in (r"Wine C:\Games\x", "ends with a slash\\", 'say "hi"', "two\nlines\tand\x00ctl",
+                      r"\1 \g<0>"):
+            with self.subTest(label=label):
+                conf, found = self._descriptions(label)
+                clean = "".join(ch for ch in label if ch >= " ")
+                self.assertEqual(found, [clean] * 3, "node.description x2 and media.name must all round-trip")
+                self.assertIn('"input_db"         = 3.0', conf)  # the rest of the conf stays intact
+                self.assertEqual(conf.count("{") , conf.count("}"))
+
+    def test_plain_labels_stay_unchanged(self):
+        _, found = self._descriptions("Cinegain · Nächste Größe")
+        self.assertEqual(found, ["Cinegain · Nächste Größe"] * 3)
+
     def test_standard_conf_keeps_standard_names(self):
         conf = build_runtime_conf(self.template, "/x/cinegain.so", "standard", {}, "Cinegain")
         self.assertIn('"cinegain_sink"', conf)
