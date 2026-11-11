@@ -27,7 +27,7 @@ PROFILE_STANDARD = "standard"
 
 STANDARD_SINK = "cinegain_sink"
 STANDARD_OUTPUT = "cinegain_output"
-USER_SLOTS = tuple(f"user_{i}" for i in range(1, 9))
+USER_SLOTS = tuple(f"user_{i}" for i in range(1, 7))  # 6 slots since 0.4.0 (8 before)
 
 # Factory default = the "Neutral (0 dB)" preset: Standard leaves audio untouched
 # until the user changes it (presets.json clean_linear must stay in sync).
@@ -109,14 +109,20 @@ class ProfileCatalog:
             entry = raw.get(sid) if isinstance(raw, dict) else None
             entry = entry if isinstance(entry, dict) else {}
             params = normalize_params(entry.get("params")) if isinstance(entry.get("params"), dict) else {}
-            slots[sid] = {"name": entry.get("name") or f"User {i}", "params": params or None}
+            mode = entry.get("mode")
+            if params and mode not in ("fixed", "dynamic"):
+                # 0.3.x slots carry no mode: judge by their values
+                p = full_params(params)
+                mode = "dynamic" if (p["leveler"] > 0.5 or p["lev_max_boost_db"] > 0.05
+                                     or p["comp_ratio"] > 1.01) else "fixed"
+            slots[sid] = {"name": entry.get("name") or f"User {i}", "params": params or None,
+                          "mode": mode if params else None}
         return slots
 
     def standard_params(self):
-        state = paths.read_json(self.state_path, default={}) or {}
-        params = dict(DEFAULT_PARAMS)
-        params.update(normalize_params(state.get("params")))
-        return params
+        """Effective parameters of Standard (its active mode)."""
+        import cinegain_modes as modes
+        return modes.load_standard(self.state_path)["params"]
 
     def is_template(self, template_id):
         if template_id in USER_SLOTS:
@@ -137,6 +143,18 @@ class ProfileCatalog:
         full.update(p)
         full["bypass"] = 0.0
         return full
+
+    def template_setting(self, template_id):
+        """(mode, values) a template loads: user slots remember theirs, factory presets by kind."""
+        import cinegain_modes as modes
+        params = self.params(template_id)
+        if params is None:
+            return None, None
+        if template_id in USER_SLOTS:
+            mode = self.user_slots()[template_id]["mode"]
+        else:
+            mode = modes.preset_mode(template_id)
+        return mode, modes.mode_values(mode, params)
 
     def name(self, template_id):
         if template_id == PROFILE_STANDARD:
