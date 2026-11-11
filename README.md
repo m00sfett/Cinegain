@@ -4,7 +4,7 @@
 [![PipeWire](https://img.shields.io/badge/Audio-PipeWire-blue.svg)](https://pipewire.org)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow.svg)](https://www.python.org/)
 [![GUI: PyQt6](https://img.shields.io/badge/GUI-PyQt6-green.svg)](https://riverbankcomputing.com/software/pyqt/)
-[![Version](https://img.shields.io/badge/Release-v0.5.0-orange.svg)](https://github.com/m00sfett/cinegain/releases)
+[![Version](https://img.shields.io/badge/Release-v0.5.1-orange.svg)](https://github.com/m00sfett/cinegain/releases)
 
 > **Louder than your system allows — and finally a look at the volumes PipeWire hides from you. For Linux (PipeWire).**
 
@@ -108,19 +108,24 @@ paru -S cinegain
 
 ---
 
+> [!NOTE]
+> **Verify downloads:** From v0.5.1 on, every release ships a `SHA256SUMS` file. Put it next to the downloaded files and run `sha256sum -c SHA256SUMS --ignore-missing`.
+
+---
+
 ### Method 3: Debian / Ubuntu (.deb Package)
 
 Download the `.deb` package from the [Releases page](https://github.com/m00sfett/cinegain/releases) and install via `apt`:
 
 ```bash
 sudo apt update
-sudo apt install ./cinegain_0.5.0_amd64.deb
+sudo apt install ./cinegain_0.5.1_amd64.deb
 ```
 
 *Or build the `.deb` package yourself:*
 ```bash
 ./packaging/debian/build-deb.sh
-sudo apt install ./packaging/cinegain_0.5.0_amd64.deb
+sudo apt install ./packaging/cinegain_0.5.1_amd64.deb
 ```
 
 > [!NOTE]
@@ -133,18 +138,18 @@ sudo apt install ./packaging/cinegain_0.5.0_amd64.deb
 Download the `.rpm` package from the [Releases page](https://github.com/m00sfett/cinegain/releases) or build it using the spec file:
 
 ```bash
-sudo dnf install ./cinegain-0.5.0-1.x86_64.rpm
+sudo dnf install ./cinegain-0.5.1-1.x86_64.rpm
 ```
 
 ---
 
 ### Method 5: Standalone Release Archive (Universal Tarball)
 
-Download `cinegain-0.5.0-linux-x86_64.tar.gz` from [GitHub Releases](https://github.com/m00sfett/cinegain/releases):
+Download `cinegain-0.5.1-linux-x86_64.tar.gz` from [GitHub Releases](https://github.com/m00sfett/cinegain/releases):
 
 ```bash
-tar -xzvf cinegain-0.5.0-linux-x86_64.tar.gz
-cd cinegain-0.5.0-linux-x86_64
+tar -xzvf cinegain-0.5.1-linux-x86_64.tar.gz
+cd cinegain-0.5.1-linux-x86_64
 ./install.sh        # Installs for current user (~/.local)
 # or: sudo ./install.sh --system  # Installs system-wide (/usr/local)
 ```
