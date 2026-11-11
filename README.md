@@ -4,7 +4,7 @@
 [![PipeWire](https://img.shields.io/badge/Audio-PipeWire-blue.svg)](https://pipewire.org)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow.svg)](https://www.python.org/)
 [![GUI: PyQt6](https://img.shields.io/badge/GUI-PyQt6-green.svg)](https://riverbankcomputing.com/software/pyqt/)
-[![Version](https://img.shields.io/badge/Release-v0.3.6-orange.svg)](https://github.com/m00sfett/cinegain/releases)
+[![Version](https://img.shields.io/badge/Release-v0.4.0-orange.svg)](https://github.com/m00sfett/cinegain/releases)
 
 > **Realtime Volume Booster, Dialogue Clarity Optimizer & Film Audio Processor for Linux (PipeWire).**
 
@@ -16,6 +16,10 @@ Unlike simple equalizers or aggressive compressors that distort the entire mix, 
 
 ## Key Features
 
+- **Two Modes per Program — *Fixed* and *Dynamic · Beta*:**
+  *Fixed* (the main feature) is a plain volume boost up to +25 dB with a fixed tone (voices, bass, treble, stereo width). Nothing analyses the signal; only the look-ahead limiter guards against clipping. *Dynamic · Beta* is the full film-sound chain below (leveler, compressor, speech focus). Each mode keeps its own values, so switching back and forth loses nothing. Standard and every program with its own setting have their own mode.
+- **Hidden-Volume Guard & Full Volume Reset:**
+  PipeWire keeps a second, hidden volume per stream that pavucontrol and desktop mixers do not show; WirePlumber remembers it and restores it for every new stream (Chrome was found at -48 dB, Electron apps at -84 dB). Cinegain fades it back to 0 dB for programs it routes and for its own output streams, and shows a warning badge and bar for all others. *Full volume reset* (button, tray or `cinegain volume-reset`) puts hidden volumes back to 0 dB, normal stream volumes to 100 %, unmutes and cleans the saved values; it lowers Cinegain's own gain first so nothing blasts. Every change is logged.
 - **Direct Software Volume Booster (+25 dB):**
   Instantly amplifies quiet movie files, streams, or low-volume laptop speakers up to +25 dB.
 - **Intelligent Dialogue Leveler:**
@@ -30,8 +34,8 @@ Unlike simple equalizers or aggressive compressors that distort the entire mix, 
   Modern two-column layout with high-contrast hero sliders, real-time feedback, and system tray integration.
 - **Full Keyboard Navigation:**
   Control every parameter using the keyboard (`↑`/`↓` to switch sliders, `←`/`→` for 1.0 dB steps, `Shift + ←`/`→` for 0.1 dB fine tuning).
-- **8 Auto-Saving User Presets:**
-  Store and recall your own custom audio profiles with live change indicators and slot renaming.
+- **6 User Slots:**
+  Store and recall your own settings, including their mode, with live match indicators and slot renaming.
 - **Settings per Program, Remembered Permanently:**
   Every program that ever played audio stays in the sidebar (`~/.config/cinegain/apps.json`). Select a program and the presets and sliders edit exactly that program; untouched programs follow *Standard*. A program with its own setting runs through its own filter sink, so a film in the browser and music in Spotify play at the same time with different processing. A switch per program decides whether it goes through Cinegain at all. Electron apps that pretend to be "Chromium" (e.g. the ChatGPT desktop client) are told apart by their binary.
 - **Reset Everything:**
@@ -39,7 +43,7 @@ Unlike simple equalizers or aggressive compressors that distort the entire mix, 
 - **Multi-Language Support (19 Languages):**
   Instant live translation switcher in the title bar (Material Translate `A / 文` icon): English, German, Spanish, French, Italian, Portuguese, Dutch, Polish, Turkish, Russian, Ukrainian, Arabic, Hindi, Indonesian, Vietnamese, Japanese, Korean, Simplified Chinese, Traditional Chinese.
 - **Headless Daemon & CLI:**
-  Full command-line interface (`cinegain start`, `stop`, `status`, `set`, `preset`, `route`, `watch`, `apps`, `templates`, `reset`) for scripting or headless desktop environments.
+  Full command-line interface (`cinegain start`, `stop`, `status`, `set`, `batch`, `mode`, `preset`, `route`, `watch`, `apps`, `templates`, `volume-reset`, `log`, `reset`) for scripting or headless desktop environments.
 
 ---
 
@@ -47,7 +51,7 @@ Unlike simple equalizers or aggressive compressors that distort the entire mix, 
 
 ### Runtime Requirements
 All installation methods require:
-- **Linux OS** with **PipeWire** (>= 0.3.60) and `pipewire-pulse` (default audio stack on Arch, CachyOS, Fedora 34+, Ubuntu 22.10+, Debian 12+, openSUSE).
+- **Linux OS** with **PipeWire** (>= 0.4.00) and `pipewire-pulse` (default audio stack on Arch, CachyOS, Fedora 34+, Ubuntu 22.10+, Debian 12+, openSUSE).
 - **Python** (>= 3.10).
 - **PyQt6** (`python-pyqt6` / `python3-pyqt6`) for the graphical desktop interface. *(The headless CLI works without PyQt6).*
 - Standard C math library (`libm`).
@@ -103,13 +107,13 @@ Download the `.deb` package from the [Releases page](https://github.com/m00sfett
 
 ```bash
 sudo apt update
-sudo apt install ./cinegain_0.3.6_amd64.deb
+sudo apt install ./cinegain_0.4.0_amd64.deb
 ```
 
 *Or build the `.deb` package yourself:*
 ```bash
 ./packaging/debian/build-deb.sh
-sudo apt install ./packaging/cinegain_0.3.6_amd64.deb
+sudo apt install ./packaging/cinegain_0.4.0_amd64.deb
 ```
 
 > [!NOTE]
@@ -122,18 +126,18 @@ sudo apt install ./packaging/cinegain_0.3.6_amd64.deb
 Download the `.rpm` package from the [Releases page](https://github.com/m00sfett/cinegain/releases) or build it using the spec file:
 
 ```bash
-sudo dnf install ./cinegain-0.3.6-1.x86_64.rpm
+sudo dnf install ./cinegain-0.4.0-1.x86_64.rpm
 ```
 
 ---
 
 ### Method 5: Standalone Release Archive (Universal Tarball)
 
-Download `cinegain-0.3.6-linux-x86_64.tar.gz` from [GitHub Releases](https://github.com/m00sfett/cinegain/releases):
+Download `cinegain-0.4.0-linux-x86_64.tar.gz` from [GitHub Releases](https://github.com/m00sfett/cinegain/releases):
 
 ```bash
-tar -xzvf cinegain-0.3.6-linux-x86_64.tar.gz
-cd cinegain-0.3.6-linux-x86_64
+tar -xzvf cinegain-0.4.0-linux-x86_64.tar.gz
+cd cinegain-0.4.0-linux-x86_64
 ./install.sh        # Installs for current user (~/.local)
 # or: sudo ./install.sh --system  # Installs system-wide (/usr/local)
 ```
@@ -173,8 +177,10 @@ cinegain-gui
 
 - **Filter Toggle:** Click the large red/green button in the banner to toggle Cinegain on or off without altering your slider positions.
 - **Language Switcher:** Click the `🌐` / `A / 文` button in the title banner to instantly switch between 19 languages.
-- **Factory Presets:** Click any preset button (`+5 dB`, `+10 dB`, `+15 dB`, `+20 dB`, `+25 dB`, `Film & Serie`, `Night Mode`, `Neutral 0 dB`).
-- **User Slots:** Click any empty slot (`User 1`–`8`) to save the current slider state. Left-click to recall (the slot then follows your slider changes); right-click to rename, overwrite or clear.
+- **Mode switch:** *Fixed | Dynamic · Beta* in the header next to the program name. Fixed shows the five shared sliders (volume and voices left, bass, treble and stereo width right); Dynamic adds leveler, center, compressor, makeup and limiter below them. A β in the sidebar marks programs that run dynamic.
+- **Factory Presets:** All presets are always visible. The volume steps (`Neutral 0 dB`, `+5`…`+25 dB`) switch to *Fixed*, the film presets marked β (`Film & Serie`, `Night Mode`, `Max Cinema`) to *Dynamic*.
+- **User Slots:** Six slots. Click an empty slot to save the current mode and values. Left-click to load (mode included); right-click to rename, overwrite or clear.
+- **Hidden volume:** A red `-48 dB` badge on a program, a hint in the header and a bar above everything appear when PipeWire secretly turns a stream down. *Reset* fixes one program, *Full volume reset* all of them.
 - **Keyboard Controls:** Use `↑` / `↓` to select sliders. Press `←` / `→` for 1.0 dB steps, or hold `Shift` for fine 0.1 dB steps.
 - **Programs (sidebar):** Click *Standard* or a program; the header above the presets names what you are editing. The first slider move or preset gives a program its own setting, *Back to Standard* discards it. The switch in each row routes the program through Cinegain or straight to the speakers. Programs silent for more than a week fold away under *Silent for a while*. Right-click a program to rename it, set its own volume back to 100 % or forget it. A yellow volume badge (e.g. `40 %`) means the program itself is turned down; one click fixes it.
 - **Presets & user slots:** A click loads the values into the selected program (or Standard). Loaded templates keep their saved values while you adjust the sound. Right-click a slot to store the current values in it, rename or clear it.
@@ -218,6 +224,14 @@ cinegain apps on chatgpt
 cinegain apps rename chatgpt "ChatGPT Voice"
 cinegain apps forget mpv
 cinegain templates                     # presets and user slots you can load
+cinegain mode                          # show Standard's mode
+cinegain mode dynamic                  # Standard: dynamic (beta)
+cinegain mode fixed --app chrome       # Chrome: fixed (gets its own setting)
+cinegain batch '{"input_db": 12}' --mode fixed
+
+# Undo secretly lowered stream volumes (hidden PipeWire volume):
+cinegain volume-reset
+cinegain volume-reset --app chatgpt
 
 # Reset everything to factory settings (state is backed up first):
 cinegain reset

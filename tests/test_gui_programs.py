@@ -52,11 +52,20 @@ class TestProgramEditing(unittest.TestCase):
         paths.write_json_atomic(paths.CONFIG_FILE, {"lang": "en"})
         slot = {k: 1.0 for k in ("input_db",)}
         paths.write_json_atomic(paths.USER_PRESETS_FILE, {"user_1": {"name": "Music", "params": slot}})
-        paths.write_json_atomic(paths.STATE_FILE, {"preset": "custom", "params": {"input_db": 8.0}})
+        paths.write_json_atomic(paths.STATE_FILE, {
+            "preset": "custom", "mode": "fixed", "params": {"input_db": 8.0},
+            "sets": {"fixed": {"input_db": 8.0}, "dynamic": {"input_db": 8.0}}})
         self.calls = []
 
         def fake_run(*args):
             self.calls.append(args)
+            if args[:1] == ("batch",):
+                # like `cinegain batch`: values go into Standard's (new) mode and are saved
+                import cinegain_modes as modes
+                st = modes.load_standard()
+                mode = args[args.index("--mode") + 1] if "--mode" in args else st["mode"]
+                modes.save_standard(mode, modes.apply_values(mode, st["sets"], json.loads(args[1])))
+                return "", 0
             if args[:1] == ("status",):
                 state = paths.read_json(paths.STATE_FILE)
                 return json.dumps({"active": True, "params": state["params"], "preset": "custom"}), 0
@@ -119,6 +128,7 @@ class TestProgramEditing(unittest.TestCase):
 
     def test_program_boost_slider_switches_its_leveler_on_and_off(self):
         self.win.sidebar.select(CHROME)
+        self.win.set_mode("dynamic")
         self.slider("lev_max_boost_db").setValue(150)
         self.win.flush_pending_params()
         params = AppRegistry().get(CHROME)["params"]
@@ -154,7 +164,8 @@ class TestProgramEditing(unittest.TestCase):
         self.assertTrue(self.win.btn_power.isEnabled())
         self.assertEqual(self.win.lbl_status.text(), self.gui.t("status_inactive"))
 
-    def test_keyboard_and_details(self):
+    def test_keyboard_and_mode_layout(self):
+        """Everything is always visible (no "more settings"); fixed mode shows the five shared sliders."""
         from PyQt6.QtCore import Qt
         from PyQt6.QtTest import QTest
         self.win.show()
@@ -162,11 +173,21 @@ class TestProgramEditing(unittest.TestCase):
         self.app.processEvents()
         QTest.keyClick(self.slider(), Qt.Key.Key_Tab)
         self.assertFalse(self.slider().hasFocus())
-        self.assertTrue(self.win.grp_adv.isHidden())
-        self.win.details.setFocus()
-        QTest.keyClick(self.win.details, Qt.Key.Key_Space)
-        self.assertTrue(self.win.grp_adv.isVisible())
-        self.assertTrue(self.win.user_preset_buttons["user_1"].isVisible())
+        self.assertFalse(hasattr(self.win, "details"))
+        self.assertEqual(len(self.win.user_preset_buttons), 6)
+        self.assertTrue(all(b.isVisible() for b in self.win.preset_buttons.values()))
+        self.assertTrue(all(b.isVisible() for b in self.win.user_preset_buttons.values()))
+        visible = [n for n in self.win.slider_order if self.win.sliders[n]["row_frame"].isVisible()]
+        self.assertEqual(visible, ["input_db", "dialog_db", "bass_db", "treble_db", "side_db"])
+        self.win.set_focused_slider(0)
+        self.win.navigate_slider(0, 1)
+        self.assertEqual(self.win.slider_order[self.win.focused_slider_idx], "dialog_db")
+        self.win.navigate_slider(self.win.focused_slider_idx, 100)  # F6: other column, same row
+        self.assertEqual(self.win.slider_order[self.win.focused_slider_idx], "treble_db")
+        self.win.set_mode("dynamic")
+        visible = [n for n in self.win.slider_order if self.win.sliders[n]["row_frame"].isVisible()]
+        self.assertEqual(len(visible), 12)
+        self.assertEqual(visible[:2], ["input_db", "dialog_db"])
 
     def test_loaded_user_slot_preserves_template_until_explicit_save(self):
         self.win.on_user_preset_clicked("user_1")  # filled slot: loads into Standard
@@ -311,6 +332,73 @@ class TestProgramEditing(unittest.TestCase):
                     break
             server.close()
         self.assertEqual(raised, [True])
+
+    def test_mode_switch_on_a_follower_gives_it_its_own_setting(self):
+        """Q15a: switching the mode of a program that follows Standard gives it its own setting."""
+        self.win.sidebar.select(CHROME)
+        self.assertFalse(self.win.btn_mode_dynamic.isChecked())
+        self.win.set_mode("dynamic")
+        entry = AppRegistry().get(CHROME)
+        self.assertEqual(entry["mode"], "dynamic")
+        self.assertEqual(entry["sets"]["fixed"]["input_db"], 8.0)  # copied from Standard
+        self.assertTrue(self.win.btn_mode_dynamic.isChecked())
+        self.assertTrue(self.win.sliders["comp_ratio"]["row_frame"].isVisibleTo(self.win))
+        self.assertIsNone(AppRegistry().get(SPOTIFY)["params"])  # others untouched
+
+    def test_each_mode_keeps_its_values_and_presets_bring_their_mode(self):
+        """Q17b + Q6b: separate value sets; a film preset switches to dynamic, a boost step to fixed."""
+        self.win.sidebar.select(CHROME)
+        self.slider().setValue(120)
+        self.win.flush_pending_params()
+        self.win.apply_factory_preset("night_mode")
+        self.assertEqual(self.win._mode, "dynamic")
+        self.assertEqual(self.slider().value(), 120)  # night mode input_db 12
+        self.assertEqual(AppRegistry().get(CHROME)["params"]["comp_ratio"], 6.0)
+        self.assertEqual(self.win.preset_buttons["night_mode"].property("presetActive"), "true")
+        self.win.set_mode("fixed")
+        self.assertEqual(self.slider().value(), 120)  # fixed set: the 12.0 typed earlier
+        self.slider().setValue(30)
+        self.win.flush_pending_params()
+        self.win.set_mode("dynamic")
+        self.assertEqual(self.slider().value(), 120)  # dynamic set untouched by the fixed edit
+        self.win.apply_factory_preset("boost_10db")
+        self.assertEqual((self.win._mode, self.slider().value()), ("fixed", 100))
+        self.assertEqual(AppRegistry().get(CHROME)["params"]["comp_ratio"], 1.0)
+
+    def test_user_slot_remembers_its_mode(self):
+        self.win.sidebar.select(CHROME)
+        self.win.set_mode("dynamic")
+        self.win._overwrite_user_slot("user_2")
+        self.assertEqual(self.win.user_presets["user_2"]["mode"], "dynamic")
+        self.assertIn("β", self.win.user_preset_buttons["user_2"].text())
+        self.win.set_mode("fixed")
+        self.win.on_user_preset_clicked("user_2")
+        self.assertEqual(AppRegistry().get(CHROME)["mode"], "dynamic")
+
+    def test_hidden_volume_bar_badge_and_header_hint(self):
+        """Q10a+b: badge on the row, hint in the header, bar with the full reset."""
+        from cinegain_volume import NodeVolume, VolumeGuard
+        nodes = [NodeVolume(5, "Spotify", "spotify", "Spotify", 0.004)]
+        resets = []
+        self.router.guard = VolumeGuard(scanner=lambda: list(nodes), setter=lambda i, v: resets.append((i, v)) or True)
+        self.win.is_active = False  # Spotify not routed -> only reported
+        self.win.refresh_apps()
+        self.assertTrue(self.win.hidden_bar.isVisibleTo(self.win))
+        self.assertIn("Spotify -48 dB", self.win.lbl_hidden_bar.text())
+        row = self.win.sidebar.rows[SPOTIFY]
+        self.assertTrue(row.hidden.isVisibleTo(self.win))
+        self.assertEqual(row.hidden.text(), "-48 dB")
+        self.win.sidebar.select(SPOTIFY)
+        self.win.update_edit_header()
+        self.assertTrue(self.win.btn_reset_hidden.isVisibleTo(self.win))
+        import cinegain_volume
+        orig = cinegain_volume.clean_stream_properties
+        cinegain_volume.clean_stream_properties = lambda: (0, None)
+        try:
+            self.win.full_volume_reset(only=SPOTIFY)
+        finally:
+            cinegain_volume.clean_stream_properties = orig
+        self.assertIn(5, self.router.guard.fades)  # follows Standard: fades in, no jump
 
     def test_read_meter_parses_plugin_file(self):
         import struct

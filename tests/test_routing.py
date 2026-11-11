@@ -245,18 +245,29 @@ class TestMigration(unittest.TestCase):
         spotify = reg.get(SPOTIFY)
         self.assertEqual((spotify["label"], spotify["enabled"], spotify["params"]), ("Mein Spotify", True, None))
         self.assertFalse(reg.get(make_key("Claude", "claude-desktop"))["enabled"])  # media default, not "standard"
-        self.assertEqual(paths.read_json(paths.APPS_FILE)["version"], 2)
+        self.assertEqual(paths.read_json(paths.APPS_FILE)["version"], 3)
         self.assertEqual(paths.read_json(paths.APPS_V1_BACKUP), v1)
         self.assertNotIn("profile", paths.read_json(paths.APPS_FILE)["apps"][SPOTIFY])
 
-    def test_v2_file_is_not_migrated_again(self):
+    def test_v2_file_gets_modes_without_v1_backup(self):
+        """0.3.x settings become the dynamic set; the fixed set starts neutral (Q20b)."""
         paths.write_json_atomic(paths.APPS_FILE, {"version": 2, "apps": {
             SPOTIFY: {"name": "Spotify", "binary": "spotify", "label": "Spotify", "enabled": False,
-                      "params": {"input_db": 9}, "first_seen": 1, "last_seen": 2}}})
+                      "params": {"input_db": 9}, "first_seen": 1, "last_seen": 2},
+            FIREFOX: {"name": "Firefox", "binary": "firefox", "label": "Firefox", "enabled": True,
+                      "params": {"input_db": 12, "leveler": 1, "lev_max_boost_db": 10, "comp_ratio": 3},
+                      "first_seen": 1, "last_seen": 2}}})
         reg = AppRegistry()
-        self.assertEqual(reg.get(SPOTIFY)["params"], {"input_db": 9.0})
-        self.assertFalse(reg.get(SPOTIFY)["enabled"])
+        spotify, firefox = reg.get(SPOTIFY), reg.get(FIREFOX)
+        self.assertEqual(spotify["mode"], "fixed")  # no leveler/compressor
+        self.assertEqual(spotify["params"]["input_db"], 0.0)
+        self.assertEqual(spotify["sets"]["dynamic"]["input_db"], 9.0)
+        self.assertEqual(firefox["mode"], "dynamic")  # sounds exactly as before
+        self.assertEqual((firefox["params"]["input_db"], firefox["params"]["leveler"]), (12.0, 1.0))
+        self.assertFalse(spotify["enabled"])
         self.assertFalse(os.path.exists(paths.APPS_V1_BACKUP))
+        self.assertEqual(paths.read_json(paths.APPS_FILE)["version"], 3)
+        self.assertEqual(AppRegistry().get(FIREFOX)["mode"], "dynamic")  # stable on the next load
 
 
 class TestRouting(Base):
@@ -574,7 +585,7 @@ class TestUpdatedExecutable(Base):
         reg = AppRegistry(clock=self.clock)
         self.assertEqual(sorted(e["key"] for e in reg.entries()), ["chatgpt::chromium", "chrome::google chrome"])
         chrome = reg.get("chrome::google chrome")
-        self.assertEqual(chrome["params"]["input_db"], 18.0)  # edited after the update
+        self.assertEqual(chrome["sets"]["dynamic"]["input_db"], 18.0)  # edited after the update
         self.assertEqual((chrome["first_seen"], chrome["last_seen"]), (10.0, 200.0))
         self.assertEqual(reg.get("chatgpt::chromium")["label"], "ChatGPT")
         self.assertNotIn("deleted", json.dumps(paths.read_json(paths.APPS_FILE)))

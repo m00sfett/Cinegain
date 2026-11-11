@@ -10,9 +10,15 @@ Programs are identified by application name *and* process binary: Electron apps
 such as the ChatGPT desktop client report `application.name = "Chromium"` and
 would otherwise collapse into one entry.
 
-File format (~/.config/cinegain/apps.json), version 2:
-    {"version": 2, "apps": {"<key>": {"name", "binary", "label", "enabled",
-                                      "params", "first_seen", "last_seen"}}}
+File format (~/.config/cinegain/apps.json), version 3:
+    {"version": 3, "apps": {"<key>": {"name", "binary", "label", "enabled",
+                                      "params", "mode", "sets",
+                                      "first_seen", "last_seen"}}}
+
+"mode" is "fixed" or "dynamic", "sets" holds one value set per mode and
+"params" the effective parameters of the active mode (what the filter gets).
+All three are null for a program that follows Standard. Version 2 files (0.3.x)
+get mode and sets on load (see cinegain_modes.migrate).
 
 Version 1 files (0.2.0, a profile reference per program) are migrated on load:
 the programs are kept, their old profile choice is dropped (user decision for
@@ -25,11 +31,12 @@ import shutil
 import time
 
 import cinegain_log
+import cinegain_modes as modes
 import cinegain_paths as paths
 
 log = cinegain_log.get("registry")
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Programs that are routed through Cinegain the first time they show up.
 DEFAULT_MEDIA_APPS = (
@@ -128,19 +135,28 @@ class AppRegistry:
                     # 0.2.0 profile choices are dropped; programs start fresh.
                     enabled = is_media_app(name, binary)
                     params = None
+                mode, sets = None, None
+                if params is not None:
+                    mode, sets = modes.migrate(params, entry.get("mode"), entry.get("sets"))
+                    params = modes.effective(mode, sets)
                 self.apps[key] = {
                     "name": name,
                     "binary": binary,
                     "label": str(entry.get("label") or default_label(name, binary)),
                     "enabled": enabled,
                     "params": params,
+                    "mode": mode,
+                    "sets": sets,
                     "first_seen": float(entry.get("first_seen") or 0.0),
                     "last_seen": float(entry.get("last_seen") or 0.0),
                 }
         self._mtime = self._file_mtime()
         self._dirty = False
-        if apps and version < SCHEMA_VERSION:
+        if apps and version < 2:
             self._migrate_from_v1()
+        elif apps and version < SCHEMA_VERSION:
+            log.info("apps.json v%s -> v%s: programs got a mode (fixed/dynamic)", version, SCHEMA_VERSION)
+            self.save()
         if self._merge_deleted_binaries():
             self.save()
 
@@ -165,8 +181,8 @@ class AppRegistry:
                 newer = entry if entry["last_seen"] > base["last_seen"] else base
                 merged = dict(base)
                 merged["enabled"] = newer["enabled"]
-                merged["params"] = newer["params"] if newer["params"] is not None else (
-                    base["params"] or entry["params"])
+                own = newer if newer["params"] is not None else (base if base["params"] else entry)
+                merged["params"], merged["mode"], merged["sets"] = own["params"], own["mode"], own["sets"]
                 seen = [x for x in (base["first_seen"], entry["first_seen"]) if x]
                 merged["first_seen"] = min(seen) if seen else 0.0
                 merged["last_seen"] = max(base["last_seen"], entry["last_seen"])
@@ -231,6 +247,8 @@ class AppRegistry:
                 "label": default_label(app_name, binary),
                 "enabled": is_media_app(app_name, binary),
                 "params": None,
+                "mode": None,
+                "sets": None,
                 "first_seen": now,
                 "last_seen": now,
             }
@@ -249,18 +267,41 @@ class AppRegistry:
             self.save()
 
     def set_params(self, key, params, save=True):
-        """Gives a program its own parameters (None: follow Standard again)."""
+        """
+        Merges values into the program's active mode (None: follow Standard again).
+        A program without its own setting gets one; its mode follows the values
+        (leveler or compressor in use -> dynamic, otherwise fixed).
+        """
         if key not in self.apps:
             return
-        before = self.apps[key]["params"]
-        self.apps[key]["params"] = _clean_params(params)
-        if (before is None) != (self.apps[key]["params"] is None):
-            log.info("program %r now %s", key,
-                     "follows Standard" if self.apps[key]["params"] is None else "has its own setting")
+        entry = self.apps[key]
+        cleaned = _clean_params(params)
+        if cleaned is None:
+            self.set_setting(key, None, None, save=save)
+            return
+        mode = entry["mode"] or (modes.MODE_DYNAMIC if modes.is_dynamic_params(cleaned) else modes.MODE_FIXED)
+        sets = entry["sets"] or {modes.MODE_FIXED: modes.neutral_fixed(),
+                                 modes.MODE_DYNAMIC: modes.neutral_dynamic()}
+        self.set_setting(key, mode, modes.apply_values(mode, sets, cleaned), save=save)
+
+    def set_setting(self, key, mode, sets, save=True):
+        """Own setting of a program: its mode and both value sets (None: follow Standard)."""
+        if key not in self.apps:
+            return
+        entry = self.apps[key]
+        before = entry["params"]
+        if mode is None:
+            entry["params"], entry["mode"], entry["sets"] = None, None, None
+        else:
+            sets = modes.clean_sets(sets)
+            entry["params"], entry["mode"], entry["sets"] = modes.effective(mode, sets), mode, sets
         if save:
             self.save()
         else:
             self._dirty = True
+        if (before is None) != (entry["params"] is None):
+            log.info("program %r now %s", key,
+                     "follows Standard" if self.apps[key]["params"] is None else "has its own setting")
 
     def rename(self, key, label):
         label = (label or "").strip()

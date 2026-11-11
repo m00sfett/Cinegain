@@ -15,6 +15,40 @@ Categories follow the standard Keep a Changelog taxonomy: `Added`, `Changed`, `D
 
 ---
 
+## [0.4.0] - 2026-11-11
+
+Minor-Version mit Freigabe des Nutzers: neuer Betriebsmodus pro Programm und umgebaute Preset-Leiste.
+
+### Added
+- **Modus pro Programm und für Standard:** „Fest“ und „Dynamisch · Beta“.
+  - **Fest** ist die neue Hauptfunktion: feste Lautstärke-Anhebung bis +25 dB plus feste Klangfarbe (Stimmen, Bass, Höhen, Stereo-Breite). Keine Signalanalyse, Leveler und Kompressor bleiben neutral. Der Look-Ahead-Limiter schützt immer vor Übersteuern, die Grenze liegt bei −1 dBFS.
+  - **Dynamisch · Beta** ist die bisherige Filmton-Kette.
+  - Jeder Modus hat einen eigenen Wertesatz, Umschalten verliert nichts.
+  - Der Wechsel überträgt nur Parameter: kein Neustart der Sink, kein Knacken, keine Browser-Pause.
+  - Umschalter im Bearbeitungskopf. Ein β markiert dynamische Programme in der Liste, Film-Presets und Speicherplätze.
+  - Schaltet man bei einem Programm um, das Standard folgt, bekommt es eine eigene Einstellung mit den Werten von Standard.
+- **Wächter für versteckte Lautstärke:** PipeWire führt pro Stream eine zweite Lautstärke, die kein Mixer zeigt. WirePlumber merkt sie sich und setzt sie bei jedem neuen Stream wieder. Am 2026-11-11 gemessen: Chrome −48 dB, Electron-Apps −84 dB, Cinegains Chrome-Ausgang −24 dB.
+  - Für Programme, die durch Cinegain laufen, und für Cinegains eigene Ausgänge blendet Cinegain die Lautstärke über 3 s zurück auf 0 dB, ohne Sprung und ohne Reglerwerte zu ändern.
+  - Für alle anderen Programme zeigt Cinegain ein Badge an der Programmzeile, einen Hinweis im Kopf und eine Leiste unter dem Banner.
+  - Jede Absenkung wird mit Wert und Uhrzeit protokolliert.
+- **„Lautstärke voll zurücksetzen“** (Leiste, Tray, `cinegain volume-reset`):
+  - Versteckte Lautstärken gehen auf 0 dB, normale Stream-Lautstärken auf 100 %, Stummschaltung aus.
+  - Die gespeicherten WirePlumber-Werte werden bereinigt, vorher gibt es eine Sicherung.
+  - Programme mit eigener Einstellung und Standards Ausgang bekommen vorher ihre Verstärkung um den zurückkommenden Betrag gesenkt (höchstens bis −12 dB). Programme, die Standard folgen, werden eingeblendet.
+  - Hardware- und Sink-Lautstärken bleiben unangetastet.
+  - „Zurücksetzen“ im Kopf wirkt nur auf das gewählte Programm.
+- CLI: `cinegain mode [fixed|dynamic] [--app …]`, `cinegain batch … --mode …`, `cinegain volume-reset [--app …] [--json]`. `cinegain status --json` liefert `mode` und `sets`. `cinegain watch` führt den Wächter mit.
+
+### Changed
+- „Weitere Einstellungen“ entfällt: Lautstärke-Stufen, Film-Presets und Speicherplätze sind immer sichtbar.
+- 6 statt 8 eigene Speicherplätze. Sie merken sich den Modus mit. Alte Plätze bekommen ihren Modus aus den Werten, Platz 7 und 8 entfallen.
+- Lange Reglertitel umbrechen in schmalen Fenstern, damit beide Spalten nebeneinander passen.
+- Reglerreihenfolge: links Direkt-Verstärkung, Stimmen, dann Leveler und Mitte. Rechts Bass, Höhen, Stereo-Breite, dann die Dynamik-Regler.
+- **Migration:**
+  - Standard startet nach dem Update im Modus Fest und neutral (0 dB).
+  - Bisherige eigene Einstellungen bleiben als Dynamik-Wertesatz erhalten. Programme mit Leveler oder Kompressor laufen weiter dynamisch und klingen unverändert. Alle anderen starten im Modus Fest neutral.
+  - `apps.json` ist jetzt Version 3 und hat pro Programm `mode` und `sets`. `state.json` hat ebenfalls `mode` und `sets`.
+
 ## [0.3.6] - 2026-11-11
 
 ### Fixed

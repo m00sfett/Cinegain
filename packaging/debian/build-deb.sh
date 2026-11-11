@@ -2,7 +2,7 @@
 # Builds a native Debian/Ubuntu .deb package for Cinegain
 set -e
 
-VERSION="0.3.6"
+VERSION="0.4.0"
 ARCH="amd64"
 PKG_DIR="/tmp/cinegain-deb-build/cinegain_${VERSION}_${ARCH}"
 
@@ -45,7 +45,7 @@ Version: ${VERSION}
 Section: sound
 Priority: optional
 Architecture: ${ARCH}
-Depends: pipewire (>= 0.3.60), pipewire-pulse | pulseaudio-utils, python3 (>= 3.10), python3-pyqt6
+Depends: pipewire (>= 0.4.00), pipewire-pulse | pulseaudio-utils, python3 (>= 3.10), python3-pyqt6
 Maintainer: Tobias Moos <tobias@roteson.de>
 Description: Realtime volume booster & dialogue clarity optimizer for PipeWire
  Cinegain is a dedicated realtime audio DSP processor designed for movies, TV

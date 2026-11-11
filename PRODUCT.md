@@ -9,6 +9,13 @@ Cinegain ist ein Desktop- und System-Tray-Werkzeug für Linux (PipeWire), das zw
 2. **Echtzeit-Filmton- & Dialog-Optimierung:**
    Hebt flüsterleise Dialoge automatisch an (Sprach-EQ + Mid/Side-Fokus + Gated Leveler) und fängt ohrenbetäubende Effekte sanft ab.
 
+## Modi (seit 0.4.0)
+
+- **Fest (Hauptfunktion):** feste Lautstärke-Anhebung bis +25 dB plus feste Klangfarbe (Stimmen, Bass, Höhen, Stereo-Breite). Keine Signalanalyse; nur der Limiter schützt vor Übersteuern.
+- **Dynamisch · Beta:** die volle Filmton-Kette (Leveler, Kompressor, Sprachfokus), ausdrücklich als Beta gekennzeichnet.
+- Jeder Modus hat einen eigenen Wertesatz. Standard und jedes Programm mit eigener Einstellung haben ihren eigenen Modus.
+- **Wächter für versteckte Lautstärke:** macht heimlich abgesenkte Stream-Lautstärken sichtbar und setzt sie zurück („Lautstärke voll zurücksetzen“).
+
 ## Nutzungssituation
 
 - **Modus:** `Operate` (Werkzeug zur direkten Klangsteuerung am Schreibtisch oder vom Sofa aus).
