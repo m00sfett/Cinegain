@@ -16,6 +16,7 @@ _TMP = tempfile.mkdtemp(prefix="cinegain-test-")
 os.environ["CINEGAIN_CONFIG_DIR"] = os.path.join(_TMP, "config")
 os.environ["CINEGAIN_DATA_DIR"] = os.path.join(_TMP, "data")
 os.environ["CINEGAIN_RUNTIME_DIR"] = os.path.join(_TMP, "run")
+os.environ["CINEGAIN_LOG_DIR"] = os.path.join(_TMP, "log")
 os.environ["CINEGAIN_WP_STREAM_PROPS"] = os.path.join(_TMP, "stream-properties")
 os.environ["CINEGAIN_BASE_DIR"] = BASE_DIR
 sys.path.insert(0, os.path.join(BASE_DIR, "ui"))
@@ -98,7 +99,7 @@ class FakeSinks:
         self.pulse.add_sink(sink_name(profile_id))
         return 1234
 
-    def stop(self, profile_id):
+    def stop(self, profile_id, reason=""):
         self.stopped.append(profile_id)
         self.live.discard(profile_id)
         self.pulse.remove_sink(sink_name(profile_id))
@@ -109,7 +110,7 @@ class FakeSinks:
     def pid(self, profile_id):
         return 1234 if profile_id in self.live else None
 
-    def stop_all_profiles(self):
+    def stop_all_profiles(self, reason=""):
         out = [p for p in self.live if p != "standard"]
         for p in out:
             self.stop(p)
@@ -537,6 +538,126 @@ class TestReset(Base):
             content = f.read()
         self.assertNotIn("cinegain", content)
         self.assertIn("alsa_output.hdmi", content)
+
+
+class TestUpdatedExecutable(Base):
+    """Chrome after a package update reports binary "chrome (deleted)" (0.3.4 made a second program)."""
+
+    def test_deleted_marker_maps_to_the_same_program(self):
+        self.assertEqual(make_key("Google Chrome", "chrome (deleted)"), make_key("Google Chrome", "chrome"))
+        self.assertEqual(default_label("Chromium", "/opt/ChatGPT (deleted)"), "ChatGPT")
+        chrome = make_key("Google Chrome", "chrome")
+        self.give_own_entry(chrome)
+        s = self.stream(1, "Google Chrome", "chrome (deleted)")
+        self.router.tick()  # starts the own sink
+        self.router.tick()  # moves the stream there
+        self.assertEqual(self.sink_of(s), self.own_sink(chrome))
+        self.assertEqual(len(self.registry.entries()), 1)
+
+    def give_own_entry(self, key):
+        self.registry.observe("Google Chrome", "chrome")
+        self.give_own(key, input_db=25.0)
+
+    def test_old_duplicate_entries_are_merged_newest_wins(self):
+        paths.write_json_atomic(paths.APPS_FILE, {"version": 2, "apps": {
+            "chrome::google chrome": {"name": "Google Chrome", "binary": "chrome", "label": "Google Chrome",
+                                      "enabled": True, "params": {"input_db": 25.0},
+                                      "first_seen": 10.0, "last_seen": 100.0},
+            "chrome (deleted)::google chrome": {"name": "Google Chrome", "binary": "chrome (deleted)",
+                                                "label": "Google Chrome", "enabled": True,
+                                                "params": {"input_db": 18.0},
+                                                "first_seen": 50.0, "last_seen": 200.0},
+            "chatgpt (deleted)::chromium": {"name": "Chromium", "binary": "ChatGPT (deleted)",
+                                            "label": "ChatGPT (deleted)", "enabled": False, "params": None,
+                                            "first_seen": 5.0, "last_seen": 6.0},
+        }})
+        reg = AppRegistry(clock=self.clock)
+        self.assertEqual(sorted(e["key"] for e in reg.entries()), ["chatgpt::chromium", "chrome::google chrome"])
+        chrome = reg.get("chrome::google chrome")
+        self.assertEqual(chrome["params"]["input_db"], 18.0)  # edited after the update
+        self.assertEqual((chrome["first_seen"], chrome["last_seen"]), (10.0, 200.0))
+        self.assertEqual(reg.get("chatgpt::chromium")["label"], "ChatGPT")
+        self.assertNotIn("deleted", json.dumps(paths.read_json(paths.APPS_FILE)))
+
+
+class TestSoftOff(Base):
+    """#14: switching the filter off must not remove sinks (browsers pause on that)."""
+
+    def setUp(self):
+        super().setUp()
+        import cinegain_router
+        self.pushed = []
+        self._orig = (cinegain_router.push_params, cinegain_router.find_node_id)
+        cinegain_router.push_params = lambda node, params: self.pushed.append((node, dict(params))) or True
+        cinegain_router.find_node_id = lambda name: f"node:{name}"
+
+    def tearDown(self):
+        import cinegain_router
+        cinegain_router.push_params, cinegain_router.find_node_id = self._orig
+
+    def test_bypass_keeps_streams_and_sinks(self):
+        self.sinks.live.add("standard")
+        firefox = self.stream(1, "Firefox", "firefox")
+        spotify = self.stream(2, "Spotify", "spotify")
+        self.router.tick()
+        self.give_own(SPOTIFY)
+        self.router.tick()
+        self.router.tick()
+        moves, started = list(self.pulse.moves), list(self.sinks.started)
+        self.assertEqual(self.router.set_bypass(True), [])
+        self.router.tick()
+        self.assertEqual(self.pulse.moves, moves)
+        self.assertEqual(self.sinks.stopped, [])
+        self.assertEqual(self.sink_of(firefox), "cinegain_sink")
+        self.assertEqual(self.sink_of(spotify), self.own_sink(SPOTIFY))
+        self.assertEqual({n for n, p in self.pushed if p == {"bypass": 1.0}},
+                         {"node:cinegain_sink", f"node:{self.own_sink(SPOTIFY)}"})
+        self.router.set_bypass(False)
+        self.assertEqual(self.pushed[-1][1], {"bypass": 0.0})
+        self.assertEqual(self.sinks.started, started)
+
+    def test_sink_started_while_off_starts_in_bypass(self):
+        self.router.set_bypass(True)
+        self.stream(1, "Spotify", "spotify")
+        self.router.tick()
+        self.give_own(SPOTIFY)
+        self.router.tick()
+        self.assertEqual(self.sinks.params[profile_id_for(SPOTIFY)]["bypass"], 1.0)
+        self.router.set_bypass(False)
+        self.registry.set_params(SPOTIFY, {"input_db": 3.0})
+        self.router.push_program_params(SPOTIFY)
+        self.assertEqual(self.pushed[-1][1]["bypass"], 0.0)
+
+
+class TestDebugLog(Base):
+    def test_stream_lifecycle_and_moves_are_logged(self):
+        with self.assertLogs("cinegain.router", level="DEBUG") as cm:
+            s = self.stream(7, "Firefox", "firefox")
+            self.router.tick()
+            self.pulse.streams.remove(s)
+            self.router.tick()
+        text = "\n".join(cm.output)
+        self.assertIn("stream #7 appeared: firefox::firefox", text)
+        self.assertIn("move stream #7 (firefox::firefox) alsa_output.analog-stereo -> cinegain_sink: follows Standard", text)
+        self.assertIn("stream #7 gone", text)
+
+    def test_idle_stop_reason_is_logged(self):
+        with self.assertLogs("cinegain.registry", level="INFO") as cm:
+            self.stream(1, "Spotify", "spotify")
+            self.router.tick()
+        self.assertTrue(any("new program 'spotify::spotify'" in line for line in cm.output))
+
+    def test_setup_writes_to_the_log_file(self):
+        import logging
+        import cinegain_log
+        cinegain_log.setup("test")
+        cinegain_log.get("probe").info("hello %s", "log")
+        for h in logging.getLogger("cinegain").handlers:
+            h.flush()
+        with open(paths.LOG_FILE, encoding="utf-8") as f:
+            last = f.read().splitlines()[-1]
+        self.assertRegex(last, r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3} \d+ test INFO  cinegain.probe: hello log$")
+        self.assertTrue(cinegain_log.tail(lines=1)[0].endswith("hello log\n"))
 
 
 if __name__ == "__main__":

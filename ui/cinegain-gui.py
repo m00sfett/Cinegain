@@ -11,6 +11,7 @@ Features:
 import sys
 import os
 import json
+import logging
 import subprocess
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -22,11 +23,14 @@ elif os.path.exists(os.path.expanduser("~/.local/bin/cinegain")):
 else:
     BIN_PATH = "cinegain"
 
-APP_VERSION = "0.3.4"
+APP_VERSION = "0.3.5"
 
 os.environ.setdefault("CINEGAIN_BASE_DIR", BASE_DIR)
+import cinegain_log  # noqa: E402
 import cinegain_paths as paths  # noqa: E402
-from cinegain_profiles import DEFAULT_PARAMS, PROFILE_STANDARD, ProfileCatalog, SinkProcesses, full_params, read_meter  # noqa: E402
+from cinegain_profiles import (  # noqa: E402
+    DEFAULT_PARAMS, PROFILE_STANDARD, STANDARD_SINK, ProfileCatalog, SinkProcesses, full_params, read_meter,
+)
 from cinegain_registry import profile_id_for  # noqa: E402
 from cinegain_router import Router  # noqa: E402
 from i18n import t, set_language, get_available_languages, get_current_language  # noqa: E402
@@ -39,6 +43,7 @@ BRAND_R2W2_PATH = os.path.join(BASE_DIR, "assets", "icons", "brand-r2w2.png")
 CONFIG_DIR = paths.CONFIG_DIR
 USER_PRESETS_FILE = paths.USER_PRESETS_FILE
 CONFIG_FILE = paths.CONFIG_FILE
+log = cinegain_log.get("gui")
 LEVELER_DEFAULT_CUT_DB = 6.0  # cut range given to a leveler the user switches on via the boost slider
 
 try:
@@ -63,7 +68,7 @@ try:
         QMessageBox,
     )
     from PyQt6.QtGui import QIcon, QAction, QKeyEvent, QPainter, QColor, QPixmap, QDesktopServices
-    from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QByteArray, QPoint, QUrl
+    from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QByteArray, QPoint, QUrl, QtMsgType, qInstallMessageHandler
     from PyQt6.QtSvg import QSvgRenderer
 except ImportError:
     print("Error: PyQt6 is required to run the Cinegain desktop interface.")
@@ -469,11 +474,30 @@ def amp(text):
 
 def run_cinegain(*args):
     cmd = [BIN_PATH] + list(args)
+    quiet = args[:1] == ("status",)  # polled every 1.5 s; only failures are logged
     try:
         res = subprocess.run(cmd, capture_output=True, text=True)
-    except OSError:
+    except OSError as e:
+        log.error("cinegain %s could not run: %s", " ".join(args), e)
         return "", 1
+    if res.returncode not in (0, 1) or (res.returncode and not quiet):
+        log.warning("cinegain %s -> rc=%s %s", " ".join(args), res.returncode,
+                    (res.stderr or res.stdout or "").strip()[-500:])
+    elif not quiet:
+        log.debug("cinegain %s -> rc=%s", " ".join(args), res.returncode)
     return res.stdout.strip(), res.returncode
+
+
+def profile_for_sink(name):
+    """Profile id behind a Cinegain sink name, or None for any other sink."""
+    if name == STANDARD_SINK:
+        return PROFILE_STANDARD
+    if name and name.startswith("cinegain_app_"):
+        return name[len("cinegain_"):]
+    return None
+
+
+TRAY_PRESETS = ("boost_10db", "boost_20db", "dialog_boost", "night_mode", "max_loudness", "clean_linear")
 
 
 class MeterStrip(QWidget):
@@ -484,24 +508,30 @@ class MeterStrip(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(30)
+        self.setFixedHeight(44)
         self.values = None  # (level, leveler, gr, limit) or None when idle
+        self.source = ""  # which filter is measured, e.g. "Measuring: Google Chrome"
 
-    def set_values(self, values):
-        if values != self.values:
+    def set_values(self, values, source=""):
+        if values != self.values or source != self.source:
             self.values = values
+            self.source = source
             self.update()
 
     def paintEvent(self, event):
         p = QPainter(self)
         w, h = self.width(), self.height()
         gap = 10
+        top = 14
+        p.setPen(QColor("#A79B8C"))
+        p.drawText(0, 0, w, 12, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   self.source or t("meter_none"))
         bw = (w - gap * (len(self.BARS) - 1)) / len(self.BARS)
         for i, (name, lo, hi) in enumerate(self.BARS):
             x = i * (bw + gap)
-            p.fillRect(int(x), 14, int(bw), 8, QColor("#14100D"))
+            p.fillRect(int(x), top + 14, int(bw), 8, QColor("#14100D"))
             p.setPen(QColor("#A79B8C"))
-            p.drawText(int(x), 0, int(bw), 12, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, name)
+            p.drawText(int(x), top, int(bw), 12, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, name)
             if self.values is None:
                 continue
             v = self.values[i]
@@ -513,9 +543,9 @@ class MeterStrip(QWidget):
                 color = QColor("#6FBF8B") if v < -3 else QColor("#B11218")
             else:
                 color = QColor("#FFD21F")
-            p.fillRect(int(x), 14, int(bw * frac), 8, color)
+            p.fillRect(int(x), top + 14, int(bw * frac), 8, color)
             p.setPen(QColor("#EDE6DC"))
-            p.drawText(int(x), 0, int(bw), 12, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+            p.drawText(int(x), top, int(bw), 12, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                        f"{v:+.0f} dB" if name == "LEVELER" else f"{max(v, -99):.0f} dB")
         p.end()
 
@@ -598,6 +628,8 @@ class CinegainMainWindow(QMainWindow):
         self.is_active = False
         self.catalog = ProfileCatalog()
         self.selected_key = STANDARD  # None = Standard, otherwise a program key
+        self._views = []  # AppView list from the last routing tick (meter source selection)
+        self._last_status = None  # last status line written to the debug log
         self._program_dirty = None  # program key whose own values wait for the debounced flush
         self._initial_selection_done = False
         self.sliders = {}  # param_name -> dict(slider, val_lbl, title_lbl, row_frame, base_title, unit, is_hero)
@@ -631,8 +663,7 @@ class CinegainMainWindow(QMainWindow):
         self.param_timer.timeout.connect(self.flush_pending_params)
 
         # Heartbeat timer for PipeWire status & stream tracking
-        self._meter_seq = {}
-        self._meter_idle = 0
+        self._meter_seq = {}  # pid -> (last seq, polls without change)
         self.meter_timer = QTimer(self)
         self.meter_timer.setInterval(120)
         self.meter_timer.timeout.connect(self.update_meters)
@@ -743,6 +774,7 @@ class CinegainMainWindow(QMainWindow):
         menu.exec(self.btn_lang.mapToGlobal(QPoint(0, self.btn_lang.height() + 4)))
 
     def change_language(self, lang_code):
+        log.info("language %s -> %s", get_current_language(), lang_code)
         if set_language(lang_code):
             self._save_config()
             self.retranslate_ui()
@@ -753,8 +785,11 @@ class CinegainMainWindow(QMainWindow):
         self.btn_lang.setText(f" {get_current_language().upper()}")
         self.btn_quit.setText(t("btn_quit"))
         self.btn_quit.setToolTip(t("btn_quit_tip"))
-        self.btn_power.setText(t("btn_power_off") if self.is_active else t("btn_power_on"))
-        self.lbl_status.setText(t("status_active") if self.is_active else t("status_inactive"))
+        self.btn_power.setText(t("btn_power_off") if self.processing else t("btn_power_on"))
+        self.lbl_status.setText(t("status_active") if self.processing else t("status_inactive"))
+        if hasattr(self, "meter_strip"):
+            self.meter_strip.setToolTip(t("meter_tip"))
+            self.meter_strip.update()
 
         self.details.setText(t("details"))
         if hasattr(self, "grp_presets"):
@@ -793,6 +828,9 @@ class CinegainMainWindow(QMainWindow):
             self.tray_open_action.setText(t("tray_open"))
             self.tray_toggle_action.setText(t("tray_toggle"))
             self.tray_quit_action.setText(t("tray_quit"))
+            self.tray_log_action.setText(t("tray_log"))
+            for pid, act in self.tray_preset_actions.items():
+                act.setText(self._tray_preset_label(pid))
 
         self.on_heartbeat(sync_sliders=False)
 
@@ -1366,33 +1404,63 @@ class CinegainMainWindow(QMainWindow):
         self.update_preset_highlights()
         self.param_timer.start()
 
-    def meter_pid(self):
-        """PID of the filter process that currently shapes the selected target."""
-        profile = PROFILE_STANDARD
-        if self.selected_key is not STANDARD:
+    def meter_candidates(self):
+        """
+        (profile id, label) pairs the meter may show, best first: the filter that
+        shapes the selected target, then the filters programs are actually
+        playing through. So with Standard selected while Chrome plays on its own
+        setting, the meter shows Chrome instead of an idle Standard filter.
+        """
+        out = []
+        if self.selected_key is STANDARD:
+            out.append((PROFILE_STANDARD, "Standard"))
+        else:
             entry = self.router.registry.get(self.selected_key)
-            if entry and entry["params"] and entry["enabled"]:
-                profile = profile_id_for(self.selected_key)
-        return self.router.sinks.pid(profile)
+            if entry and entry["enabled"]:
+                own = entry["params"] is not None
+                out.append((profile_id_for(self.selected_key) if own else PROFILE_STANDARD,
+                            entry["label"] if own else f"{entry['label']} · Standard"))
+        for v in self._views:
+            if v.playing:
+                profile = profile_for_sink(v.sink)
+                if profile:
+                    out.append((profile, v.label if profile != PROFILE_STANDARD else "Standard"))
+        seen, unique = set(), []
+        for profile, label in out:
+            if profile not in seen:
+                seen.add(profile)
+                unique.append((profile, label))
+        return unique
+
+    def meter_pid(self):
+        """PID of the first candidate filter that is running."""
+        for profile, _ in self.meter_candidates():
+            pid = self.router.sinks.pid(profile)
+            if pid:
+                return pid
+        return None
 
     def update_meters(self):
-        """Shows the plugin's live levels; bars go empty when no audio flows through the filter."""
-        values = None
+        """Shows the live levels of the first candidate filter audio is flowing through."""
+        values, source = None, ""
         try:
-            pid = self.meter_pid() if self.is_active else None
-            m = read_meter(pid) if pid else None
-            if m:
-                seq = m[0]
-                if seq != self._meter_seq.get(pid):
-                    self._meter_seq[pid] = seq
-                    self._meter_idle = 0
-                else:
-                    self._meter_idle += 1
-                if self._meter_idle < 4:
-                    values = m[1:]
+            if self.processing:
+                for profile, label in self.meter_candidates():
+                    pid = self.router.sinks.pid(profile)
+                    m = read_meter(pid) if pid else None
+                    if not m:
+                        continue
+                    seq = m[0]
+                    last_seq, idle = self._meter_seq.get(pid, (None, 0))
+                    idle = 0 if seq != last_seq else idle + 1
+                    self._meter_seq[pid] = (seq, idle)
+                    if idle < 4:
+                        values, source = m[1:], t("meter_source", name=label)
+                        break
         except Exception:
-            values = None  # a timer slot must never raise (PyQt aborts the app)
-        self.meter_strip.set_values(values)
+            log.exception("meter update failed")
+            values, source = None, ""  # a timer slot must never raise (PyQt aborts the app)
+        self.meter_strip.set_values(values, source)
 
     def _store_program_values(self, key, values):
         """Gives the program its own setting (copied from Standard on first change)."""
@@ -1417,6 +1485,8 @@ class CinegainMainWindow(QMainWindow):
     def flush_pending_params(self):
         if self._program_dirty:
             key, self._program_dirty = self._program_dirty, None
+            entry = self.router.registry.get(key) or {}
+            log.debug("own setting of %s: %s", key, entry.get("params"))
             self.router.registry.save()
             if not self.router.push_program_params(key):
                 # No own sink yet (first change): route now instead of on the next heartbeat.
@@ -1425,7 +1495,9 @@ class CinegainMainWindow(QMainWindow):
             return
         to_send = dict(self.pending_params)
         self.pending_params.clear()
+        log.debug("Standard values: %s", to_send)
         run_cinegain("batch", json.dumps(to_send), "--preset-id", "custom")
+        self._reassert_bypass()
 
     def _set_sliders_silently(self, params_dict):
         for k, v in params_dict.items():
@@ -1451,8 +1523,10 @@ class CinegainMainWindow(QMainWindow):
 
     def apply_standard_preset(self, preset_name):
         """Loads a factory preset into Standard (used by the tray, which has no selection)."""
+        log.info("load preset %s into Standard", preset_name)
         self.pending_params.clear()
         run_cinegain("preset", preset_name)
+        self._reassert_bypass()
         if self.selected_key is STANDARD:
             f_params = self.factory_presets.get(preset_name, {}).get("params")
             if f_params:
@@ -1461,6 +1535,7 @@ class CinegainMainWindow(QMainWindow):
         self.update_preset_highlights()
 
     def _load_into_program(self, key, params):
+        log.info("load values into %s", key)
         self._set_sliders_silently(params)
         self._store_program_values(key, params)
         self.flush_pending_params()
@@ -1535,14 +1610,30 @@ class CinegainMainWindow(QMainWindow):
         self._refresh_user_preset_buttons_text()
         self.update_preset_highlights()
 
+    @property
+    def processing(self):
+        """True when the filter chain runs and is not switched to pass-through."""
+        return self.is_active and not self.router.bypass
+
     def toggle_power(self):
-        if self.is_active:
-            self.pending_params.clear()
-            self.router.release_all()
-            run_cinegain("stop")
-        else:
+        """
+        Off/on without removing any sink: every Cinegain filter switches to
+        pass-through (bypass) and streams stay where they are. Removing sinks
+        under a playing browser makes it pause the video (#14).
+        """
+        if not self.is_active:
+            log.info("power: filter chain not running, starting it")
+            self.router.bypass = False
             run_cinegain("start")
+        else:
+            self.flush_pending_params()
+            self.router.set_bypass(not self.router.bypass)
         self.on_heartbeat(sync_sliders=True)
+
+    def _reassert_bypass(self):
+        """Loading Standard values pushes bypass=0; keep pass-through while switched off."""
+        if self.is_active and self.router.bypass:
+            self.router.set_bypass(True)
 
     def on_heartbeat(self, sync_sliders=False):
         out, code = run_cinegain("status", "--json")
@@ -1555,9 +1646,14 @@ class CinegainMainWindow(QMainWindow):
             if code != 0 and (code != 1 or st["active"]):
                 raise ValueError("Status command failed")
             self.is_active = st["active"]
+            if not self.is_active and self.router.bypass:
+                self.router.bypass = False  # stopped from outside: the next start is a real "on"
             params = st.get("params", {})
             preset_id = st.get("preset")
         except (ValueError, TypeError):
+            if self._last_status != "unknown":
+                log.warning("status unknown: rc=%s output=%r", code, out[-300:])
+                self._last_status = "unknown"
             self.lbl_status.setText(t("unknown_status"))
             self.lbl_status.setStyleSheet("color: #FFD21F;")
             self.btn_power.setEnabled(False)
@@ -1567,7 +1663,12 @@ class CinegainMainWindow(QMainWindow):
         self.btn_power.setEnabled(True)
         self.tray_toggle_action.setEnabled(True)
 
-        if self.is_active:
+        status = "on" if self.processing else ("bypass" if self.is_active else "stopped")
+        if status != self._last_status:
+            log.info("status: %s (preset %s)", status, preset_id)
+            self._last_status = status
+
+        if self.processing:
             self.lbl_status.setText(t("status_active"))
             self.lbl_status.setStyleSheet(
                 'font-family: "Fira Sans Condensed", sans-serif; font-size: 13px; '
@@ -1611,8 +1712,13 @@ class CinegainMainWindow(QMainWindow):
 
     def refresh_apps(self):
         """Scans streams, enforces per-program routing and updates the sidebar."""
-        views = self.router.tick(active=self.is_active)
-        self.sidebar.update_views(views, self.is_active)
+        try:
+            views = self.router.tick(active=self.is_active)
+        except Exception:
+            log.exception("routing tick failed")
+            return
+        self._views = views
+        self.sidebar.update_views(views, self.processing)
         if not self._initial_selection_done:
             # Open on the program that is playing right now, if it is the only one.
             self._initial_selection_done = True
@@ -1690,6 +1796,7 @@ class CinegainMainWindow(QMainWindow):
         return self.catalog.standard_params()
 
     def on_selection_changed(self, key):
+        log.info("edit target: %s", "Standard" if key is STANDARD else key)
         # Commit pending edits to the previous target before switching.
         self.param_timer.stop()
         self.flush_pending_params()
@@ -1701,6 +1808,7 @@ class CinegainMainWindow(QMainWindow):
     def back_to_standard(self):
         if self.selected_key is STANDARD:
             return
+        log.info("%s back to Standard", self.selected_key)
         self._program_dirty = None
         self.router.registry.set_params(self.selected_key, None)
         self._set_sliders_silently(self.catalog.standard_params())
@@ -1717,6 +1825,7 @@ class CinegainMainWindow(QMainWindow):
         box.setDefaultButton(QMessageBox.StandardButton.Cancel)
         if box.exec() != QMessageBox.StandardButton.Reset:
             return
+        log.warning("global reset requested")
         self.timer.stop()
         self.param_timer.stop()
         self.pending_params.clear()
@@ -1759,19 +1868,18 @@ class CinegainMainWindow(QMainWindow):
 
         menu.addSeparator()
 
-        for pid, label in [
-            ("boost_10db", "+10 dB Boost"),
-            ("boost_20db", "+20 dB Boost"),
-            ("dialog_boost", t("preset_dialog_boost")),
-            ("night_mode", t("preset_night_mode")),
-            ("max_loudness", t("preset_max_loudness")),
-            ("clean_linear", t("preset_clean_linear")),
-        ]:
-            act = QAction(label, self)
+        self.tray_preset_actions = {}
+        for pid in TRAY_PRESETS:
+            act = QAction(self._tray_preset_label(pid), self)
             act.triggered.connect(lambda checked=False, p=pid: self.apply_standard_preset(p))
             menu.addAction(act)
+            self.tray_preset_actions[pid] = act
 
         menu.addSeparator()
+        self.tray_log_action = QAction(t("tray_log"), self)
+        self.tray_log_action.triggered.connect(self.open_debug_log)
+        menu.addAction(self.tray_log_action)
+
         self.tray_quit_action = QAction(t("tray_quit"), self)
         self.tray_quit_action.triggered.connect(self.quit_app)
         menu.addAction(self.tray_quit_action)
@@ -1779,6 +1887,16 @@ class CinegainMainWindow(QMainWindow):
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self.on_tray_activated)
         self.tray.show()
+
+    @staticmethod
+    def _tray_preset_label(pid):
+        return {"boost_10db": "+10 dB Boost", "boost_20db": "+20 dB Boost"}.get(pid) or t(f"preset_{pid}")
+
+    def open_debug_log(self):
+        log.info("debug log opened from the tray")
+        for handler in logging.getLogger(cinegain_log.ROOT).handlers:
+            handler.flush()
+        open_link(QUrl.fromLocalFile(paths.LOG_FILE).toString())
 
     def on_tray_activated(self, reason):
         if reason in (
@@ -1804,6 +1922,7 @@ class CinegainMainWindow(QMainWindow):
             event.accept()
 
     def quit_app(self):
+        log.info("quit")
         self.pending_params.clear()
         self.router.release_all()
         run_cinegain("stop")
@@ -1812,7 +1931,16 @@ class CinegainMainWindow(QMainWindow):
         QApplication.quit()
 
 
+def _qt_message(mode, context, message):
+    level = {QtMsgType.QtDebugMsg: logging.DEBUG, QtMsgType.QtInfoMsg: logging.INFO,
+             QtMsgType.QtWarningMsg: logging.WARNING}.get(mode, logging.ERROR)
+    cinegain_log.get("qt").log(level, "%s", message)
+
+
 def main():
+    cinegain_log.setup("gui")
+    log.info("Cinegain GUI %s starting (python %s, pid %s)", APP_VERSION, sys.version.split()[0], os.getpid())
+    qInstallMessageHandler(_qt_message)
     app = QApplication(sys.argv)
     app.setApplicationName("Cinegain")
     app.setQuitOnLastWindowClosed(False)
