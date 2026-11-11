@@ -1335,7 +1335,8 @@ def _load_sibling(module, attr):
 
 
 # Merged in release order: later tables override earlier values of the same key.
-for _table in (APPS_TRANSLATIONS, _load_sibling("i18n_programs", "PROGRAM_TRANSLATIONS")):
+for _table in (APPS_TRANSLATIONS, _load_sibling("i18n_programs", "PROGRAM_TRANSLATIONS"),
+               _load_sibling("i18n_v05", "V05_TRANSLATIONS")):
     for _lang, _extra in _table.items():
         TRANSLATIONS.setdefault(_lang, {}).update(_extra)
 
