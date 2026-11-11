@@ -202,7 +202,7 @@ class ToggleSwitch(QAbstractButton):
         super().__init__(parent)
         self.setCheckable(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setFixedSize(QSize(38, 20))
 
     def sizeHint(self):
@@ -217,6 +217,9 @@ class ToggleSwitch(QAbstractButton):
         p.setPen(QPen(QColor(YELLOW if on else ("#A86B4A" if hover else BORDER)), 1.2))
         p.setBrush(QColor("#3D2C07" if on else "#080604"))
         p.drawRoundedRect(track, 8, 8)
+        if self.hasFocus():
+            p.setPen(QPen(QColor("#FFF1D6"), 2))
+            p.drawRoundedRect(track, 8, 8)
         knob_x = 20 if on else 4
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QColor(YELLOW if on else "#7A6A5C"))
@@ -225,6 +228,7 @@ class ToggleSwitch(QAbstractButton):
 
 
 class ProgramRow(QFrame):
+    page_requested = pyqtSignal(object, int)
     clicked = pyqtSignal(object)  # key (None = Standard)
     switched = pyqtSignal(str, bool)
     menu_requested = pyqtSignal(str, object)
@@ -232,6 +236,7 @@ class ProgramRow(QFrame):
 
     def __init__(self, key, parent=None):
         super().__init__(parent)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.key = key
         self.setObjectName("program_row")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -262,7 +267,7 @@ class ProgramRow(QFrame):
             self.badge = QPushButton()
             self.badge.setObjectName("volume_badge")
             self.badge.setCursor(Qt.CursorShape.PointingHandCursor)
-            self.badge.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            self.badge.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
             self.badge.setIconSize(QSize(14, 14))
             self.badge.clicked.connect(lambda: self.volume_clicked.emit(self.key))
             self.badge.hide()
@@ -272,6 +277,17 @@ class ProgramRow(QFrame):
             lay.addWidget(self.badge, 0, Qt.AlignmentFlag.AlignVCenter)
             lay.addWidget(self.switch, 0, Qt.AlignmentFlag.AlignVCenter)
 
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_PageUp, Qt.Key.Key_PageDown):
+            self.page_requested.emit(self.key, -1 if event.key() == Qt.Key.Key_PageUp else 1)
+            event.accept()
+            return
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            self.clicked.emit(self.key)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit(self.key)
@@ -280,6 +296,7 @@ class ProgramRow(QFrame):
     def set_selected(self, selected, label):
         _set_prop(self, "selected", selected)
         _set_prop(self.name, "selected", selected)
+        self.setAccessibleName(label)
         self.name.setText(f"▶ {label}" if selected else label)
 
     def update_standard(self, selected):
@@ -347,14 +364,15 @@ class ProgramSidebar(QGroupBox):
         self.show_silent = False
         self.is_active = False
         self.setStyleSheet(SIDEBAR_STYLE)
-        self.setFixedWidth(300)
+        self.setMinimumWidth(190)
+        self.setMaximumWidth(300)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(8, 12, 8, 8)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.scroll.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         content = QWidget()
         content.setObjectName("program_list")
@@ -364,6 +382,7 @@ class ProgramSidebar(QGroupBox):
 
         self.standard_row = ProgramRow(STANDARD, content)
         self.standard_row.clicked.connect(self.select)
+        self.standard_row.page_requested.connect(self._page_from_row)
         self.list.addWidget(self.standard_row)
 
         self.empty = QLabel(t("apps_empty"))
@@ -374,7 +393,7 @@ class ProgramSidebar(QGroupBox):
         self.silent_toggle = QPushButton()
         self.silent_toggle.setObjectName("silent_toggle")
         self.silent_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.silent_toggle.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.silent_toggle.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.silent_toggle.clicked.connect(self._toggle_silent)
         self.list.addWidget(self.silent_toggle)
         self.list.addStretch()
@@ -402,6 +421,7 @@ class ProgramSidebar(QGroupBox):
             if v.key not in self.rows:
                 row = ProgramRow(v.key, self.scroll.widget())
                 row.clicked.connect(self.select)
+                row.page_requested.connect(self._page_from_row)
                 row.switched.connect(self._on_switch)
                 row.menu_requested.connect(self._on_menu)
                 row.volume_clicked.connect(self._on_volume)
@@ -464,9 +484,19 @@ class ProgramSidebar(QGroupBox):
 
     def select_step(self, delta):
         """PageUp/PageDown: moves the selection through Standard and the visible programs."""
+        self.select(self._step_target(self.selected, delta))
+
+    def _page_from_row(self, key, delta):
+        target = self._step_target(key, delta)
+        self.select(target)
+        row = self.standard_row if target is STANDARD else self.rows[target]
+        row.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self.scroll.ensureWidgetVisible(row)
+
+    def _step_target(self, key, delta):
         chain = [STANDARD] + self.order
-        idx = chain.index(self.selected) if self.selected in chain else 0
-        self.select(chain[max(0, min(len(chain) - 1, idx + delta))])
+        idx = chain.index(key) if key in chain else 0
+        return chain[max(0, min(len(chain) - 1, idx + delta))]
 
     def _toggle_silent(self):
         self.show_silent = not self.show_silent

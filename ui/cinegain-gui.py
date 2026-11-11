@@ -5,7 +5,7 @@ Styled in Tobias's Red-Yellow-Black CI Design System (Red Star #1 / Night-Use Va
 Features:
 - Hero Preamp Volume Booster (-12 dB to +25 dB) + Film Voice DSP controls in 2 columns
 - Factory presets (Pure Volume Boost +5..+25 dB, Film/Series, Night Mode, Max Cinema, Neutral 0 dB)
-- 8 auto-saving User Preset slots with live parameter-matching highlight
+- 8 User Preset slots with live parameter-matching highlight
 - Full keyboard navigation (Up/Down switches sliders across all 12 controls, Left/Right adjusts by 1.0 dB, Shift+Left/Right by 0.1 dB)
 """
 import sys
@@ -22,7 +22,7 @@ elif os.path.exists(os.path.expanduser("~/.local/bin/cinegain")):
 else:
     BIN_PATH = "cinegain"
 
-APP_VERSION = "0.3.3"
+APP_VERSION = "0.3.4"
 
 os.environ.setdefault("CINEGAIN_BASE_DIR", BASE_DIR)
 import cinegain_paths as paths  # noqa: E402
@@ -48,6 +48,7 @@ try:
         QWidget,
         QVBoxLayout,
         QHBoxLayout,
+        QGridLayout,
         QLabel,
         QSlider,
         QPushButton,
@@ -325,6 +326,7 @@ QSlider::handle:horizontal {
     border-radius: 9px;
 }
 
+QPushButton:focus, QCheckBox:focus, QFrame#program_row:focus { border: 2px solid #FFF1D6; }
 QSlider::handle:horizontal:hover, QSlider::handle:horizontal:focus {
     background: #FFE15A;
     border: 2px solid #B11218;
@@ -467,7 +469,10 @@ def amp(text):
 
 def run_cinegain(*args):
     cmd = [BIN_PATH] + list(args)
-    res = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True)
+    except OSError:
+        return "", 1
     return res.stdout.strip(), res.returncode
 
 
@@ -517,7 +522,7 @@ class MeterStrip(QWidget):
 
 class KeyNavSlider(QSlider):
     """
-    Custom QSlider that delegates Up/Down/Tab to the window's 12-slider focus ring
+    Custom QSlider that delegates Up/Down/F6 to the window's 12-slider focus ring
     and uses Left/Right for crisp 1.0 dB steps (Shift+Left/Right for 0.1 dB fine steps).
     """
 
@@ -549,7 +554,7 @@ class KeyNavSlider(QSlider):
             self.navRequested.emit(1)
             event.accept()
             return
-        if key == Qt.Key.Key_Tab or key == Qt.Key.Key_Backtab:
+        if key == Qt.Key.Key_F6:
             self.navRequested.emit(100)
             event.accept()
             return
@@ -608,8 +613,9 @@ class CinegainMainWindow(QMainWindow):
 
         self.setWindowTitle(t("app_title"))
         self.setStyleSheet(CI_STYLESHEET)
-        self.setMinimumSize(1340, 820)
-        self.resize(1400, 880)
+        self.setMinimumSize(480, 360)
+        available = self.screen().availableGeometry()
+        self.resize(min(1400, available.width()), min(880, available.height()))
 
         if os.path.exists(ICON_PATH):
             self.setWindowIcon(QIcon(ICON_PATH))
@@ -626,7 +632,6 @@ class CinegainMainWindow(QMainWindow):
 
         # Heartbeat timer for PipeWire status & stream tracking
         self._meter_seq = {}
-        self._active_slot = None  # (slot_id, selected_key): slider moves are saved back to it
         self._meter_idle = 0
         self.meter_timer = QTimer(self)
         self.meter_timer.setInterval(120)
@@ -638,13 +643,13 @@ class CinegainMainWindow(QMainWindow):
         self.timer.start(1500)
 
         # Auto-start Cinegain engine on initial GUI launch if not running
-        out, _ = run_cinegain("status", "--json")
+        out, code = run_cinegain("status", "--json")
         try:
             st = json.loads(out)
-            if not st.get("active"):
+            if code in (0, 1) and isinstance(st, dict) and st.get("active") is False:
                 run_cinegain("start", "--route")
-        except Exception:
-            run_cinegain("start", "--route")
+        except ValueError:
+            pass
 
         self.on_heartbeat(sync_sliders=True)
         # Focus the primary Direct-Boost slider immediately for instant keyboard control
@@ -751,8 +756,9 @@ class CinegainMainWindow(QMainWindow):
         self.btn_power.setText(t("btn_power_off") if self.is_active else t("btn_power_on"))
         self.lbl_status.setText(t("status_active") if self.is_active else t("status_inactive"))
 
+        self.details.setText(t("details"))
         if hasattr(self, "grp_presets"):
-            self.grp_presets.setTitle(amp(t("presets_group")))
+            self.grp_presets.setTitle(amp(t("presets_group").partition("(")[0].partition("（")[0].strip()))
         if hasattr(self, "grp_main"):
             self.grp_main.setTitle(amp(t("main_group")))
         if hasattr(self, "grp_adv"):
@@ -772,7 +778,10 @@ class CinegainMainWindow(QMainWindow):
             frame = meta["frame"]
             lbl_key = meta["label_key"]
             tip_key = meta["tip_key"]
-            lbl.setText(t(lbl_key) if lbl_key.startswith("lbl_") else lbl_key)
+            title = t(lbl_key) if lbl_key.startswith("lbl_") else lbl_key
+            self.sliders[param_name]["base_title"] = title
+            self.sliders[param_name]["slider"].setAccessibleName(title)
+            self._apply_row_focus_style(param_name, param_name == self.slider_order[self.focused_slider_idx])
             if tip_key:
                 tooltip = t(tip_key) if tip_key.startswith("tip_") else tip_key
                 lbl.setToolTip(tooltip)
@@ -789,7 +798,10 @@ class CinegainMainWindow(QMainWindow):
 
     def init_ui(self):
         main_widget = QWidget()
-        self.setCentralWidget(main_widget)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(main_widget)
+        self.setCentralWidget(scroll)
         layout = QVBoxLayout(main_widget)
         layout.setContentsMargins(16, 14, 16, 14)
         layout.setSpacing(10)
@@ -809,6 +821,7 @@ class CinegainMainWindow(QMainWindow):
             "font-weight: 800; letter-spacing: 1.5px; color: #FFD21F;"
         )
         self.lbl_subtitle = QLabel(self._subtitle())
+        self.lbl_subtitle.setWordWrap(True)
         self.lbl_subtitle.setStyleSheet("font-size: 12px; font-weight: 600; color: #FFF1D6;")
         title_box.addWidget(self.lbl_title)
         title_box.addWidget(self.lbl_subtitle)
@@ -872,14 +885,14 @@ class CinegainMainWindow(QMainWindow):
         body.addLayout(editor, 1)
         layout.addLayout(body, 1)
 
-        # 2. Presets Section (Row 1: Pure Boost + Cinema Profiles | Row 2: 8 Auto-Saving User Presets)
-        self.grp_presets = QGroupBox(amp(t("presets_group")))
+        # 2. Presets Section (Row 1: Pure Boost + Cinema Profiles | Row 2: 8 User Presets)
+        self.grp_presets = QGroupBox(amp(t("presets_group").partition("(")[0].partition("（")[0].strip()))
         presets_vbox = QVBoxLayout(self.grp_presets)
         presets_vbox.setSpacing(8)
         presets_vbox.setContentsMargins(10, 12, 10, 8)
 
         # Row 1: Factory Presets
-        row1 = QHBoxLayout()
+        row1 = QGridLayout()
         row1.setSpacing(6)
 
         factory_row_def = [
@@ -895,39 +908,38 @@ class CinegainMainWindow(QMainWindow):
             ("max_loudness", t("preset_max_loudness"), ""),
         ]
 
-        for pid, text, tip in factory_row_def:
+        self.details = QCheckBox(t("details"))
+        self.details.toggled.connect(self.set_details_visible)
+        for index, (pid, text, tip) in enumerate(factory_row_def):
             if pid == "|":
-                sep = QFrame()
-                sep.setFrameShape(QFrame.Shape.VLine)
-                sep.setStyleSheet("background-color: #7F1718; max-width: 2px; margin: 2px 4px;")
-                row1.addWidget(sep)
                 continue
             b = QPushButton(amp(text))
             b.setToolTip(tip)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
-            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            b.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
             b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             b.clicked.connect(lambda checked=False, p=pid: self.apply_factory_preset(p))
-            row1.addWidget(b)
+            row1.addWidget(b, 1 if index < 6 else 0, index if index < 6 else index - 7)
             self.preset_buttons[pid] = b
 
+        row1.addWidget(self.details, 0, 3, 1, 3)
         presets_vbox.addLayout(row1)
 
-        # Row 2: 8 Auto-Saving User Preset Slots
-        row2 = QHBoxLayout()
+        # Row 2: 8 User Preset Slots
+        row2 = QGridLayout()
         row2.setSpacing(6)
         for i in range(1, 9):
             sid = f"user_{i}"
             b = QPushButton()
             b.setCursor(Qt.CursorShape.PointingHandCursor)
-            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            b.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
             b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             b.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
             b.clicked.connect(lambda checked=False, s=sid: self.on_user_preset_clicked(s))
             b.customContextMenuRequested.connect(
                 lambda pos, s=sid, btn=b: self.show_user_preset_menu(s, btn, pos)
             )
-            row2.addWidget(b)
+            row2.addWidget(b, (i-1) // 4, (i-1) % 4)
             self.user_preset_buttons[sid] = b
 
         presets_vbox.addLayout(row2)
@@ -1086,6 +1098,7 @@ class CinegainMainWindow(QMainWindow):
         cols_layout.addWidget(self.grp_main, 1)
         cols_layout.addWidget(self.grp_adv, 1)
         editor.addLayout(cols_layout, 1)
+        self.set_details_visible(False)
 
         # 5. Footer with Version, AGPLv3, and roteson.de link
         footer_layout = QHBoxLayout()
@@ -1094,7 +1107,7 @@ class CinegainMainWindow(QMainWindow):
         self.btn_reset.setObjectName("btn_reset")
         self.btn_reset.setToolTip(t("btn_reset_tip"))
         self.btn_reset.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_reset.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_reset.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.btn_reset.setStyleSheet(
             "QPushButton#btn_reset { background: transparent; color: #A79B8C; border: 1px solid #3A2A22; "
             "border-radius: 5px; padding: 3px 10px; font-size: 11px; font-weight: 700; }"
@@ -1171,6 +1184,7 @@ class CinegainMainWindow(QMainWindow):
         hdr.addWidget(val_lbl)
 
         slider = KeyNavSlider(Qt.Orientation.Horizontal, param_name)
+        slider.setAccessibleName(label_text)
         if is_hero:
             slider.setObjectName("hero_slider")
         slider.setMinimum(int(round(min_val * 10)))
@@ -1239,10 +1253,21 @@ class CinegainMainWindow(QMainWindow):
             if not target_slider.hasFocus():
                 target_slider.setFocus(Qt.FocusReason.OtherFocusReason)
 
+    def set_details_visible(self, visible):
+        self.grp_adv.setVisible(visible)
+        for pid, button in self.preset_buttons.items():
+            if pid == "clean_linear" or pid.startswith("boost_"):
+                button.setVisible(visible)
+        for button in self.user_preset_buttons.values():
+            button.setVisible(visible)
+
     def navigate_slider(self, current_idx, delta):
-        total = len(self.slider_order)
+        total = len(self.slider_order) if self.details.isChecked() else 5
         if total == 0:
             return
+        if delta == 100 and total == 5:
+            self.details.setChecked(True)
+            total = len(self.slider_order)
         if delta == 100:
             # Switch between Left column (0..4) and Right column (5..11)
             if current_idx < 5:
@@ -1338,8 +1363,6 @@ class CinegainMainWindow(QMainWindow):
                 self.pending_params["lev_max_cut_db"] = LEVELER_DEFAULT_CUT_DB
         else:
             self._store_program_values(self.selected_key, self.get_current_slider_params())
-        if self._active_slot and self._active_slot[1] is self.selected_key:
-            self._slot_dirty = self._active_slot[0]
         self.update_preset_highlights()
         self.param_timer.start()
 
@@ -1392,13 +1415,6 @@ class CinegainMainWindow(QMainWindow):
             self.update_edit_header()
 
     def flush_pending_params(self):
-        if getattr(self, "_slot_dirty", None):
-            sid, self._slot_dirty = self._slot_dirty, None
-            slot = self.user_presets.get(sid)
-            if slot and slot.get("params") and self._active_slot and self._active_slot[0] == sid:
-                slot["params"] = self.get_current_slider_params()
-                self._save_user_presets()
-                self._refresh_user_preset_buttons_text()
         if self._program_dirty:
             key, self._program_dirty = self._program_dirty, None
             self.router.registry.save()
@@ -1426,7 +1442,6 @@ class CinegainMainWindow(QMainWindow):
 
     def apply_factory_preset(self, preset_name):
         """Loads a factory preset into whatever is selected in the sidebar."""
-        self._active_slot = None
         if self.selected_key is STANDARD:
             self.apply_standard_preset(preset_name)
             return
@@ -1463,7 +1478,6 @@ class CinegainMainWindow(QMainWindow):
             self._overwrite_user_slot(slot_id)
             return
         saved_p = dict(slot["params"])
-        self._active_slot = (slot_id, self.selected_key)
         if self.selected_key is STANDARD:
             self.pending_params.clear()
             self._set_sliders_silently(saved_p)
@@ -1494,7 +1508,6 @@ class CinegainMainWindow(QMainWindow):
         menu.exec(button.mapToGlobal(pos))
 
     def _overwrite_user_slot(self, slot_id):
-        self._active_slot = (slot_id, self.selected_key)
         self.user_presets[slot_id]["params"] = self.get_current_slider_params()
         self._save_user_presets()
         self._refresh_user_preset_buttons_text()
@@ -1515,8 +1528,6 @@ class CinegainMainWindow(QMainWindow):
             self.update_preset_highlights()
 
     def _clear_user_slot(self, slot_id):
-        if self._active_slot and self._active_slot[0] == slot_id:
-            self._active_slot = None
         idx_num = slot_id.split("_")[-1]
         self.user_presets[slot_id]["name"] = f"User {idx_num}"
         self.user_presets[slot_id]["params"] = None
@@ -1534,16 +1545,27 @@ class CinegainMainWindow(QMainWindow):
         self.on_heartbeat(sync_sliders=True)
 
     def on_heartbeat(self, sync_sliders=False):
-        out, _ = run_cinegain("status", "--json")
+        out, code = run_cinegain("status", "--json")
         params = {}
         preset_id = None
         try:
             st = json.loads(out)
-            self.is_active = bool(st.get("active", False))
+            if not isinstance(st, dict) or not isinstance(st.get("active"), bool):
+                raise ValueError("Invalid status")
+            if code != 0 and (code != 1 or st["active"]):
+                raise ValueError("Status command failed")
+            self.is_active = st["active"]
             params = st.get("params", {})
             preset_id = st.get("preset")
-        except Exception:
-            self.is_active = False
+        except (ValueError, TypeError):
+            self.lbl_status.setText(t("unknown_status"))
+            self.lbl_status.setStyleSheet("color: #FFD21F;")
+            self.btn_power.setEnabled(False)
+            self.tray_toggle_action.setEnabled(False)
+            return
+
+        self.btn_power.setEnabled(True)
+        self.tray_toggle_action.setEnabled(True)
 
         if self.is_active:
             self.lbl_status.setText(t("status_active"))
@@ -1631,7 +1653,7 @@ class CinegainMainWindow(QMainWindow):
         self.btn_back_standard = QPushButton()
         self.btn_back_standard.setObjectName("btn_back_standard")
         self.btn_back_standard.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_back_standard.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_back_standard.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.btn_back_standard.clicked.connect(self.back_to_standard)
         lay.addLayout(text, 1)
         lay.addWidget(self.btn_back_standard, 0, Qt.AlignmentFlag.AlignVCenter)

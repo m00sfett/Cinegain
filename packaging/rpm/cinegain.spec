@@ -1,5 +1,5 @@
 Name:           cinegain
-Version:        0.3.3
+Version:        0.3.4
 Release:        1%{?dist}
 Summary:        Realtime volume booster, dialogue clarity optimizer & film audio processor for PipeWire
 

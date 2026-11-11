@@ -15,7 +15,7 @@ import subprocess
 import sys
 import time
 
-__version__ = "0.3.3"
+__version__ = "0.3.4"
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if os.path.exists(os.path.join(SCRIPT_DIR, "..", "share", "cinegain")):
@@ -195,7 +195,14 @@ def cmd_stop(args):
 
 
 def cmd_status(args):
-    node_id = get_cinegain_node_id()
+    try:
+        node_id = find_node_id(STANDARD_SINK, strict=True)
+    except (subprocess.CalledProcessError, ValueError, OSError):
+        if getattr(args, "json", False):
+            print(json.dumps({"active": None, "error": "pw-dump failed", "version": __version__}))
+        else:
+            print("Cinegain status: UNKNOWN (pw-dump failed)", file=sys.stderr)
+        return 2
     saved = load_saved_state()
     params = get_params(node_id) if node_id else saved["params"]
     running_profiles = sorted(standard_sinks().running() - {PROFILE_STANDARD})

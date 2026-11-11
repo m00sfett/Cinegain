@@ -9,6 +9,8 @@ Skipped when PyQt6 is not installed.
 import importlib.util
 import json
 import os
+import subprocess
+import tempfile
 import sys
 import unittest
 
@@ -142,12 +144,37 @@ class TestProgramEditing(unittest.TestCase):
         self.assertIn("Google Chrome", out.getvalue())
         self.assertIn("own", out.getvalue())
 
-    def test_loaded_user_slot_saves_slider_changes_back(self):
+    def test_unknown_status_recovers_to_confirmed_inactive(self):
+        self.gui.run_cinegain = lambda *args: ("", 1)
+        self.win.on_heartbeat()
+        self.assertFalse(self.win.btn_power.isEnabled())
+        self.assertEqual(self.win.lbl_status.text(), self.gui.t("unknown_status"))
+        self.gui.run_cinegain = lambda *args: ('{"active": false}', 1)
+        self.win.on_heartbeat()
+        self.assertTrue(self.win.btn_power.isEnabled())
+        self.assertEqual(self.win.lbl_status.text(), self.gui.t("status_inactive"))
+
+    def test_keyboard_and_details(self):
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtTest import QTest
+        self.win.show()
+        self.slider().setFocus()
+        self.app.processEvents()
+        QTest.keyClick(self.slider(), Qt.Key.Key_Tab)
+        self.assertFalse(self.slider().hasFocus())
+        self.assertTrue(self.win.grp_adv.isHidden())
+        self.win.details.setFocus()
+        QTest.keyClick(self.win.details, Qt.Key.Key_Space)
+        self.assertTrue(self.win.grp_adv.isVisible())
+        self.assertTrue(self.win.user_preset_buttons["user_1"].isVisible())
+
+    def test_loaded_user_slot_preserves_template_until_explicit_save(self):
         self.win.on_user_preset_clicked("user_1")  # filled slot: loads into Standard
         self.slider("input_db").setValue(77)
         self.win.flush_pending_params()
         saved = paths.read_json(paths.USER_PRESETS_FILE)["user_1"]["params"]
-        self.assertAlmostEqual(saved["input_db"], 7.7)
+        self.assertEqual(saved["input_db"], 1.0)
+        self.win._overwrite_user_slot("user_1")
         self.assertEqual(self.win.user_presets["user_1"]["params"]["input_db"], 7.7)
 
     def test_user_slot_stops_auto_saving_after_factory_preset_or_program_switch(self):
@@ -202,6 +229,47 @@ class TestProgramEditing(unittest.TestCase):
         self.assertIn(("preset", "boost_20db"), self.calls)
         self.assertEqual(self.slider().value(), before)
         self.assertIsNone(AppRegistry().get(SPOTIFY)["params"])
+
+    def test_failed_pw_dump_does_not_start_filter_or_enable_power(self):
+        from pathlib import Path
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as directory:
+            dump = Path(directory, "pw-dump")
+            dump.write_text("#!/bin/sh\nexit 1\n")
+            dump.chmod(0o755)
+            env = dict(os.environ, PATH=directory + os.pathsep + os.environ["PATH"])
+            result = subprocess.run([self.gui.BIN_PATH, "status", "--json"], env=env,
+                                    text=True, capture_output=True, check=False)
+        with patch.object(self.gui, "run_cinegain", return_value=(result.stdout, result.returncode)) as run:
+            window = self.gui.CinegainMainWindow(self.router)
+            try:
+                self.assertNotIn(("start", "--route"), [call.args for call in run.call_args_list])
+                self.assertFalse(window.btn_power.isEnabled())
+                self.assertFalse(window.tray_toggle_action.isEnabled())
+                self.assertEqual(window.lbl_status.text(), self.gui.t("unknown_status"))
+            finally:
+                window.timer.stop()
+                window.meter_timer.stop()
+                window.tray.hide()
+                window.deleteLater()
+        self.assertEqual(result.returncode, 2)
+        self.assertIsNone(json.loads(result.stdout)["active"])
+
+    def test_page_keys_from_focused_program_row(self):
+        from PyQt6.QtTest import QTest
+
+        sidebar = self.win.sidebar
+        first, second = sidebar.order
+        self.win.show()
+        sidebar.select(first)
+        sidebar.rows[first].setFocus()
+        self.app.processEvents()
+        for key, target in ((self.gui.Qt.Key.Key_PageDown, second),
+                            (self.gui.Qt.Key.Key_PageUp, first)):
+            QTest.keyClick(self.app.focusWidget(), key)
+            self.assertEqual(self.win.selected_key, target)
+            self.assertTrue(sidebar.rows[target].hasFocus())
 
     def test_page_down_walks_standard_then_programs(self):
         down = self.gui.QKeyEvent(self.gui.QKeyEvent.Type.KeyPress, self.gui.Qt.Key.Key_PageDown,

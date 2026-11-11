@@ -316,11 +316,15 @@ class SinkProcesses:
         return stopped
 
 
-def find_node_id(node_name):
+def find_node_id(node_name, *, strict=False):
     """PipeWire object id of a node, via pw-dump."""
     try:
         data = json.loads(subprocess.check_output(["pw-dump"], stderr=subprocess.DEVNULL))
+        if not isinstance(data, list) or not all(isinstance(obj, dict) for obj in data):
+            raise ValueError("Invalid pw-dump object list")
     except (subprocess.CalledProcessError, ValueError, OSError):
+        if strict:
+            raise
         return None
     for obj in data:
         if obj.get("type") == "PipeWire:Interface:Node":
