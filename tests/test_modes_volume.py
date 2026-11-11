@@ -18,7 +18,9 @@ import test_routing as tr  # noqa: E402  (isolated config dirs, sys.path, fakes)
 import cinegain_modes as modes  # noqa: E402
 import cinegain_paths as paths  # noqa: E402
 from cinegain_registry import profile_id_for  # noqa: E402
-from cinegain_volume import FADE_S, NodeVolume, VolumeGuard, clean_stream_properties, parse_nodes  # noqa: E402
+from cinegain_volume import (  # noqa: E402
+    FADE_S, MAX_RISE_DB_S, MAX_STEP_DB, NodeVolume, VolumeGuard, clean_stream_properties, parse_nodes, to_db,
+)
 
 CHROME = tr.make_key("Google Chrome", "chrome")
 
@@ -62,6 +64,14 @@ class TestModes(unittest.TestCase):
         self.assertEqual(paths.read_json(paths.STATE_FILE)["mode"], "fixed")
 
 
+def drain(guard, clock, dt=0.1, limit=60.0):
+    """Steps a guard like the GUI timer does until its fades are done (or limit s pass)."""
+    end = clock.t + limit
+    while guard.fades and clock.t < end:
+        clock.t += dt
+        guard.step()
+
+
 class FakeVolumes:
     """pw-dump/pw-cli stand-in: nodes with a hidden volume; setter records and applies."""
 
@@ -101,14 +111,53 @@ class TestVolumeGuard(unittest.TestCase):
         self.assertLess(hidden["chatgpt::chromium"], -80)
         self.assertEqual(set(guard.fades), {1, 3})
         self.assertTrue(any("-48.2 dB" in line for line in cm.output))
-        clock.t += FADE_S / 2
-        guard.step()
-        self.assertAlmostEqual(fake.nodes[1].volume, 10 ** (-48.18 / 2 / 20), places=3)  # halfway in dB
-        clock.t += FADE_S
-        guard.step()
+        for _ in range(15):  # 1.5 s at the GUI's 100 ms steps
+            clock.t += 0.1
+            guard.step()
+        self.assertAlmostEqual(to_db(fake.nodes[1].volume), -48.18 + 1.5 * MAX_RISE_DB_S, places=1)  # 10 dB/s
+        drain(guard, clock)
         self.assertEqual((fake.nodes[1].volume, fake.nodes[3].volume), (1.0, 1.0))
         self.assertEqual(guard.fades, {})
         self.assertEqual(fake.nodes[2].volume, 0.00006)  # foreign program untouched
+
+    def _fade_trace(self, start, steps):
+        """Writes of an auto fade from `start` (linear), stepped at the given intervals."""
+        fake = FakeVolumes([NodeVolume(1, "", "", "cinegain_output", start)])
+        clock = tr.Clock(0.0)
+        guard = VolumeGuard(scanner=fake.scan, setter=fake.set, clock=clock)
+        guard.update()
+        trace = []
+        for dt in steps:
+            clock.t += dt
+            guard.step()
+            trace.append((clock.t, fake.nodes[1].volume))
+            if not guard.fades:
+                break
+        return trace, guard
+
+    def test_fade_rises_at_most_10_db_per_s_in_small_steps_and_lands_on_0_db(self):
+        """#40.3: -84 dB came back at 28 dB/s in 2.8 dB steps; now <= 10 dB/s and <= 1 dB per step."""
+        start_db = -84.3
+        trace, guard = self._fade_trace(10 ** (start_db / 20), [0.02] * 1000)  # 20 ms: the step cap alone allows 50 dB/s
+        last = start_db
+        for t, v in trace:
+            db = to_db(v)
+            self.assertLessEqual(db, start_db + MAX_RISE_DB_S * t + 1e-6, f"faster than 10 dB/s at {t:.1f} s")
+            self.assertLessEqual(db - last, MAX_STEP_DB + 1e-6, f"step too coarse at {t:.1f} s")
+            self.assertGreater(db, last - 1e-9, "a fade-in never dips")
+            last = db
+        self.assertEqual(trace[-1][1], 1.0)                                  # exactly 0 dB at the end
+        self.assertEqual(guard.fades, {})
+        self.assertAlmostEqual(trace[-1][0], -start_db / MAX_RISE_DB_S, delta=0.11)  # no slower than needed
+
+    def test_stalled_timer_never_makes_a_jump(self):
+        trace, _ = self._fade_trace(10 ** (-60 / 20), [0.1, 2.5, 0.1, 0.1])  # GUI froze for 2.5 s
+        dbs = [-60.0] + [to_db(v) for _, v in trace]
+        self.assertLessEqual(max(b - a for a, b in zip(dbs, dbs[1:])), MAX_STEP_DB + 1e-6)
+
+    def test_small_lowering_still_takes_the_full_fade_time(self):
+        trace, _ = self._fade_trace(0.5, [0.1] * 100)                       # -6 dB
+        self.assertAlmostEqual(trace[-1][0], FADE_S, delta=0.11)
 
     def test_clean_stream_properties(self):
         with tempfile.TemporaryDirectory() as d:
@@ -176,9 +225,7 @@ class TestRouterVolume(tr.Base):
         self.assertAlmostEqual(saved["sets"]["fixed"]["input_db"], -3.0, places=1)  # 3 - 6
         self.assertEqual((self.volumes.nodes[21].volume, self.volumes.nodes[23].volume), (1.0, 1.0))
         self.assertLess(self.volumes.nodes[22].volume, 1.0)  # follower: fades in, no jump
-        for _ in range(int(FADE_S * 10) + 5):
-            self.clock.t += 0.1
-            self.router.guard.step()
+        drain(self.router.guard, self.clock)
         self.assertEqual(self.volumes.nodes[22].volume, 1.0)
         self.assertEqual([f["target"] for f in report["faded"]], ["spotify::spotify"])
         self.assertEqual(len(report["compensated"]), 2)
@@ -190,9 +237,7 @@ class TestRouterVolume(tr.Base):
         self.volumes.nodes[32] = NodeVolume(32, "Discord", "discord", "Discord", 0.01)
         self.router.tick()
         self.router.full_volume_reset(only="chatgpt::chromium")
-        for _ in range(int(FADE_S * 10) + 5):
-            self.clock.t += 0.1
-            self.router.guard.step()
+        drain(self.router.guard, self.clock)
         self.assertEqual(self.volumes.nodes[31].volume, 1.0)
         self.assertEqual(self.volumes.nodes[32].volume, 0.01)
 

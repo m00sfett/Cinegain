@@ -318,7 +318,7 @@ class Router:
         Returns a report dict.
         """
         import cinegain_modes as modes
-        from cinegain_volume import FADE_S, HIDDEN_EPS, VolumeGuard, clean_stream_properties
+        from cinegain_volume import HIDDEN_EPS, VolumeGuard, clean_stream_properties
 
         guard = self.guard or VolumeGuard()
         nodes = guard.scanner()
@@ -371,16 +371,11 @@ class Router:
             guard.reset_now(n.id)
         now = self.clock()
         for n in fade:
-            guard.fades[n.id] = (n.db, now)
+            guard.fade_hidden(n.id, n.volume, 1.0, now)
             report["faded"].append({"target": n.key, "hidden_db": round(n.db, 1)})
-            log.info("full reset: fading %s from %.1f dB over %.0f s", n.key, n.db, FADE_S)
+            log.info("full reset: fading %s from %.1f dB over %.1f s", n.key, n.db, guard.fades[n.id].duration)
         if self.guard is None:
-            # one-shot use (CLI): run the fades here
-            end = now + FADE_S + 0.2
-            while guard.fades and time.time() < end:
-                guard.step()
-                time.sleep(0.1)
-            guard.step(end + 1)
+            guard.run_fades()  # one-shot use (CLI): run the fades here
         for st in self.pulse.list_streams():
             if only and make_key(st.app_name or st.node_name, st.binary) != only:
                 continue

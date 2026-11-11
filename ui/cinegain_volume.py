@@ -28,12 +28,52 @@ from cinegain_registry import make_key
 log = cinegain_log.get("volume")
 
 HIDDEN_EPS = 0.999      # below this a node counts as secretly lowered
-FADE_S = 3.0            # automatic reset fades in over this time
+FADE_S = 3.0            # a fade-in takes at least this long ...
+MAX_RISE_DB_S = 10.0    # ... and never rises faster than this (SPEC 3.3 policy, #40)
+MAX_STEP_DB = 1.0       # largest raise per step, fine enough against zipper noise (#40)
+FLOOR_DB = -90.0        # a fade from silence (or an unknown level) starts here
 OUTPUT_PREFIX = "cinegain_output"
 
 
 def to_db(v):
     return 20.0 * math.log10(max(float(v), 1e-9))
+
+
+def from_db(db):
+    return 10.0 ** (db / 20.0)
+
+
+def rise_rate(delta_db):
+    """dB/s of a fade over delta_db: spread over at least FADE_S, at most MAX_RISE_DB_S."""
+    return min(MAX_RISE_DB_S, max(float(delta_db), 1e-6) / FADE_S)
+
+
+class Fade:
+    """
+    One rising fade, linear in dB. Invariants (#40): the level never rises faster
+    than rise_rate() (<= MAX_RISE_DB_S) measured from the start, no single step
+    rises more than MAX_STEP_DB (a late or stalled timer only makes it slower), and
+    the last step lands exactly on the target. apply(db, final) does the write.
+    """
+
+    __slots__ = ("start_db", "target_db", "t0", "rate", "applied_db", "apply", "what")
+
+    def __init__(self, start_db, target_db, t0, apply, what=""):
+        self.start_db = max(FLOOR_DB, float(start_db))
+        self.target_db = float(target_db)
+        self.t0 = t0
+        self.rate = rise_rate(self.target_db - self.start_db)
+        self.applied_db = self.start_db
+        self.apply = apply
+        self.what = what
+
+    @property
+    def duration(self):
+        return max(0.0, self.target_db - self.start_db) / self.rate
+
+    def next_db(self, now):
+        timed = self.start_db + self.rate * max(0.0, now - self.t0)
+        return min(self.target_db, timed, self.applied_db + MAX_STEP_DB)
 
 
 class NodeVolume:
@@ -107,9 +147,62 @@ class VolumeGuard:
         # Automatic fade-back for routed programs and Cinegain outputs. Off: everything
         # is only reported, so lowerings can be watched in the analysis view (Q9 0.5.0).
         self.auto = auto
-        self.fades = {}      # node id -> (start dB, start time)
-        self._last = {}      # node id -> last seen volume (for change logging)
+        self.fades = {}      # node id (hidden volume) or ("mixer", stream) -> Fade
+        self._last = {}      # node id -> last seen or written hidden volume
         self.nodes = []
+
+    def known_volume(self, node_id, current=None):
+        """
+        Lowest plausible current hidden volume of a node: a running fade's last
+        write, the last value seen or written, and the caller's reading. The lowest
+        one is safe: starting a fade too low only means a short dip, never a jump.
+        """
+        values = [v for v in (current, self._last.get(node_id)) if v is not None]
+        fade = self.fades.get(node_id)
+        if fade is not None:
+            values.append(from_db(fade.applied_db))
+        return min(values) if values else None
+
+    def fade_hidden(self, node_id, start, target=1.0, now=None, apply_start=False, what=""):
+        """
+        Brings a node's hidden volume from `start` to `target` (both linear). Lower
+        targets are set at once; higher ones fade in (see Fade). apply_start writes
+        the start value first (a duck, or a raise that was compensated beforehand).
+        Returns False if a write failed.
+        """
+        now = self.clock() if now is None else now
+        target = max(0.0, min(1.0, float(target)))
+        start = max(0.0, float(start))
+        self.fades.pop(node_id, None)
+        if target <= start * 1.0001:
+            ok = self.setter(node_id, target)
+            if ok:
+                self._last[node_id] = target
+            return ok
+        if apply_start:
+            if not self.setter(node_id, start):
+                return False
+            self._last[node_id] = start
+        target_db = 0.0 if target >= 1.0 else to_db(target)
+
+        def apply(db, final, node_id=node_id, target=target):
+            value = target if final else from_db(db)
+            ok = self.setter(node_id, value)
+            if ok:
+                self._last[node_id] = value
+            return ok
+
+        self.fades[node_id] = Fade(to_db(start), target_db, now, apply, what or f"node {node_id}")
+        return True
+
+    def add_fade(self, key, start_db, target_db, apply, now=None, what=""):
+        """Generic rising fade (e.g. a stream's mixer volume); apply(db, final) writes."""
+        now = self.clock() if now is None else now
+        self.fades[key] = Fade(start_db, target_db, now, apply, what or str(key))
+        return self.fades[key]
+
+    def cancel(self, key):
+        self.fades.pop(key, None)
 
     def update(self, auto_keys=(), now=None):
         """
@@ -128,13 +221,14 @@ class VolumeGuard:
                     log.warning("hidden volume of node %s (%s, %s) is %.6f = %.1f dB%s", n.id, n.key,
                                 n.node_name, n.volume, n.db,
                                 "" if last is None else f" (was {to_db(last):.1f} dB)")
-            self._last[n.id] = n.volume
+            if n.id not in self.fades:
+                self._last[n.id] = n.volume
             if n.volume >= HIDDEN_EPS or n.id in self.fades:
                 continue
             if self.auto and (n.is_cinegain_output or n.key in auto_keys):
-                self.fades[n.id] = (n.db, now)
-                log.info("fading node %s (%s) from %.1f dB back to 0 dB over %.0f s", n.id,
-                         n.key if not n.is_cinegain_output else n.node_name, n.db, FADE_S)
+                self.fade_hidden(n.id, n.volume, 1.0, now)
+                log.info("fading node %s (%s) from %.1f dB back to 0 dB over %.1f s", n.id,
+                         n.key if not n.is_cinegain_output else n.node_name, n.db, self.fades[n.id].duration)
             else:
                 hidden[n.key] = min(hidden.get(n.key, 0.0), n.db)
         for gone in [i for i in self._last if i not in seen]:
@@ -143,19 +237,25 @@ class VolumeGuard:
         return hidden
 
     def step(self, now=None):
-        """Advances running fades (call often, e.g. every 100 ms). Linear in dB, so it sounds even."""
+        """Advances running fades (call often: every 100 ms gives 1 dB steps at 10 dB/s)."""
         now = self.clock() if now is None else now
-        for node_id, (start_db, t0) in list(self.fades.items()):
-            x = (now - t0) / FADE_S
-            if x >= 1.0:
-                self.setter(node_id, 1.0)
-                self.fades.pop(node_id, None)
-                self._last[node_id] = 1.0
-                log.info("node %s back at 0 dB", node_id)
-            else:
-                v = 10 ** (start_db * (1.0 - max(0.0, x)) / 20.0)
-                self.setter(node_id, v)
-                self._last[node_id] = v
+        for key, fade in list(self.fades.items()):
+            db = fade.next_db(now)
+            final = db >= fade.target_db - 1e-9
+            ok = fade.apply(db, final)
+            fade.applied_db = db
+            if final or not ok:
+                if self.fades.get(key) is fade:
+                    self.fades.pop(key, None)
+                if final and ok:
+                    log.info("%s at %.1f dB (fade done)", fade.what, fade.target_db)
+
+    def run_fades(self, sleep=time.sleep, interval=0.05):
+        """Blocking: steps until every fade is done (one-shot CLI use without a GUI timer)."""
+        while self.fades:
+            self.step()
+            if self.fades:
+                sleep(interval)
 
     def reset_now(self, node_id):
         self.fades.pop(node_id, None)
