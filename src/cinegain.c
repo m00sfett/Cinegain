@@ -161,6 +161,14 @@ static const LADSPA_PortRangeHint port_hints[P_COUNT] = {
 #define LOOKAHEAD_MS 5.0
 #define MAX_LOOKAHEAD 2048
 #define DENORM 1e-20f
+#define DQ_MASK (MAX_LOOKAHEAD - 1) /* MAX_LOOKAHEAD is a power of two */
+/* A switched-off leveler this close to 0 dB is snapped to 0 dB and skipped (#41);
+ * 1e-4 dB is a gain error of about 1e-5, far below anything audible. */
+#define LEV_IDLE_DB 1e-4
+
+/* Building with -DCINEGAIN_REFERENCE keeps the plain O(n) limiter scan and runs
+ * every stage on every sample. Only the tests use it, as the oracle for the
+ * optimized build (#41). */
 
 typedef struct { double b0, b1, b2, a1, a2; } biquad_coef;
 typedef struct { double z1, z2; } biquad_state;
@@ -236,16 +244,24 @@ typedef struct {
 /* Gains only rise this fast; a lower value applies at once (user decision 2026-11-11):
  * 0 -> +25 dB takes 2.5 s, so there is time to react, while turning down is instant. */
 #define RAMP_DB_PER_S 10.0
-enum { RG_INPUT, RG_BASS, RG_DIALOG, RG_TREBLE, RG_MID, RG_SIDE, RG_MAKEUP, RG_N };
+/* The limiter ceiling and the leveler target raise the level just like a gain (#40). */
+enum {
+	RG_INPUT, RG_BASS, RG_DIALOG, RG_TREBLE, RG_MID, RG_SIDE, RG_MAKEUP,
+	RG_CEILING, RG_LEV_TARGET, RG_N
+};
 static const int ramp_port[RG_N] = {
 	P_INPUT_DB, P_BASS_DB, P_DIALOG_DB, P_TREBLE_DB, P_MID_DB, P_SIDE_DB, P_MAKEUP_DB,
+	P_LIM_CEILING_DB, P_LEV_TARGET_DB,
 };
+static const float ramp_fallback[RG_N] = { 0, 0, 0, 0, 0, 0, 0, -1, -20 };
 
 typedef struct {
 	LADSPA_Data *port[P_COUNT];
 	double rate;
 	meter_shm *shm;
 	char shm_path[512];
+	dev_t shm_dev;       /* identity of our meter file, so cleanup only removes our own */
+	ino_t shm_ino;
 	double lev_peak;     /* fast peak envelope for the leveler's cut path */
 
 	/* cached parameter values to detect changes */
@@ -260,10 +276,25 @@ typedef struct {
 
 	/* compressor */
 	double comp_env_db;  /* detector level in dB */
+	/* Extra gain reduction (<= 0 dB) that holds back the loudness a parameter change
+	 * would add at once (lower ratio, higher threshold, other knee); it fades out at
+	 * RAMP_DB_PER_S (#40). comp_thr/ratio/knee are the parameters of the last block. */
+	double comp_hold_db;
+	double comp_thr, comp_ratio, comp_knee;
+	int comp_valid;
 
 	/* limiter */
 	float delay[2][MAX_LOOKAHEAD];
+#ifdef CINEGAIN_REFERENCE
 	float need[MAX_LOOKAHEAD]; /* required gain per sample, ring buffer */
+#else
+	/* sliding minimum of the required gain over the look-ahead window: a monotone
+	 * deque (ring buffer) of (value, sample index), values rising from the front */
+	float dq_val[MAX_LOOKAHEAD];
+	uint32_t dq_idx[MAX_LOOKAHEAD];
+	unsigned dq_head, dq_len;
+	uint32_t lim_t;      /* running sample index (wraps; only differences are used) */
+#endif
 	unsigned la_len, la_pos;
 	double lim_gain;
 
@@ -273,6 +304,11 @@ typedef struct {
 	/* applied (ramped) values of the gain controls */
 	double ramp[RG_N];
 	int ramp_valid;
+
+	/* bypass -> active: the dry signal hands over to the processed one */
+	int was_bypassed;
+	int xf_on;
+	unsigned xf_pos;     /* samples since processing resumed */
 } Cinegain;
 
 static LADSPA_Handle instantiate(const LADSPA_Descriptor *d, unsigned long rate)
@@ -294,18 +330,35 @@ static LADSPA_Handle instantiate(const LADSPA_Descriptor *d, unsigned long rate)
 		if (xdg && *xdg) { snprintf(buf, sizeof buf, "%s/cinegain", xdg); dir = buf; }
 	}
 	if (dir && *dir) {
+		/* Every instance gets a fresh inode under the stable name meter-<pid>.bin:
+		 * build it under a unique temp name, then rename it into place. The GUI keeps
+		 * reading meter-<pid>.bin, and an old instance cleaned up after a graph reset
+		 * in the same process sees a different inode and leaves the new file alone (#35). */
+		static unsigned meter_serial;
+		unsigned serial = __atomic_fetch_add(&meter_serial, 1, __ATOMIC_RELAXED);
+		char tmp[sizeof k->shm_path + 32];
+		struct stat st;
 		mkdir(dir, 0700);
 		snprintf(k->shm_path, sizeof k->shm_path, "%s/meter-%d.bin", dir, (int)getpid());
-		int fd = open(k->shm_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+		snprintf(tmp, sizeof tmp, "%s.%u.tmp", k->shm_path, serial);
+		unlink(tmp); /* leftover of a crashed process that had the same pid */
+		int fd = open(tmp, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
 		if (fd >= 0) {
-			if (ftruncate(fd, sizeof(meter_shm)) == 0) {
+			if (ftruncate(fd, sizeof(meter_shm)) == 0 && fstat(fd, &st) == 0) {
 				void *m = mmap(NULL, sizeof(meter_shm), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 				if (m != MAP_FAILED) {
 					k->shm = m;
 					k->shm->magic = METER_MAGIC;
+					k->shm_dev = st.st_dev;
+					k->shm_ino = st.st_ino;
 				}
 			}
 			close(fd);
+			if (k->shm && rename(tmp, k->shm_path) != 0) {
+				munmap(k->shm, sizeof(meter_shm));
+				k->shm = NULL;
+			}
+			if (!k->shm) unlink(tmp);
 		}
 		if (!k->shm) k->shm_path[0] = 0;
 	}
@@ -318,26 +371,66 @@ static void connect_port(LADSPA_Handle h, unsigned long p, LADSPA_Data *data)
 	if (p < P_COUNT) k->port[p] = data;
 }
 
+static void lim_window_reset(Cinegain *k)
+{
+#ifdef CINEGAIN_REFERENCE
+	for (unsigned i = 0; i < MAX_LOOKAHEAD; i++) k->need[i] = 1.0f;
+#else
+	k->dq_head = k->dq_len = 0;
+	k->lim_t = 0;
+#endif
+}
+
 static void activate(LADSPA_Handle h)
 {
 	Cinegain *k = h;
 	memset(k->eqs, 0, sizeof(k->eqs));
 	memset(k->delay, 0, sizeof(k->delay));
-	for (unsigned i = 0; i < MAX_LOOKAHEAD; i++) k->need[i] = 1.0f;
+	lim_window_reset(k);
 	k->la_pos = 0;
 	k->lim_gain = 1.0;
 	k->lev_power = 0.0;
 	k->lev_gain_db = 0.0;
 	k->lev_peak = 0.0;
 	k->comp_env_db = -120.0;
+	k->comp_hold_db = 0.0;
+	k->comp_valid = 0;
 	k->eq_valid = 0;
 	k->ramp_valid = 0;
+	k->was_bypassed = 0;
+	k->xf_on = 0;
+}
+
+/* Bypass -> active: no stale audio from the look-ahead line and no leveler boost
+ * at once (#28). The leveler restarts at 0 dB at most and glides up as usual; the
+ * compressor detector and the leveler's power/peak estimates stay, because they
+ * can only hold the level down. The first LOOKAHEAD_MS keep the dry signal while
+ * the line fills, the next LOOKAHEAD_MS crossfade to the processed signal. */
+static void resume_after_bypass(Cinegain *k)
+{
+	memset(k->eqs, 0, sizeof(k->eqs));
+	memset(k->delay, 0, sizeof(k->delay));
+	lim_window_reset(k);
+	k->la_pos = 0;
+	k->lim_gain = 1.0;
+	if (k->lev_gain_db > 0.0) k->lev_gain_db = 0.0;
+	k->was_bypassed = 0;
+	k->xf_on = 1;
+	k->xf_pos = 0;
 }
 
 
+/* Control value clamped to the port's LADSPA range; NaN/Inf or an unconnected
+ * port give the fallback (the documented default). */
 static inline float ctl(Cinegain *k, int p, float fallback)
 {
-	return k->port[p] ? *k->port[p] : fallback;
+	if (!k->port[p]) return fallback;
+	float v = *k->port[p];
+	if (!isfinite(v)) return fallback;
+	const LADSPA_PortRangeHint *h = &port_hints[p];
+	if ((h->HintDescriptor & LADSPA_HINT_BOUNDED_BELOW) && v < h->LowerBound) return h->LowerBound;
+	if ((h->HintDescriptor & LADSPA_HINT_BOUNDED_ABOVE) && v > h->UpperBound) return h->UpperBound;
+	return v;
 }
 
 /* Moves every applied gain towards its control value: down at once, up at
@@ -348,7 +441,7 @@ static double update_ramps(Cinegain *k, unsigned long n)
 	const double step = RAMP_DB_PER_S * (double)n / k->rate;
 	double left = 0.0;
 	for (int g = 0; g < RG_N; g++) {
-		double want = ctl(k, ramp_port[g], 0);
+		double want = ctl(k, ramp_port[g], ramp_fallback[g]);
 		if (!k->ramp_valid) k->ramp[g] = want < 0.0 ? want : 0.0;
 		if (want <= k->ramp[g]) k->ramp[g] = want;
 		else if (want - k->ramp[g] <= step) k->ramp[g] = want;
@@ -357,6 +450,19 @@ static double update_ramps(Cinegain *k, unsigned long n)
 	}
 	k->ramp_valid = 1;
 	return left;
+}
+
+/* Static soft-knee curve: gain reduction in dB (<= 0) for detector level e. */
+static inline double comp_curve(double e, double thr, double ratio, double knee)
+{
+	double over = e - thr, gr = 0.0;
+	if (knee > 0.0 && 2.0 * fabs(over) <= knee) {
+		double t = over + knee / 2.0;
+		gr = (1.0 / ratio - 1.0) * t * t / (2.0 * knee);
+	} else if (over > 0.0) {
+		gr = (1.0 / ratio - 1.0) * over;
+	}
+	return gr;
 }
 
 static void update_eq(Cinegain *k)
@@ -390,15 +496,19 @@ static void run(LADSPA_Handle h, unsigned long n)
 
 	if (ctl(k, P_BYPASS, 0) > 0.5f) {
 		k->ramp_valid = 0; /* switching the filter back on fades the boost in again */
+		k->was_bypassed = 1;
 		if (outL != inL) memmove(outL, inL, n * sizeof(float));
 		if (outR != inR) memmove(outR, inR, n * sizeof(float));
 		return;
 	}
 
+	if (k->was_bypassed) resume_after_bypass(k);
+
 	/* gains glide linearly across the block from their old to their new value */
 	const double in_from = k->ramp_valid ? db2lin(k->ramp[RG_INPUT]) : -1.0;
 	const double mk_from = k->ramp_valid ? db2lin(k->ramp[RG_MAKEUP]) : -1.0;
-	const double ramp_left = update_ramps(k, n);
+	const double ce_from = k->ramp_valid ? db2lin(k->ramp[RG_CEILING]) : -1.0;
+	double ramp_left = update_ramps(k, n);
 	update_eq(k);
 
 	const double rate = k->rate;
@@ -409,7 +519,14 @@ static void run(LADSPA_Handle h, unsigned long n)
 	const double side_g = db2lin(k->ramp[RG_SIDE]);
 
 	const int lev_on = ctl(k, P_LEVELER, 1) > 0.5f;
-	const double lev_target = ctl(k, P_LEV_TARGET_DB, -20);
+#ifdef CINEGAIN_REFERENCE
+	const int lev_idle = 0;
+#else
+	/* switched off and back at 0 dB: the stage is the identity, skip it (#41) */
+	if (!lev_on && fabs(k->lev_gain_db) < LEV_IDLE_DB) k->lev_gain_db = 0.0;
+	const int lev_idle = !lev_on && k->lev_gain_db == 0.0;
+#endif
+	const double lev_target = k->ramp[RG_LEV_TARGET];
 	const double lev_boost = ctl(k, P_LEV_MAX_BOOST_DB, 12);
 	const double lev_cut = ctl(k, P_LEV_MAX_CUT_DB, 6);
 	const double lev_speed = ctl(k, P_LEV_SPEED_S, 4);
@@ -427,11 +544,39 @@ static void run(LADSPA_Handle h, unsigned long n)
 	const double knee = ctl(k, P_COMP_KNEE_DB, 6);
 	const double att = coef_ms(ctl(k, P_COMP_ATTACK_MS, 10), rate);
 	const double rel = coef_ms(ctl(k, P_COMP_RELEASE_MS, 250), rate);
+	/* A parameter change that lowers the gain reduction at the current detector level
+	 * is held back and released at RAMP_DB_PER_S; a change that raises it applies at
+	 * once (it first uses up any hold that is still pending). Same rule as
+	 * update_ramps, measured on the static curve at the block start. */
+	double hold_from = k->comp_hold_db;
+	if (k->comp_valid) {
+		const double e = k->comp_env_db;
+		hold_from -= comp_curve(e, thr, ratio, knee) - comp_curve(e, k->comp_thr, k->comp_ratio, k->comp_knee);
+		if (hold_from > 0.0) hold_from = 0.0;
+	}
+	k->comp_thr = thr;
+	k->comp_ratio = ratio;
+	k->comp_knee = knee;
+	k->comp_valid = 1;
+	double hold_to = hold_from + RAMP_DB_PER_S * (double)n / rate;
+	if (hold_to > 0.0) hold_to = 0.0;
+	k->comp_hold_db = hold_to;
+	const double hold_inc = n ? (hold_to - hold_from) / (double)n : 0.0;
+	if (-hold_to > ramp_left) ramp_left = -hold_to;
+#ifdef CINEGAIN_REFERENCE
+	const int comp_idle = 0;
+#else
+	/* ratio 1:1 gives exactly 0 dB gain reduction at every level: skip the curve and
+	 * its db2lin. The detector keeps running, so leaving 1:1 behaves exactly as before. */
+	const int comp_idle = ratio == 1.0 && hold_from == 0.0;
+#endif
 	const double makeup = db2lin(k->ramp[RG_MAKEUP]);
 	const double mk_start = mk_from < 0.0 ? makeup : mk_from;
 	const double mk_inc = n ? (makeup - mk_start) / (double)n : 0.0;
 
-	const double ceil_lin = db2lin(ctl(k, P_LIM_CEILING_DB, -1));
+	const double ce_to = db2lin(k->ramp[RG_CEILING]);
+	const double ce_start = ce_from < 0.0 ? ce_to : ce_from;
+	const double ce_inc = n ? (ce_to - ce_start) / (double)n : 0.0;
 	const double lim_rel = coef_ms(ctl(k, P_LIM_RELEASE_MS, 100), rate);
 	const double lim_att = coef_ms(LOOKAHEAD_MS / 3.0, rate);
 	const unsigned la = k->la_len;
@@ -440,7 +585,8 @@ static void run(LADSPA_Handle h, unsigned long n)
 
 	for (unsigned long i = 0; i < n; i++) {
 		const double ig = in_start + in_inc * (double)(i + 1);
-		double l = inL[i] * ig, r = inR[i] * ig;
+		const double dry_l = inL[i], dry_r = inR[i]; /* outL may alias inL */
+		double l = dry_l * ig, r = dry_r * ig;
 
 		/* EQ: identical coefficients per channel keep the image stable */
 		for (int b = 0; b < EQ_N; b++) {
@@ -456,7 +602,9 @@ static void run(LADSPA_Handle h, unsigned long n)
 		if (pk > blk_peak) blk_peak = pk;
 
 		/* leveler: slow gated AGC towards a mean (RMS) target */
-		if (lev_on) {
+		if (lev_idle) {
+			/* identity */
+		} else if (lev_on) {
 			double p = 0.5 * (l * l + r * r);
 			double pdb = lin2db(sqrt(p));
 			if (pdb > lev_gate) /* freeze in silence: no noise pumping */
@@ -477,38 +625,58 @@ static void run(LADSPA_Handle h, unsigned long n)
 		} else {
 			k->lev_gain_db *= lev_gc; /* glide back to 0 dB */
 		}
-		double lg = db2lin(k->lev_gain_db);
-		l *= lg; r *= lg;
+		if (!lev_idle) {
+			double lg = db2lin(k->lev_gain_db);
+			l *= lg; r *= lg;
+		}
 
 		/* compressor: peak-ish detector in dB, soft knee, stereo-linked */
 		double x = fabs(l) > fabs(r) ? fabs(l) : fabs(r);
+		const double mk = mk_start + mk_inc * (double)(i + 1);
 		double xdb = lin2db(x);
 		double c = xdb > k->comp_env_db ? att : rel;
 		k->comp_env_db = c * k->comp_env_db + (1.0 - c) * xdb;
-		double e = k->comp_env_db, over = e - thr, gr = 0.0;
-		if (knee > 0.0 && 2.0 * fabs(over) <= knee) {
-			double t = over + knee / 2.0;
-			gr = (1.0 / ratio - 1.0) * t * t / (2.0 * knee);
-		} else if (over > 0.0) {
-			gr = (1.0 / ratio - 1.0) * over;
+		double cg = mk;
+		if (!comp_idle) {
+			double gr = comp_curve(k->comp_env_db, thr, ratio, knee)
+				+ (hold_from + hold_inc * (double)(i + 1));
+			if (gr < blk_gr) blk_gr = gr;
+			cg = db2lin(gr) * mk;
 		}
-		if (gr < blk_gr) blk_gr = gr;
-		double cg = db2lin(gr) * (mk_start + mk_inc * (double)(i + 1));
 		l *= cg; r *= cg;
 
 		/* look-ahead limiter: the gain needed for this sample is known
 		 * LOOKAHEAD_MS before it reaches the output */
+		const double ceil_lin = ce_start + ce_inc * (double)(i + 1);
 		double a = fabs(l) > fabs(r) ? fabs(l) : fabs(r);
 		float needed = a > ceil_lin ? (float)(ceil_lin / a) : 1.0f;
 		unsigned pos = k->la_pos;
-		k->need[pos] = needed;
 		float dl = k->delay[0][pos], dr = k->delay[1][pos];
 		k->delay[0][pos] = (float)l;
 		k->delay[1][pos] = (float)r;
 		k->la_pos = (pos + 1) % la;
+#ifdef CINEGAIN_REFERENCE
+		k->need[pos] = needed;
 		float target = 1.0f;
 		for (unsigned j = 0; j < la; j++)
 			if (k->need[j] < target) target = k->need[j];
+#else
+		/* Same value as the scan: the minimum of the last la required gains. Every
+		 * value is <= 1, so the 1.0 the scan starts from never wins; ties keep the
+		 * newest entry, which expires last. O(1) amortized per sample. */
+		const uint32_t t = k->lim_t++;
+		if (k->dq_len && t - k->dq_idx[k->dq_head] >= la) {
+			k->dq_head = (k->dq_head + 1) & DQ_MASK;
+			k->dq_len--;
+		}
+		while (k->dq_len && k->dq_val[(k->dq_head + k->dq_len - 1) & DQ_MASK] >= needed)
+			k->dq_len--;
+		const unsigned back = (k->dq_head + k->dq_len) & DQ_MASK;
+		k->dq_val[back] = needed;
+		k->dq_idx[back] = t;
+		k->dq_len++;
+		const float target = k->dq_val[k->dq_head];
+#endif
 		double gcoef = target < k->lim_gain ? lim_att : lim_rel;
 		k->lim_gain = gcoef * k->lim_gain + (1.0 - gcoef) * target;
 		if (k->lim_gain > target && gcoef == lim_att && target < 1.0f) {
@@ -521,11 +689,18 @@ static void run(LADSPA_Handle h, unsigned long n)
 		/* safety: soft clip only above the ceiling, hard stop at 0 dBFS */
 		if (fabs(ol) > ceil_lin) ol = (ol > 0 ? 1 : -1) * (ceil_lin + (1.0 - ceil_lin) * tanh((fabs(ol) - ceil_lin) / (1.0 - ceil_lin + 1e-9)));
 		if (fabs(orr) > ceil_lin) orr = (orr > 0 ? 1 : -1) * (ceil_lin + (1.0 - ceil_lin) * tanh((fabs(orr) - ceil_lin) / (1.0 - ceil_lin + 1e-9)));
+		if (k->xf_on) {
+			double w = k->xf_pos < la ? 0.0 : (double)(k->xf_pos - la + 1) / (double)la;
+			ol = (1.0 - w) * dry_l + w * ol;
+			orr = (1.0 - w) * dry_r + w * orr;
+			if (++k->xf_pos >= 2 * la) k->xf_on = 0;
+		}
 		if (ol > 1.0) ol = 1.0; else if (ol < -1.0) ol = -1.0;
 		if (orr > 1.0) orr = 1.0; else if (orr < -1.0) orr = -1.0;
 		outL[i] = (float)ol;
 		outR[i] = (float)orr;
 	}
+
 
 	if (k->shm) {
 		k->shm->level_db = (float)lin2db(blk_peak);
@@ -545,7 +720,13 @@ static void cleanup(LADSPA_Handle h)
 {
 	Cinegain *k = h;
 	if (k->shm) munmap(k->shm, sizeof(meter_shm));
-	if (k->shm_path[0]) unlink(k->shm_path);
+	if (k->shm_path[0]) {
+		/* only while the name still points at our file: a newer instance of this
+		 * process may have replaced it (small race window between stat and unlink) */
+		struct stat st;
+		if (stat(k->shm_path, &st) == 0 && st.st_dev == k->shm_dev && st.st_ino == k->shm_ino)
+			unlink(k->shm_path);
+	}
 	free(k);
 }
 
