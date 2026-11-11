@@ -259,6 +259,71 @@ class StageTests(unittest.TestCase):
         for w in range(0, 3 * RATE // 200, RATE // 1000):
             self.assertGreater(rms_db(back[w: w + RATE // 1000]), -20 - 3 - 6, w)
 
+    def _levels(self, out, win=RATE // 50, peak=False):
+        """(window end in s, dB) per 20 ms window: rms, or peak with peak=True."""
+        res = []
+        for w in range(0, len(out) - win + 1, win):
+            seg = out[w:w + win]
+            v = 20 * math.log10(max(max(abs(x) for x in seg), 1e-12)) if peak else rms_db(seg)
+            res.append(((w + win) / RATE, v))
+        return res
+
+    def _assert_rises_at_most_10db_per_s(self, before_db, levels, final_db, tol=1.0):
+        """Every window stays under before + 10 dB/s * t (+tol) and the target is reached."""
+        for t, v in levels:
+            self.assertLessEqual(v, before_db + 10.0 * t + tol, f"{v:.1f} dB after {t:.2f} s")
+        self.assertAlmostEqual(levels[-1][1], final_db, delta=tol)
+
+    def test_ceiling_rises_slowly_and_drops_at_once(self):
+        """#40: lim_ceiling_db up at <= 10 dB/s, down at once."""
+        x = self._sine(1000, -6, 2.0)  # +6 dBFS after makeup: always limited
+        base = dict(makeup_db=12, lim_ceiling_db=-12)
+        settled, up, down = self._run_steps([(2.0, {}, x), (2.0, {"lim_ceiling_db": 0}, x),
+                                             (0.5, {"lim_ceiling_db": -12}, x[:RATE // 2])], base=base)
+        before = self._levels(settled, peak=True)[-1][1]
+        self.assertAlmostEqual(before, -12.0, delta=0.5)
+        levels = self._levels(up, peak=True)
+        self._assert_rises_at_most_10db_per_s(before, levels, 0.0)
+        self.assertGreater(levels[len(levels) // 2][1], -6.5)  # 1 s in: about half way, not stuck
+        # down again: back at -12 dB right after the look-ahead and limiter attack
+        for _t, v in self._levels(down, peak=True)[1:]:
+            self.assertLess(v, -12.0 + 0.5)
+
+    def test_lower_ratio_and_higher_threshold_raise_the_level_slowly(self):
+        """#40: a looser compressor setting releases at <= 10 dB/s instead of at once."""
+        x = self._sine(1000, -10, 3.5)
+        base = dict(comp_thresh_db=-40, comp_ratio=6, comp_knee_db=0, comp_attack_ms=6,
+                    comp_release_ms=150)
+        for change in ({"comp_ratio": 1}, {"comp_thresh_db": 0}):
+            settled, after = self._run_steps([(1.0, {}, x[:RATE]), (3.5, change, x)], base=base)
+            before = self._levels(settled)[-1][1]
+            self.assertLess(before, -13.0 - 20.0, change)  # really compressed (-13 dB rms uncompressed)
+            self._assert_rises_at_most_10db_per_s(before, self._levels(after), -13.0)
+
+    def test_higher_ratio_compresses_at_once(self):
+        """#40: the opposite direction is not held back: more compression applies at once."""
+        x = self._sine(1000, -10, 1.0)
+        base = dict(comp_thresh_db=-40, comp_ratio=1, comp_knee_db=0, comp_attack_ms=6,
+                    comp_release_ms=150)
+        _, after = self._run_steps([(1.0, {}, x), (0.5, {"comp_ratio": 6}, x[:RATE // 2])], base=base)
+        _, steady = self._run_steps([(1.0, {}, x), (0.5, {}, x[:RATE // 2])], base=dict(base, comp_ratio=6))
+        # The detector is feed-forward and runs at 1:1 too, so once the 5 ms look-ahead
+        # line holds only new samples the output equals a filter that was at 6:1 all along.
+        la = RATE * 5 // 1000
+        worst = max(abs(u - v) for u, v in zip(after[la:], steady[la:]))
+        self.assertLess(worst, 1e-6, "more compression was not applied at once")
+
+    def test_higher_leveler_target_raises_the_level_slowly(self):
+        """#40: lev_target_db up glides at <= 10 dB/s even with the fastest leveler."""
+        x = self._sine(1000, -40, 4.0)
+        base = dict(leveler=1, lev_target_db=-40, lev_max_boost_db=36, lev_max_cut_db=36,
+                    lev_speed_s=0.2, lev_gate_db=-80)
+        settled, after = self._run_steps([(4.0, {}, x), (4.0, {"lev_target_db": -10}, x)],
+                                         base=base)
+        before = self._levels(settled)[-1][1]
+        self.assertAlmostEqual(before, -40.0, delta=1.0)
+        self._assert_rises_at_most_10db_per_s(before, self._levels(after), -10.0, tol=1.5)
+
     def test_meter_reports_the_remaining_ramp(self):
         with tempfile.TemporaryDirectory() as d:
             os.environ["CINEGAIN_METER_DIR"] = d

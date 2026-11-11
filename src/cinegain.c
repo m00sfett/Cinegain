@@ -244,10 +244,16 @@ typedef struct {
 /* Gains only rise this fast; a lower value applies at once (user decision 2026-11-11):
  * 0 -> +25 dB takes 2.5 s, so there is time to react, while turning down is instant. */
 #define RAMP_DB_PER_S 10.0
-enum { RG_INPUT, RG_BASS, RG_DIALOG, RG_TREBLE, RG_MID, RG_SIDE, RG_MAKEUP, RG_N };
+/* The limiter ceiling and the leveler target raise the level just like a gain (#40). */
+enum {
+	RG_INPUT, RG_BASS, RG_DIALOG, RG_TREBLE, RG_MID, RG_SIDE, RG_MAKEUP,
+	RG_CEILING, RG_LEV_TARGET, RG_N
+};
 static const int ramp_port[RG_N] = {
 	P_INPUT_DB, P_BASS_DB, P_DIALOG_DB, P_TREBLE_DB, P_MID_DB, P_SIDE_DB, P_MAKEUP_DB,
+	P_LIM_CEILING_DB, P_LEV_TARGET_DB,
 };
+static const float ramp_fallback[RG_N] = { 0, 0, 0, 0, 0, 0, 0, -1, -20 };
 
 typedef struct {
 	LADSPA_Data *port[P_COUNT];
@@ -270,6 +276,12 @@ typedef struct {
 
 	/* compressor */
 	double comp_env_db;  /* detector level in dB */
+	/* Extra gain reduction (<= 0 dB) that holds back the loudness a parameter change
+	 * would add at once (lower ratio, higher threshold, other knee); it fades out at
+	 * RAMP_DB_PER_S (#40). comp_thr/ratio/knee are the parameters of the last block. */
+	double comp_hold_db;
+	double comp_thr, comp_ratio, comp_knee;
+	int comp_valid;
 
 	/* limiter */
 	float delay[2][MAX_LOOKAHEAD];
@@ -381,6 +393,8 @@ static void activate(LADSPA_Handle h)
 	k->lev_gain_db = 0.0;
 	k->lev_peak = 0.0;
 	k->comp_env_db = -120.0;
+	k->comp_hold_db = 0.0;
+	k->comp_valid = 0;
 	k->eq_valid = 0;
 	k->ramp_valid = 0;
 	k->was_bypassed = 0;
@@ -427,7 +441,7 @@ static double update_ramps(Cinegain *k, unsigned long n)
 	const double step = RAMP_DB_PER_S * (double)n / k->rate;
 	double left = 0.0;
 	for (int g = 0; g < RG_N; g++) {
-		double want = ctl(k, ramp_port[g], 0);
+		double want = ctl(k, ramp_port[g], ramp_fallback[g]);
 		if (!k->ramp_valid) k->ramp[g] = want < 0.0 ? want : 0.0;
 		if (want <= k->ramp[g]) k->ramp[g] = want;
 		else if (want - k->ramp[g] <= step) k->ramp[g] = want;
@@ -493,7 +507,8 @@ static void run(LADSPA_Handle h, unsigned long n)
 	/* gains glide linearly across the block from their old to their new value */
 	const double in_from = k->ramp_valid ? db2lin(k->ramp[RG_INPUT]) : -1.0;
 	const double mk_from = k->ramp_valid ? db2lin(k->ramp[RG_MAKEUP]) : -1.0;
-	const double ramp_left = update_ramps(k, n);
+	const double ce_from = k->ramp_valid ? db2lin(k->ramp[RG_CEILING]) : -1.0;
+	double ramp_left = update_ramps(k, n);
 	update_eq(k);
 
 	const double rate = k->rate;
@@ -511,7 +526,7 @@ static void run(LADSPA_Handle h, unsigned long n)
 	if (!lev_on && fabs(k->lev_gain_db) < LEV_IDLE_DB) k->lev_gain_db = 0.0;
 	const int lev_idle = !lev_on && k->lev_gain_db == 0.0;
 #endif
-	const double lev_target = ctl(k, P_LEV_TARGET_DB, -20);
+	const double lev_target = k->ramp[RG_LEV_TARGET];
 	const double lev_boost = ctl(k, P_LEV_MAX_BOOST_DB, 12);
 	const double lev_cut = ctl(k, P_LEV_MAX_CUT_DB, 6);
 	const double lev_speed = ctl(k, P_LEV_SPEED_S, 4);
@@ -529,18 +544,39 @@ static void run(LADSPA_Handle h, unsigned long n)
 	const double knee = ctl(k, P_COMP_KNEE_DB, 6);
 	const double att = coef_ms(ctl(k, P_COMP_ATTACK_MS, 10), rate);
 	const double rel = coef_ms(ctl(k, P_COMP_RELEASE_MS, 250), rate);
+	/* A parameter change that lowers the gain reduction at the current detector level
+	 * is held back and released at RAMP_DB_PER_S; a change that raises it applies at
+	 * once (it first uses up any hold that is still pending). Same rule as
+	 * update_ramps, measured on the static curve at the block start. */
+	double hold_from = k->comp_hold_db;
+	if (k->comp_valid) {
+		const double e = k->comp_env_db;
+		hold_from -= comp_curve(e, thr, ratio, knee) - comp_curve(e, k->comp_thr, k->comp_ratio, k->comp_knee);
+		if (hold_from > 0.0) hold_from = 0.0;
+	}
+	k->comp_thr = thr;
+	k->comp_ratio = ratio;
+	k->comp_knee = knee;
+	k->comp_valid = 1;
+	double hold_to = hold_from + RAMP_DB_PER_S * (double)n / rate;
+	if (hold_to > 0.0) hold_to = 0.0;
+	k->comp_hold_db = hold_to;
+	const double hold_inc = n ? (hold_to - hold_from) / (double)n : 0.0;
+	if (-hold_to > ramp_left) ramp_left = -hold_to;
 #ifdef CINEGAIN_REFERENCE
 	const int comp_idle = 0;
 #else
 	/* ratio 1:1 gives exactly 0 dB gain reduction at every level: skip the curve and
 	 * its db2lin. The detector keeps running, so leaving 1:1 behaves exactly as before. */
-	const int comp_idle = ratio == 1.0;
+	const int comp_idle = ratio == 1.0 && hold_from == 0.0;
 #endif
 	const double makeup = db2lin(k->ramp[RG_MAKEUP]);
 	const double mk_start = mk_from < 0.0 ? makeup : mk_from;
 	const double mk_inc = n ? (makeup - mk_start) / (double)n : 0.0;
 
-	const double ceil_lin = db2lin(ctl(k, P_LIM_CEILING_DB, -1));
+	const double ce_to = db2lin(k->ramp[RG_CEILING]);
+	const double ce_start = ce_from < 0.0 ? ce_to : ce_from;
+	const double ce_inc = n ? (ce_to - ce_start) / (double)n : 0.0;
 	const double lim_rel = coef_ms(ctl(k, P_LIM_RELEASE_MS, 100), rate);
 	const double lim_att = coef_ms(LOOKAHEAD_MS / 3.0, rate);
 	const unsigned la = k->la_len;
@@ -602,7 +638,8 @@ static void run(LADSPA_Handle h, unsigned long n)
 		k->comp_env_db = c * k->comp_env_db + (1.0 - c) * xdb;
 		double cg = mk;
 		if (!comp_idle) {
-			double gr = comp_curve(k->comp_env_db, thr, ratio, knee);
+			double gr = comp_curve(k->comp_env_db, thr, ratio, knee)
+				+ (hold_from + hold_inc * (double)(i + 1));
 			if (gr < blk_gr) blk_gr = gr;
 			cg = db2lin(gr) * mk;
 		}
@@ -610,6 +647,7 @@ static void run(LADSPA_Handle h, unsigned long n)
 
 		/* look-ahead limiter: the gain needed for this sample is known
 		 * LOOKAHEAD_MS before it reaches the output */
+		const double ceil_lin = ce_start + ce_inc * (double)(i + 1);
 		double a = fabs(l) > fabs(r) ? fabs(l) : fabs(r);
 		float needed = a > ceil_lin ? (float)(ceil_lin / a) : 1.0f;
 		unsigned pos = k->la_pos;
