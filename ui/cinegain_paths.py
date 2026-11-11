@@ -21,6 +21,9 @@ DATA_DIR = os.environ.get("CINEGAIN_DATA_DIR") or os.path.expanduser("~/.local/s
 RUNTIME_DIR = os.environ.get("CINEGAIN_RUNTIME_DIR") or os.path.join(
     os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/cinegain-{os.getuid()}", "cinegain"
 )
+LOG_DIR = os.environ.get("CINEGAIN_LOG_DIR") or os.path.join(
+    os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"), "cinegain"
+)
 WIREPLUMBER_STREAM_PROPS = os.environ.get("CINEGAIN_WP_STREAM_PROPS") or os.path.expanduser(
     "~/.local/state/wireplumber/stream-properties"
 )
@@ -36,6 +39,8 @@ PRESETS_PATH = os.path.join(BASE_DIR, "presets", "presets.json")
 CONF_TEMPLATE_PATH = os.path.join(BASE_DIR, "config", "cinegain-standalone.conf")
 
 # Files that make up the complete user state (used by reset and backup).
+LOG_FILE = os.path.join(LOG_DIR, "cinegain.log")
+
 USER_STATE_FILES = (STATE_FILE, USER_PRESETS_FILE, CONFIG_FILE, APPS_FILE, APPS_V1_BACKUP)
 
 

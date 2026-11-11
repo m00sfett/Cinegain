@@ -10,6 +10,10 @@ import json
 import re
 import subprocess
 
+import cinegain_log
+
+log = cinegain_log.get("pulse")
+
 
 def is_cinegain_name(name):
     """True for sinks and nodes that belong to Cinegain itself (incl. the legacy name)."""
@@ -47,11 +51,27 @@ class Stream:
 
 
 def _run(args):
-    return subprocess.check_output(args, stderr=subprocess.DEVNULL, text=True)
+    try:
+        return subprocess.check_output(args, stderr=subprocess.PIPE, text=True)
+    except subprocess.CalledProcessError as e:
+        log.warning("%s failed (rc=%s): %s", " ".join(args), e.returncode, (e.stderr or "").strip())
+        raise
+    except OSError as e:
+        log.error("%s could not run: %s", args[0], e)
+        raise
 
 
 def _quiet(args):
-    subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        res = subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    except OSError as e:
+        log.error("%s could not run: %s", args[0], e)
+        return False
+    if res.returncode != 0:
+        log.warning("%s failed (rc=%s): %s", " ".join(args), res.returncode, (res.stderr or "").strip())
+        return False
+    log.debug("%s ok", " ".join(args))
+    return True
 
 
 def parse_streams_json(text):
@@ -162,7 +182,7 @@ class PulseControl:
         return "@DEFAULT_SINK@"
 
     def move(self, stream_index, sink_name):
-        _quiet(["pactl", "move-sink-input", str(stream_index), sink_name])
+        return _quiet(["pactl", "move-sink-input", str(stream_index), sink_name])
 
     def set_volume_100(self, stream_index):
         _quiet(["pactl", "set-sink-input-volume", str(stream_index), "100%"])
