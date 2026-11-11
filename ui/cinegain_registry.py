@@ -293,7 +293,7 @@ class AppRegistry:
         if mode is None:
             entry["params"], entry["mode"], entry["sets"] = None, None, None
         else:
-            sets = modes.clean_sets(sets)
+            sets = modes.clamp_sets(sets)
             entry["params"], entry["mode"], entry["sets"] = modes.effective(mode, sets), mode, sets
         if save:
             self.save()

@@ -84,3 +84,17 @@ def plugin_so_path():
         if os.path.exists(c):
             return c
     return "cinegain.so"
+
+
+def config_get(key, default=None):
+    """One value of config.json (language, view level, sidebar width, ...)."""
+    cfg = read_json(CONFIG_FILE, default={}) or {}
+    return cfg.get(key, default) if isinstance(cfg, dict) else default
+
+
+def config_set(**values):
+    """Merges values into config.json; other keys stay untouched."""
+    cfg = read_json(CONFIG_FILE, default={}) or {}
+    cfg = cfg if isinstance(cfg, dict) else {}
+    cfg.update(values)
+    write_json_atomic(CONFIG_FILE, cfg)

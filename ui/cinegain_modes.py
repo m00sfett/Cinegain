@@ -15,6 +15,7 @@ and state.json hold, so routing and older readers keep working.
 Both modes run in the same LADSPA plugin: switching only pushes parameters, no
 sink restart (see notes/spaeter-analysieren.md for the deferred analysis).
 """
+import cinegain_overdrive as overdrive
 import cinegain_paths as paths
 from cinegain_profiles import DEFAULT_PARAMS, full_params, normalize_params
 
@@ -29,12 +30,12 @@ DYNAMIC_ONLY_KEYS = ("lev_max_boost_db", "mid_db", "lev_target_db", "comp_thresh
                      "comp_ratio", "makeup_db", "lim_ceiling_db")
 DYNAMIC_KEYS = FIXED_KEYS + DYNAMIC_ONLY_KEYS
 
-# Limiter ceiling in fixed mode: a little headroom for inter-sample peaks at +25 dB.
+# Limiter ceiling in fixed mode: a little headroom for inter-sample peaks at high boosts.
 FIXED_CEILING_DB = -1.0
 LEVELER_DEFAULT_CUT_DB = 6.0
 
 # Factory presets that are plain volume steps belong to the fixed mode.
-FIXED_PRESETS = ("clean_linear", "boost_5db", "boost_10db", "boost_15db", "boost_20db", "boost_25db")
+FIXED_PRESETS = ("clean_linear", "boost_3db", "boost_6db", "boost_9db", "boost_12db", "boost_15db")
 
 
 def neutral_fixed():
@@ -65,11 +66,44 @@ def dynamic_effective(dynamic_set):
     return params
 
 
-def effective(mode, sets):
+def effective(mode, sets, overdrive_on=None):
+    """Parameters the filter gets; volume and make-up stay inside the current scale."""
     sets = sets or {}
     if mode == MODE_DYNAMIC:
-        return dynamic_effective(sets.get(MODE_DYNAMIC))
-    return fixed_effective(sets.get(MODE_FIXED))
+        params = dynamic_effective(sets.get(MODE_DYNAMIC))
+    else:
+        params = fixed_effective(sets.get(MODE_FIXED))
+    return overdrive.clamp_params(params, overdrive_on)
+
+
+def clamp_sets(sets, overdrive_on=None):
+    """Copy of both value sets with volume and make-up inside the current scale."""
+    sets = clean_sets(sets)
+    return {m: overdrive.clamp_params(v, overdrive_on) for m, v in sets.items()}
+
+
+def clamp_stored(registry, state_path=None, overdrive_on=False):
+    """
+    Caps every saved program setting and Standard to the current scale (after a
+    restart or when overdrive goes off). Returns the keys that changed
+    ("standard" for Standard).
+    """
+    changed = []
+    for entry in registry.entries():
+        key = entry["key"]
+        if entry.get("mode") in MODES and entry.get("sets"):
+            capped = clamp_sets(entry["sets"], overdrive_on)
+            if capped != clean_sets(entry["sets"]):
+                registry.set_setting(key, entry["mode"], capped, save=False)
+                changed.append(key)
+    if changed:
+        registry.save()
+    std = load_standard(state_path)
+    capped = clamp_sets(std["sets"], overdrive_on)
+    if capped != std["sets"]:
+        save_standard(std["mode"], capped, state_path=state_path)
+        changed.append("standard")
+    return changed
 
 
 def is_dynamic_params(flat):
@@ -145,7 +179,7 @@ def load_standard(state_path=None):
 
 def save_standard(mode, sets, preset=None, state_path=None):
     current = load_standard(state_path)
-    sets = clean_sets(sets)
+    sets = clamp_sets(sets)
     state = {"preset": current["preset"] if preset is None else preset, "mode": mode,
              "sets": sets, "params": effective(mode, sets)}
     paths.write_json_atomic(state_path or paths.STATE_FILE, state)

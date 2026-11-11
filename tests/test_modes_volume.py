@@ -161,7 +161,7 @@ class TestRouterVolume(tr.Base):
         self.stream(1, "Firefox", "firefox")
         self.stream(2, "Spotify", "spotify")
         self.router.tick()
-        self.registry.set_setting(firefox, "fixed", {"fixed": {"input_db": 20.0}})
+        self.registry.set_setting(firefox, "fixed", {"fixed": {"input_db": 15.0}})
         self.router.tick()
         self.router.tick()
         self.volumes.nodes[21] = NodeVolume(21, "Firefox", "firefox", "Firefox", 0.0625)       # -24 dB, own setting
@@ -172,7 +172,7 @@ class TestRouterVolume(tr.Base):
         report = self.router.full_volume_reset(
             standard=(lambda: std, lambda mode, sets: saved.update(mode=mode, sets=sets)))
         ff = self.registry.get(firefox)
-        self.assertEqual(ff["sets"]["fixed"]["input_db"], -4.1)  # 20 - 24.1, offsets what comes back
+        self.assertEqual(ff["sets"]["fixed"]["input_db"], -9.1)  # 15 - 24.1, offsets what comes back
         self.assertAlmostEqual(saved["sets"]["fixed"]["input_db"], -3.0, places=1)  # 3 - 6
         self.assertEqual((self.volumes.nodes[21].volume, self.volumes.nodes[23].volume), (1.0, 1.0))
         self.assertLess(self.volumes.nodes[22].volume, 1.0)  # follower: fades in, no jump
@@ -244,6 +244,119 @@ class TestUserSlots(unittest.TestCase):
         self.assertEqual((slots["user_1"]["mode"], slots["user_2"]["mode"]), ("fixed", "dynamic"))
         self.assertEqual(ProfileCatalog().template_setting("user_1"), ("fixed", {
             "input_db": 6.0, "dialog_db": 0.0, "bass_db": 0.0, "treble_db": 0.0, "side_db": 0.0}))
+
+
+class TestOverdriveScale(unittest.TestCase):
+    def tearDown(self):
+        import cinegain_overdrive as od
+        od.set_on(False)
+
+    def test_scale_caps_at_15_and_overdrive_reaches_40(self):
+        import cinegain_overdrive as od
+        od.set_on(False)
+        p = modes.effective("fixed", {"fixed": {"input_db": 30.0}})
+        self.assertEqual(p["input_db"], 15.0)
+        p = modes.effective("dynamic", {"dynamic": {"input_db": -40.0, "makeup_db": 30.0}})
+        self.assertEqual((p["input_db"], p["makeup_db"]), (-30.0, 15.0))
+        od.set_on(True)
+        self.assertEqual(modes.effective("fixed", {"fixed": {"input_db": 30.0}})["input_db"], 30.0)
+        self.assertEqual(modes.effective("fixed", {"fixed": {"input_db": 55.0}})["input_db"], 40.0)
+
+    def test_overdrive_off_caps_saved_values(self):
+        import cinegain_overdrive as od
+        reg = tr.AppRegistry()
+        reg.observe("Firefox", "firefox")
+        od.set_on(True)
+        reg.set_setting(tr.FIREFOX, "fixed", {"fixed": {"input_db": 28.0}})
+        modes.save_standard("fixed", {"fixed": {"input_db": 22.0}})
+        self.assertEqual(reg.get(tr.FIREFOX)["sets"]["fixed"]["input_db"], 28.0)
+        od.set_on(False)
+        changed = modes.clamp_stored(reg, overdrive_on=False)
+        self.assertEqual(set(changed), {tr.FIREFOX, "standard"})
+        self.assertEqual(reg.get(tr.FIREFOX)["sets"]["fixed"]["input_db"], 15.0)
+        self.assertEqual(reg.get(tr.FIREFOX)["params"]["input_db"], 15.0)
+        self.assertEqual(modes.load_standard()["sets"]["fixed"]["input_db"], 15.0)
+        # values inside the scale stay untouched (the other side of the invariant)
+        reg.set_setting(tr.FIREFOX, "fixed", {"fixed": {"input_db": -25.0}})
+        self.assertEqual(modes.clamp_stored(reg, overdrive_on=False), [])
+        self.assertEqual(reg.get(tr.FIREFOX)["sets"]["fixed"]["input_db"], -25.0)
+
+    def test_boost_presets_cover_the_normal_scale(self):
+        from cinegain_profiles import ProfileCatalog
+        factory = ProfileCatalog().factory()
+        steps = [factory[f"boost_{n}db"]["params"]["input_db"] for n in (3, 6, 9, 12, 15)]
+        self.assertEqual(steps, [3.0, 6.0, 9.0, 12.0, 15.0])
+        self.assertTrue(all(p["params"].get("input_db", 0) <= 15.0 for p in factory.values()))
+
+
+class TestAnalysis(unittest.TestCase):
+    DUMP = [
+        {"id": 5, "type": "PipeWire:Interface:Node", "info": {
+            "props": {"media.class": "Stream/Output/Audio", "application.name": "Google Chrome",
+                      "application.process.binary": "chrome", "node.name": "Google Chrome"},
+            "params": {"Props": [{"volume": 0.25, "mute": False, "channelVolumes": [0.5, 0.4]}]}}},
+        {"id": 6, "type": "PipeWire:Interface:Node", "info": {
+            "props": {"media.class": "Audio/Sink", "node.name": "alsa_output.pci", "node.description": "Soundcard"},
+            "params": {"Props": [{"volume": 1.0, "mute": True, "channelVolumes": [1.0, 1.0]}]}}},
+        {"id": 7, "type": "PipeWire:Interface:Node", "info": {
+            "props": {"media.class": "Audio/Sink", "node.name": "cinegain_sink", "node.description": "Cinegain"},
+            "params": {"Props": [{"volume": 1.0, "channelVolumes": [1.0, 1.0]}]}}},
+        {"id": 8, "type": "PipeWire:Interface:Node", "info": {
+            "props": {"media.class": "Audio/Source", "node.name": "mic"},
+            "params": {"Props": [{"volume": 0.1}]}}},
+    ]
+
+    def test_rows_kinds_and_editability(self):
+        import cinegain_volume as vol
+        rows = vol.inspect_nodes(self.DUMP, {"Google Chrome": {"volume": 0.25, "mute": False}})
+        self.assertEqual([r["id"] for r in rows], [5, 7, 6])  # streams, Cinegain, hardware; no inputs
+        chrome, cine, hw = rows
+        self.assertEqual((chrome["kind"], chrome["editable"], chrome["stored"], chrome["normal"]),
+                         ("stream", True, 0.25, 0.5))
+        self.assertEqual((cine["kind"], cine["editable"]), ("cinegain_sink", True))
+        self.assertEqual((hw["kind"], hw["editable"], hw["mute"]), ("hardware", False, True))
+
+    def test_read_stored_unescapes_names(self):
+        import cinegain_volume as vol
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write("[stream-properties]\n"
+                    'Output/Audio:application.name:Google\\sChrome={"volume":0.003906, "mute":false}\n'
+                    'Input/Audio:application.name:Mic={"volume":0.5}\n')
+        try:
+            self.assertEqual(vol.read_stored(f.name), {"Google Chrome": {"volume": 0.003906, "mute": False}})
+        finally:
+            os.unlink(f.name)
+
+    def test_history_parses_log_events(self):
+        import time as _t
+        import cinegain_volume as vol
+        now = _t.time()
+        stamp = _t.strftime("%Y-%m-%d %H:%M:%S", _t.localtime(now - 60))
+        old = _t.strftime("%Y-%m-%d %H:%M:%S", _t.localtime(now - 9 * 86400))
+        lines = [
+            f"{old}.001 1 gui WARNING cinegain.volume: hidden volume of node 3 (chrome, Chrome) is 0.1 = -20.0 dB",
+            f"{stamp}.001 1 gui WARNING cinegain.volume: hidden volume of node 3 (chrome, Chrome) is 0.003906 = -48.2 dB (was 0.0 dB)",
+            f"{stamp}.002 1 gui INFO  cinegain.volume: fading node 3 (chrome) from -48.2 dB back to 0 dB over 3 s",
+            f"{stamp}.003 1 cli INFO  cinegain.volume: hidden volume of node 9 (Spotify) set to 0.500000 = -6.0 dB by cli",
+        ]
+        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".log") as f:
+            f.write("\n".join(lines) + "\n")
+        try:
+            ev = vol.history(f.name, now=now)
+            self.assertEqual(sorted(e["kind"] for e in ev), ["auto", "lowered", "set"])  # 9-day-old one dropped
+            low = [e for e in ev if e["kind"] == "lowered"][0]
+            self.assertEqual((low["key"], low["db"], low["was_db"]), ("chrome", -48.2, 0.0))
+            self.assertEqual(len(vol.history(f.name, now=now, key="chrome")), 2)
+        finally:
+            os.unlink(f.name)
+
+    def test_guard_without_auto_only_reports(self):
+        import cinegain_volume as vol
+        nodes = [vol.NodeVolume(1, "Firefox", "firefox", "Firefox", 0.1)]
+        g = vol.VolumeGuard(scanner=lambda: nodes, setter=lambda *a: True, clock=lambda: 0.0, auto=False)
+        hidden = g.update(auto_keys={nodes[0].key})
+        self.assertEqual(g.fades, {})
+        self.assertIn(nodes[0].key, hidden)
 
 
 if __name__ == "__main__":

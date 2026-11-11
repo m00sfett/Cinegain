@@ -154,7 +154,8 @@ class ProfileCatalog:
             mode = self.user_slots()[template_id]["mode"]
         else:
             mode = modes.preset_mode(template_id)
-        return mode, modes.mode_values(mode, params)
+        import cinegain_overdrive as overdrive
+        return mode, overdrive.clamp_params(modes.mode_values(mode, params))
 
     def name(self, template_id):
         if template_id == PROFILE_STANDARD:

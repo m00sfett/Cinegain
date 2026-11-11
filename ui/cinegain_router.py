@@ -13,6 +13,7 @@ so steady state costs two pactl calls per tick.
 import time
 
 import cinegain_log
+import cinegain_overdrive as overdrive
 from cinegain_profiles import (
     PROFILE_STANDARD,
     STANDARD_SINK,
@@ -309,7 +310,7 @@ class Router:
 
         To avoid a sudden blast the gain a node gets back is first taken off the
         Cinegain setting that owns it (Q13a): a program's own setting, or Standard
-        for Standard's output stream (min. -12 dB). Programs that follow Standard
+        for Standard's output stream (min. -30 dB). Programs that follow Standard
         are faded in instead, because lowering Standard would affect all of them.
         `standard` = (load, save) callables for Standard's setting.
         `only` = one program key: reset just that program's streams (and its own
@@ -356,7 +357,7 @@ class Router:
                 entry = self.registry.get(owner)
                 mode, sets = entry["mode"], modes.clean_sets(entry["sets"])
             before = sets[mode]["input_db"]
-            sets[mode]["input_db"] = round(max(-12.0, before - db), 1)  # slider resolution
+            sets[mode]["input_db"] = round(max(overdrive.MIN_DB, before - db), 1)  # slider resolution
             if owner == PROFILE_STANDARD:
                 standard[1](mode, sets)
             else:
