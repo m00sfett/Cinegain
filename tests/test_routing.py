@@ -75,6 +75,14 @@ class FakePulse:
                 s.sink = sid
         self.moves.append((str(index), sink))
 
+    def set_volume_pct(self, index, pct):
+        self.volume_sets = getattr(self, "volume_sets", [])
+        self.volume_sets.append((str(index), pct))
+        for s in self.streams:
+            if s.index == str(index):
+                s.volume_pct = s.volume_min_pct = int(round(pct))
+        return True
+
     def set_volume_100(self, index):
         self.volume_resets.append(str(index))
         for s in self.streams:

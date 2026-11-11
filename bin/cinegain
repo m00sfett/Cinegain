@@ -444,7 +444,9 @@ def cmd_volume_reset(args):
               f"{c['input_db'][0]:+.1f} -> {c['input_db'][1]:+.1f} dB")
     for f in report["faded"]:
         print(f"  {f['target']}: faded in from {f['hidden_db']:+.1f} dB")
-    print(f"Normal stream volumes set to 100 %: {report['volumes_100']}")
+    print(f"Normal stream volumes faded to 100 %: {report['volumes_100']}")
+    if report.get("muted_left"):
+        print(f"Muted streams left muted: {report['muted_left']} (unmute them in the mixer)")
     if report["backup"]:
         print(f"Saved WirePlumber volumes cleaned: {report['file_entries']} (backup {report['backup']})")
     return 0

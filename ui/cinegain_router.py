@@ -313,30 +313,61 @@ class Router:
             self._meter_state[pid] = (seq, last_t)
 
     # -- full volume reset ----------------------------------------------------
+    def _compensation_owner(self, n, streams_by_key, sink_ids, profile_keys, standard):
+        """
+        The Cinegain setting whose gain can offset what node n gets back, or None (#29b).
+        Only if the node's audio really passes that filter: never in soft off (bypass
+        ignores the gain), a program's streams must all sit on the program's own sink,
+        and Standard's output needs the load/save callables.
+        """
+        if self.bypass:
+            return None
+        if n.is_cinegain_output:
+            profile = n.node_name[len("cinegain_output"):].lstrip("_") or PROFILE_STANDARD
+            if profile == PROFILE_STANDARD:
+                return PROFILE_STANDARD if standard is not None else None
+            return profile_keys.get(profile)
+        entry = self.registry.get(n.key)
+        if not entry or entry["params"] is None or not entry["enabled"]:
+            return None
+        own = sink_name(profile_id_for(n.key))
+        sts = streams_by_key.get(n.key) or []
+        if sts and all(sink_ids.get(st.sink, st.sink) == own for st in sts):
+            return n.key
+        return None
+
     def full_volume_reset(self, standard=None, clean_file=True, only=None):
         """
         "Full volume reset": every secretly lowered playback stream back to 0 dB,
-        normal stream volumes to 100 %, mute off, saved WirePlumber volumes cleaned.
-        Hardware and sink volumes stay untouched.
-
-        To avoid a sudden blast the gain a node gets back is first taken off the
-        Cinegain setting that owns it (Q13a): a program's own setting, or Standard
-        for Standard's output stream (min. -30 dB). Programs that follow Standard
-        are faded in instead, because lowering Standard would affect all of them.
+        normal stream volumes to 100 %, saved WirePlumber volumes cleaned. Nothing
+        rises faster than 10 dB/s (#29): what Cinegain can offset comes back at once
+        while the owning setting drops by the same amount (Q13a, min. -30 dB), and
+        everything else fades in: the rest above that floor, programs that follow
+        Standard, streams that do not pass their program's filter, the mixer
+        volumes. Mute is left as it is (a mixer shows it). Hardware sinks stay
+        untouched.
         `standard` = (load, save) callables for Standard's setting.
         `only` = one program key: reset just that program's streams (and its own
         Cinegain output), leave everything else and the saved file alone.
         Returns a report dict.
         """
         import cinegain_modes as modes
-        from cinegain_volume import HIDDEN_EPS, VolumeGuard, clean_stream_properties
+        from cinegain_volume import HIDDEN_EPS, VolumeGuard, clean_stream_properties, from_db
 
         guard = self.guard or VolumeGuard()
+        now = self.clock()
         nodes = guard.scanner()
+        sink_ids = self.pulse.list_sinks()
+        streams = [st for st in self.pulse.list_streams() if not st.is_own]
+        streams_by_key = {}
+        for st in streams:
+            streams_by_key.setdefault(make_key(st.app_name or st.node_name, st.binary), []).append(st)
         profile_keys = {profile_id_for(k): k for k in self.registry.apps}
-        report = {"compensated": [], "faded": [], "volumes_100": 0, "file_entries": 0, "backup": None}
-        compensate = {}  # key or PROFILE_STANDARD -> dB to take off
-        instant, fade = [], []
+        report = {"compensated": [], "faded": [], "volumes_100": 0, "muted_left": 0,
+                  "file_entries": 0, "backup": None}
+        wanted = {}   # owner -> dB the most lowered of its nodes gets back
+        owners = {}   # node id -> owner
+        lowered = []
         only_profile = profile_id_for(only) if only else None
         for n in nodes:
             if n.volume >= HIDDEN_EPS:
@@ -344,56 +375,73 @@ class Router:
             if only and n.key != only and not (
                     n.is_cinegain_output and n.node_name.endswith(only_profile)):
                 continue
-            owner = None
-            if n.is_cinegain_output:
-                profile = n.node_name[len("cinegain_output"):].lstrip("_") or PROFILE_STANDARD
-                owner = PROFILE_STANDARD if profile == PROFILE_STANDARD else profile_keys.get(profile)
-            else:
-                entry = self.registry.get(n.key)
-                if entry and entry["params"] is not None:
-                    owner = n.key
+            lowered.append(n)
+            owner = self._compensation_owner(n, streams_by_key, sink_ids, profile_keys, standard)
             if owner is not None:
-                compensate[owner] = max(compensate.get(owner, 0.0), -n.db)
-                instant.append(n)
-            else:
-                fade.append(n)
+                owners[n.id] = owner
+                wanted[owner] = max(wanted.get(owner, 0.0), -n.db)
 
-        for owner, db in compensate.items():
+        offset = {}   # owner -> dB actually taken off (limited by the -30 dB floor)
+        for owner, db in wanted.items():
             if owner == PROFILE_STANDARD:
-                if standard is None:
-                    continue
                 state = standard[0]()
                 mode, sets = state["mode"], modes.clean_sets(state["sets"])
             else:
                 entry = self.registry.get(owner)
                 mode, sets = entry["mode"], modes.clean_sets(entry["sets"])
             before = sets[mode]["input_db"]
-            sets[mode]["input_db"] = round(max(overdrive.MIN_DB, before - db), 1)  # slider resolution
+            after = round(max(overdrive.MIN_DB, before - db), 1)  # slider resolution
+            if after >= before:
+                continue  # already at the floor: nothing to offset, everything fades
+            sets[mode]["input_db"] = after
             if owner == PROFILE_STANDARD:
                 standard[1](mode, sets)
             else:
                 self.registry.set_setting(owner, mode, sets)
                 self.push_program_params(owner)
+            offset[owner] = before - after
             report["compensated"].append({"target": owner, "hidden_db": round(-db, 1),
-                                          "input_db": [before, sets[mode]["input_db"]]})
+                                          "input_db": [before, after]})
             log.info("full reset: %s input %.1f -> %.1f dB to offset %.1f dB coming back",
-                     owner, before, sets[mode]["input_db"], db)
-        for n in instant:
-            guard.reset_now(n.id)
-        now = self.clock()
-        for n in fade:
-            guard.fade_hidden(n.id, n.volume, 1.0, now)
-            report["faded"].append({"target": n.key, "hidden_db": round(n.db, 1)})
-            log.info("full reset: fading %s from %.1f dB over %.1f s", n.key, n.db, guard.fades[n.id].duration)
-        if self.guard is None:
-            guard.run_fades()  # one-shot use (CLI): run the fades here
-        for st in self.pulse.list_streams():
+                     owner, before, after, db)
+
+        for n in lowered:
+            back = offset.get(owners.get(n.id), 0.0)
+            start_db = min(0.0, n.db + back)
+            if start_db > -0.05:
+                guard.reset_now(n.id)  # fully offset by the lower Cinegain gain
+                continue
+            # The offset part comes back at once (the filter dropped by as much), the rest fades.
+            guard.fade_hidden(n.id, from_db(start_db), 1.0, now, apply_start=back > 0)
+            report["faded"].append({"target": n.key, "hidden_db": round(n.db, 1), "from_db": round(start_db, 1)})
+            log.info("full reset: fading %s from %.1f dB (hidden %.1f dB, offset %.1f dB) over %.1f s",
+                     n.key, start_db, n.db, back, guard.fades[n.id].duration if n.id in guard.fades else 0.0)
+
+        for st in streams:
             if only and make_key(st.app_name or st.node_name, st.binary) != only:
                 continue
-            if not st.is_own and (st.volume_pct != 100 or st.muted):
-                self.pulse.set_volume_100(st.index)
-                report["volumes_100"] += 1
+            if st.muted:
+                report["muted_left"] += 1  # mute stays: unmuting is a jump to full level (#29c)
+            if st.volume_min_pct >= 100:
+                continue
+            self._fade_mixer(guard, st, now)
+            report["volumes_100"] += 1
+
+        if self.guard is None:
+            guard.run_fades()  # one-shot use (CLI): run the fades here
         if clean_file and not only:
             report["file_entries"], report["backup"] = clean_stream_properties()
         log.warning("full volume reset done: %s", report)
         return report
+
+    def _fade_mixer(self, guard, st, now):
+        """Fades a stream's mixer volume (all channels) to 100 % from its quietest channel."""
+        from cinegain_volume import mixer_db, mixer_pct
+
+        def apply(db, final, index=st.index):
+            return self.pulse.set_volume_pct(index, 100.0 if final else mixer_pct(db))
+
+        fade = guard.add_fade(("mixer", st.index), mixer_db(st.volume_min_pct), 0.0, apply, now,
+                              what=f"mixer of stream #{st.index}")
+        log.info("full reset: fading mixer of stream #%s (%s) from %d %% to 100 %% over %.1f s",
+                 st.index, st.display_name, st.volume_min_pct, fade.duration)

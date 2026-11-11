@@ -44,6 +44,15 @@ def from_db(db):
     return 10.0 ** (db / 20.0)
 
 
+def mixer_db(pct):
+    """dB of a pulse mixer volume in % (cubic scale, as pavucontrol shows it)."""
+    return 60.0 * math.log10(pct / 100.0) if pct > 0 else FLOOR_DB
+
+
+def mixer_pct(db):
+    return 100.0 * 10.0 ** (db / 60.0)
+
+
 def rise_rate(delta_db):
     """dB/s of a fade over delta_db: spread over at least FADE_S, at most MAX_RISE_DB_S."""
     return min(MAX_RISE_DB_S, max(float(delta_db), 1e-6) / FADE_S)

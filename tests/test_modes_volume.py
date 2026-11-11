@@ -269,6 +269,79 @@ class TestRouterVolume(tr.Base):
         self.assertTrue(all(v <= quiet for _, n, v in [e for e in events if e[0] == "set"] if n == 42))
         self.assertNotIn(42, self.router.guard.fades)
 
+    # -- #29: full reset ---------------------------------------------------------
+    def _own_firefox_on_its_sink(self, input_db):
+        firefox = tr.FIREFOX
+        self.stream(1, "Firefox", "firefox")
+        self.router.tick()
+        self.registry.set_setting(firefox, "fixed", {"fixed": {"input_db": input_db}})
+        self.router.tick()
+        self.router.tick()
+        self.assertEqual(self.sink_of(self.pulse.streams[0]), self.own_sink(firefox))
+        return firefox
+
+    def _writes(self, node_id):
+        return [v for n, v in self.volumes.sets if n == node_id]
+
+    def test_full_reset_offsets_down_to_the_floor_and_fades_the_rest(self):
+        """#29a: -48 dB back with the gain at -20 dB: 10 dB offset (floor -30 dB), 38 dB fade in."""
+        firefox = self._own_firefox_on_its_sink(-20.0)
+        self.volumes.nodes[21] = NodeVolume(21, "Firefox", "firefox", "Firefox", 10 ** (-48 / 20))
+        report = self.router.full_volume_reset()
+        self.assertEqual(self.registry.get(firefox)["sets"]["fixed"]["input_db"], -30.0)
+        first = self._writes(21)[0]
+        self.assertAlmostEqual(to_db(first), -38.0, places=1)    # exactly the offset comes back at once
+        self.assertEqual([f["from_db"] for f in report["faded"]], [-38.0])
+        t0 = self.clock.t
+        drain(self.router.guard, self.clock)
+        self.assertEqual(self.volumes.nodes[21].volume, 1.0)
+        self.assertLessEqual(rises(self._writes(21)[1:], first), MAX_STEP_DB + 1e-3)  # writes are rounded
+        self.assertGreaterEqual(self.clock.t - t0, 38 / MAX_RISE_DB_S - 0.11)
+
+    def test_full_reset_only_offsets_streams_that_pass_the_filter(self):
+        """#29b: own setting, but the stream plays on the hardware (or the filter is in soft off)."""
+        firefox = tr.FIREFOX
+        self.stream(1, "Firefox", "firefox")       # stays on the hardware: no tick routes it
+        self.registry.observe("Firefox", "firefox")
+        self.registry.set_setting(firefox, "fixed", {"fixed": {"input_db": 15.0}})
+        self.volumes.nodes[21] = NodeVolume(21, "Firefox", "firefox", "Firefox", 10 ** (-24 / 20))
+        report = self.router.full_volume_reset()
+        self.assertEqual(report["compensated"], [])
+        self.assertEqual(self.registry.get(firefox)["sets"]["fixed"]["input_db"], 15.0)  # not lowered for good
+        self.assertEqual(self._writes(21), [])                     # nothing jumps ...
+        self.assertLess(to_db(self.router.guard.known_volume(21)), -23.9)  # ... it fades from -24 dB
+        self.router.guard.fades.clear()
+        # on its sink, but every Cinegain sink passes audio untouched: the gain offsets nothing
+        self.router.tick()
+        self.router.tick()
+        self.router.bypass = True
+        self.volumes.nodes[21].volume = 10 ** (-24 / 20)
+        self.volumes.sets.clear()
+        report = self.router.full_volume_reset()
+        self.assertEqual(report["compensated"], [])
+        self.assertLess(to_db(self.router.guard.known_volume(21)), -22.9)
+
+    def test_full_reset_without_standard_callables_fades_standard_output(self):
+        self.volumes.nodes[23] = NodeVolume(23, "", "", "cinegain_output", 0.25)  # -12 dB
+        self.router.full_volume_reset()
+        self.assertEqual(self._writes(23), [])                     # no jump of +12 dB
+        self.assertIn(23, self.router.guard.fades)
+
+    def test_full_reset_fades_mixer_volumes_and_leaves_mute_alone(self):
+        """#29c: 20 % (cubic, -42 dB) jumped to 100 % and mute went off at once."""
+        from cinegain_volume import mixer_db
+        a = self.stream(1, "Spotify", "spotify", volume_pct=40, volume_min_pct=20)
+        b = self.stream(2, "Discord", "discord", volume_pct=50, muted=True)
+        report = self.router.full_volume_reset()
+        self.assertEqual((report["volumes_100"], report["muted_left"]), (2, 1))
+        self.assertEqual(self.pulse.volume_resets, [])            # no set_volume_100: no jump, no unmute
+        drain(self.router.guard, self.clock)
+        self.assertEqual((a.volume_pct, b.volume_pct, b.muted), (100, 100, True))
+        series = [p for i, p in self.pulse.volume_sets if i == "1"]
+        dbs = [mixer_db(20)] + [mixer_db(p) for p in series]
+        self.assertLessEqual(max(y - x for x, y in zip(dbs, dbs[1:])), MAX_STEP_DB + 1e-6)
+        self.assertGreaterEqual(len(series), 40)                  # ~4.2 s at 100 ms, from the quiet channel
+
     def test_reset_of_one_program_leaves_others(self):
         self.stream(1, "Chromium", "ChatGPT")
         self.stream(2, "Discord", "discord")
