@@ -55,6 +55,9 @@ ICON_TUNE = (
 ICON_CHEVRON_RIGHT = "M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"
 ICON_EXPAND_MORE = "M16.59 8.59L12 13.17 7.41 8.59 6 10l6 6 6-6z"
 
+SIDEBAR_MIN_W = 200
+SIDEBAR_DEFAULT_W = 280
+
 SIDEBAR_STYLE = f"""
 QFrame#program_row {{
     background-color: #14100D;
@@ -71,8 +74,8 @@ QLabel#program_name[selected="true"] {{ color: {YELLOW}; }}
 QLabel#program_name[idle="true"] {{ color: #B8AC9E; font-weight: 600; }}
 QLabel#program_sub {{ font-size: 11px; color: {IDLE}; background: transparent; }}
 QLabel#program_sub[own="true"] {{ color: {INK_MUTED}; }}
-QLabel#beta_pill {{ background: #3D2C07; color: {YELLOW}; border: 1px solid #E0B83A; border-radius: 4px;
-    padding: 0px 4px; font-size: 10px; font-weight: 800; }}
+QLabel#beta_pill {{ background: transparent; color: #E0B83A; border: 1px dashed #E0B83A; border-radius: 4px;
+    padding: 0px 5px; font-size: 10px; font-weight: 700; }}
 QLabel#hidden_badge {{ background: #2A0E0E; color: {WAITING}; border: 1px solid #A86B4A; border-radius: 4px;
     padding: 0px 4px; font-family: "Fira Mono", monospace; font-size: 10px; font-weight: 800; }}
 QPushButton#volume_badge {{
@@ -262,7 +265,8 @@ class ProgramRow(QFrame):
         self.sub.setObjectName("program_sub")
         # Second line: setting, then the dynamic (beta) marker and the
         # secretly-lowered-volume warning, so the name keeps its full width.
-        self.beta = QLabel("β")
+        # Beta features wear a dashed outline (0.5.0) instead of a cryptic "β".
+        self.beta = QLabel(t("mode_dynamic"))
         self.beta.setObjectName("beta_pill")
         self.beta.hide()
         self.hidden = QLabel()
@@ -324,7 +328,8 @@ class ProgramRow(QFrame):
 
     def _show_mode(self, mode):
         self.beta.setVisible(mode == "dynamic")
-        self.beta.setToolTip(t("mode_dynamic_tip"))
+        self.beta.setText(t("mode_dynamic"))
+        self.beta.setToolTip(f"{t('beta_tip')} · {t('mode_dynamic_tip')}")
 
     def _show_hidden(self, db):
         if db is None:
@@ -401,8 +406,7 @@ class ProgramSidebar(QGroupBox):
         self.is_active = False
         self.standard_mode = None
         self.setStyleSheet(SIDEBAR_STYLE)
-        self.setMinimumWidth(190)
-        self.setMaximumWidth(300)
+        self.setMinimumWidth(SIDEBAR_MIN_W)  # width is set by the splitter (resizable since 0.5.0)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(8, 12, 8, 8)
@@ -498,7 +502,8 @@ class ProgramSidebar(QGroupBox):
         self.empty.setText(t("apps_empty"))
         for row in self.rows.values():
             row.switch.setToolTip(t("prog_switch_tip"))
-            row.beta.setToolTip(t("mode_dynamic_tip"))
+            row.beta.setText(t("mode_dynamic"))
+            row.beta.setToolTip(f"{t('beta_tip')} · {t('mode_dynamic_tip')}")
         self.standard_row.update_standard(self.selected is STANDARD, getattr(self, "standard_mode", None))
 
     # -- selection ------------------------------------------------------------

@@ -15,7 +15,7 @@ import subprocess
 import sys
 import time
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if os.path.exists(os.path.join(SCRIPT_DIR, "..", "share", "cinegain")):
@@ -36,6 +36,7 @@ sys.path.insert(0, os.path.join(os.path.abspath(BASE_DIR), "ui"))
 import cinegain_log  # noqa: E402
 from cinegain_lock import RouterLock  # noqa: E402
 import cinegain_modes as modes  # noqa: E402
+import cinegain_overdrive as overdrive  # noqa: E402
 import cinegain_paths as paths  # noqa: E402
 from cinegain_profiles import (  # noqa: E402
     DEFAULT_PARAMS,
@@ -63,11 +64,11 @@ STANDARD_DESCRIPTION = "Cinegain (Filmton Dialog & Dynamik)"
 PRESET_ALIASES = {
     "neutral": "clean_linear",
     "0db": "clean_linear",
-    "+5db": "boost_5db",
-    "+10db": "boost_10db",
+    "+3db": "boost_3db",
+    "+6db": "boost_6db",
+    "+9db": "boost_9db",
+    "+12db": "boost_12db",
     "+15db": "boost_15db",
-    "+20db": "boost_20db",
-    "+25db": "boost_25db",
     "movie_boost": "dialog_boost",
 }
 
@@ -213,6 +214,7 @@ def cmd_status(args):
             "mode": saved["mode"],
             "sets": saved["sets"],
             "params": params,
+            "overdrive": overdrive.is_on(),
             "profile_sinks": running_profiles,
             "version": __version__,
         }))
@@ -224,6 +226,7 @@ def cmd_status(args):
         print("Cinegain status: INACTIVE")
         print("\nSaved Parameters (will be applied on start):")
     print(f"  mode               = {saved['mode']}")
+    print(f"  overdrive          = {'ON (up to +40 dB)' if overdrive.is_on() else 'off (up to +15 dB)'}")
     for k, v in sorted(params.items()):
         print(f"  {k:18} = {v}")
     if running_profiles:
@@ -298,7 +301,9 @@ def cmd_watch(args):
         return 1
     from cinegain_volume import VolumeGuard
     router = make_router()
-    router.guard = VolumeGuard()
+    if overdrive.set_on(False):  # overdrive never survives a restart of the router owner
+        _cap_to_normal_scale(router)
+    router.guard = VolumeGuard(auto=bool(paths.config_get("volume_auto_reset", True)))
     print("Watching audio streams (Ctrl+C to stop)...")
     try:
         while True:
@@ -445,6 +450,88 @@ def cmd_volume_reset(args):
     return 0
 
 
+OVERDRIVE_WARNING = """\
+Overdrive raises the volume scale from +15 dB to +40 dB.
+  - Above about +25 dB the limiter squeezes peaks hard: audible distortion.
+  - Loud levels can damage hearing and speakers. Turn the system volume down first.
+  - Overdrive ends when Cinegain restarts; values above +15 dB then drop to +15 dB.
+Run again with --confirm to switch it on."""
+
+
+def _cap_to_normal_scale(router=None):
+    """After overdrive goes off: cap saved values to +15 dB and push them at once."""
+    router = router or make_router()
+    changed = modes.clamp_stored(router.registry, overdrive_on=False)
+    if "standard" in changed:
+        set_params_batch(get_cinegain_node_id(), {})
+    for key in changed:
+        if key != "standard":
+            router.push_program_params(key)
+    return changed
+
+
+def cmd_overdrive(args):
+    if args.action == "on":
+        if not args.confirm:
+            print(OVERDRIVE_WARNING, file=sys.stderr)
+            return 2
+        overdrive.set_on(True)
+        print("Overdrive ON: volume and make-up reach up to +40 dB until Cinegain restarts.")
+        return 0
+    if args.action == "off":
+        overdrive.set_on(False)
+        changed = _cap_to_normal_scale()
+        print("Overdrive off: scale up to +15 dB" + (f" (capped: {', '.join(changed)})" if changed else "."))
+        return 0
+    print("Overdrive: " + ("ON (up to +40 dB)" if overdrive.is_on() else "off (up to +15 dB)"))
+    return 0
+
+
+def _resolve_node(rows, needle):
+    if str(needle).isdigit():
+        hits = [r for r in rows if str(r["id"]) == str(needle)]
+    else:
+        n = str(needle).lower()
+        hits = [r for r in rows if n in r["label"].lower() or n == r["key"] or n in r["node_name"].lower()]
+    if len(hits) != 1:
+        print(("Ambiguous node, candidates: " + ", ".join(f"{r['id']} {r['label']}" for r in hits))
+              if hits else f"Unknown node '{needle}'. See 'cinegain volume list'.", file=sys.stderr)
+        return None
+    return hits[0]
+
+
+def cmd_volume(args):
+    """Hidden stream volumes: list, set (0-100 %) or reset (same as volume-reset)."""
+    import cinegain_volume as vol
+    if args.action == "reset":
+        args.app = args.target
+        return cmd_volume_reset(args)
+    rows = vol.scan_analysis()
+    if args.action == "set":
+        if args.target is None or args.percent is None:
+            print("Usage: cinegain volume set <node id | program> <percent 0-100>", file=sys.stderr)
+            return 1
+        row = _resolve_node(rows, args.target)
+        if row is None:
+            return 1
+        if not row["editable"]:
+            print(f"{row['label']} is a hardware output; Cinegain leaves it untouched.", file=sys.stderr)
+            return 1
+        ok = vol.set_hidden(row["id"], args.percent / 100.0, row["label"], who="cli")
+        print(f"{row['label']}: hidden volume {max(0.0, min(100.0, args.percent)):.1f} %" if ok
+              else f"Setting the hidden volume of {row['label']} failed.")
+        return 0 if ok else 1
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False))
+        return 0
+    print(f"  {'id':>5}  {'kind':16} {'hidden':>9} {'normal':>7} {'saved':>9}  name")
+    for r in rows:
+        saved = "" if r["stored"] is None else f"{vol.to_db(r['stored']):+.1f} dB"
+        print(f"  {r['id']:>5}  {r['kind']:16} {vol.to_db(r['hidden']):+7.1f} dB {r['normal'] * 100:6.0f}% "
+              f"{saved:>9}  {r['label']}{'  (muted)' if r['mute'] else ''}")
+    return 0
+
+
 def cmd_templates(args):
     """Lists the presets and filled user slots that can be loaded into a program."""
     for tid, name in ProfileCatalog().templates():
@@ -547,7 +634,7 @@ def main(argv=None):
     p_mode.add_argument("--app", help="Program (label, name, binary or key); default: Standard")
 
     p_preset = sub.add_parser("preset", help="Load a factory preset into the standard profile")
-    p_preset.add_argument("name", help="Preset name (clean_linear, boost_5db..boost_25db, dialog_boost, ...)")
+    p_preset.add_argument("name", help="Preset name (clean_linear, boost_3db..boost_15db, dialog_boost, ...)")
 
     p_apps = sub.add_parser(
         "apps",
@@ -567,6 +654,16 @@ def main(argv=None):
     p_vreset = sub.add_parser("volume-reset", help="Full volume reset: undo secretly lowered stream volumes")
     p_vreset.add_argument("--app", help="Only this program")
     p_vreset.add_argument("--json", action="store_true", help="Output report as JSON")
+
+    p_od = sub.add_parser("overdrive", help="Show or switch overdrive (volume scale up to +40 dB)")
+    p_od.add_argument("action", nargs="?", choices=["on", "off", "status"], default="status")
+    p_od.add_argument("--confirm", action="store_true", help="Confirm the overdrive warning")
+
+    p_vol = sub.add_parser("volume", help="Hidden stream volumes: list, set or reset")
+    p_vol.add_argument("action", nargs="?", choices=["list", "set", "reset"], default="list")
+    p_vol.add_argument("target", nargs="?", help="Node id or program (set, reset)")
+    p_vol.add_argument("percent", nargs="?", type=float, help="Hidden volume in percent (0-100) for set")
+    p_vol.add_argument("--json", action="store_true", help="Output as JSON")
 
     sub.add_parser("templates", aliases=["profiles"], help="List presets and user slots")
 
@@ -595,6 +692,8 @@ def main(argv=None):
         "log": cmd_log,
         "mode": cmd_mode,
         "volume-reset": cmd_volume_reset,
+        "volume": cmd_volume,
+        "overdrive": cmd_overdrive,
     }
     try:
         return handlers[args.cmd](args)

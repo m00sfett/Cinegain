@@ -23,16 +23,18 @@ elif os.path.exists(os.path.expanduser("~/.local/bin/cinegain")):
 else:
     BIN_PATH = "cinegain"
 
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.5.0"
 
 os.environ.setdefault("CINEGAIN_BASE_DIR", BASE_DIR)
 import cinegain_log  # noqa: E402
 import cinegain_modes as modes  # noqa: E402
+import cinegain_overdrive as overdrive  # noqa: E402
 from cinegain_volume import VolumeGuard  # noqa: E402
 from cinegain_lock import RouterLock, gui_socket_path  # noqa: E402
 import cinegain_paths as paths  # noqa: E402
 from cinegain_profiles import (  # noqa: E402
     DEFAULT_PARAMS, PROFILE_STANDARD, STANDARD_SINK, ProfileCatalog, SinkProcesses, full_params, read_meter,
+    read_ramp,
 )
 from cinegain_registry import profile_id_for  # noqa: E402
 from cinegain_router import Router  # noqa: E402
@@ -43,6 +45,7 @@ ICON_PATH = os.path.join(BASE_DIR, "assets", "icons", "cinegain.png")
 LOGO_SVG_PATH = os.path.join(BASE_DIR, "assets", "icons", "cinegain.svg")
 BRAND_ROTESON_PATH = os.path.join(BASE_DIR, "assets", "icons", "brand-roteson.png")
 BRAND_R2W2_PATH = os.path.join(BASE_DIR, "assets", "icons", "brand-r2w2.png")
+PROJECT_URL = "https://github.com/m00sfett/Cinegain"
 CONFIG_DIR = paths.CONFIG_DIR
 USER_PRESETS_FILE = paths.USER_PRESETS_FILE
 CONFIG_FILE = paths.CONFIG_FILE
@@ -51,6 +54,27 @@ LEVELER_DEFAULT_CUT_DB = 6.0
 USER_SLOT_IDS = tuple(f"user_{i}" for i in range(1, 7))  # 6 slots since 0.4.0
 # Sliders of the left column (the rest is the right column); used for F6.
 LEFT_COLUMN = ("input_db", "dialog_db", "lev_max_boost_db", "mid_db")  # cut range given to a leveler the user switches on via the boost slider
+
+# View levels (0.5.0): simple = only louder; advanced adds every slider, the analysis
+# view and the dynamic (beta) mode; pro adds raw values and the in-app log.
+VIEW_SIMPLE, VIEW_ADVANCED, VIEW_PRO = "simple", "advanced", "pro"
+VIEW_LEVELS = (VIEW_SIMPLE, VIEW_ADVANCED, VIEW_PRO)
+# Right-click on a slider goes back to these (neutral of both modes; ceiling with headroom).
+RESET_VALUES = dict(modes.neutral_dynamic(), lim_ceiling_db=-1.0)
+CAPPED_SLIDERS = overdrive.CAPPED_KEYS  # input_db, makeup_db: +15 dB, overdrive +40 dB
+ORANGE = "#FF8A1F"
+
+
+def step_units(param_name, modifiers):
+    """
+    Slider step in tenths for a key press, wheel notch, track click or the ± buttons:
+    1 dB, Shift 0.1 dB, Ctrl 5 dB (the compressor ratio: 0.5, 0.1 and 1.0).
+    """
+    fine = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+    coarse = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+    if param_name == "comp_ratio":
+        return 1 if fine else (10 if coarse else 5)
+    return 1 if fine else (50 if coarse else 10)
 
 try:
     from PyQt6.QtWidgets import (
@@ -72,6 +96,14 @@ try:
         QFrame,
         QInputDialog,
         QMessageBox,
+        QSplitter,
+        QSplitterHandle,
+        QTabWidget,
+        QToolButton,
+        QDialog,
+        QDialogButtonBox,
+        QStyle,
+        QStyleOptionSlider,
     )
     from PyQt6.QtGui import QIcon, QAction, QKeyEvent, QPainter, QColor, QPixmap, QDesktopServices
     from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QByteArray, QPoint, QUrl, QtMsgType, qInstallMessageHandler
@@ -80,7 +112,8 @@ except ImportError:
     print("Error: PyQt6 is required to run the Cinegain desktop interface.")
     sys.exit(1)
 
-from program_sidebar import STANDARD, ProgramSidebar  # noqa: E402
+from program_sidebar import SIDEBAR_DEFAULT_W, SIDEBAR_MIN_W, STANDARD, ProgramSidebar  # noqa: E402
+from analysis_panel import AnalysisPanel, LogPanel  # noqa: E402
 
 
 def create_translate_icon(color="#FFD21F", size=18):
@@ -251,6 +284,70 @@ QPushButton[presetActive="true"]:hover {
     background-color: #FFE15A;
     color: #241900;
 }
+
+/* Beta features: dashed outline instead of a cryptic symbol (0.5.0) */
+QPushButton[beta="true"] {
+    border: 1px dashed #E0B83A;
+}
+QPushButton[beta="true"][presetActive="true"] {
+    border: 2px dashed #241900;
+}
+
+/* ± step buttons next to every slider */
+QToolButton#step_btn {
+    background-color: #14100D;
+    color: #FFD21F;
+    border: 1px solid #4A251D;
+    border-radius: 6px;
+    font-family: "Fira Mono", monospace;
+    font-size: 15px;
+    font-weight: 800;
+    min-width: 26px;
+    max-width: 26px;
+    min-height: 24px;
+}
+QToolButton#step_btn:hover { background-color: #3D2C07; border-color: #FFD21F; }
+QToolButton#step_btn:pressed { background-color: #FFD21F; color: #241900; }
+
+/* View level and overdrive inside the red banner */
+QPushButton#view_seg {
+    background-color: #1F1712;
+    color: #E2C89B;
+    border: 1px solid #6E1516;
+    padding: 6px 10px;
+    font-weight: 700;
+}
+QPushButton#view_seg:hover { color: #FFD21F; border-color: #FFD21F; }
+QPushButton#view_seg:checked { background-color: #3D2C07; color: #FFD21F; border: 1px solid #FFD21F; }
+QPushButton#btn_overdrive {
+    background-color: #1F1712;
+    color: #FF8A1F;
+    border: 1px solid #FF8A1F;
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-weight: 800;
+}
+QPushButton#btn_overdrive:hover { background-color: #3A1E08; }
+QPushButton#btn_overdrive:checked { background-color: #FF8A1F; color: #1A0E02; border: 2px solid #FFD9A8; }
+
+/* Tabs on the right: sound, analysis, log */
+QTabWidget::pane { border: none; top: -1px; }
+QTabBar::tab {
+    background: #14100D;
+    color: #E2C89B;
+    border: 1px solid #6E1516;
+    border-bottom: none;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    padding: 6px 16px;
+    margin-right: 3px;
+    font-weight: 700;
+}
+QTabBar::tab:selected { background: #1F1712; color: #FFD21F; border-color: #A86B4A; }
+QTabBar::tab:hover { color: #FFD21F; }
+
+QSplitter::handle { background: transparent; }
+QSplitter::handle:hover { background: #3A2A22; }
 
 /* Master Power Button inside Red Banner */
 QPushButton#btn_power_on {
@@ -503,7 +600,7 @@ def profile_for_sink(name):
     return None
 
 
-TRAY_PRESETS = ("boost_10db", "boost_20db", "dialog_boost", "night_mode", "max_loudness", "clean_linear")
+TRAY_PRESETS = ("boost_6db", "boost_12db", "dialog_boost", "night_mode", "max_loudness", "clean_linear")
 
 
 class MeterStrip(QWidget):
@@ -558,18 +655,53 @@ class MeterStrip(QWidget):
 
 class KeyNavSlider(QSlider):
     """
-    Custom QSlider that delegates Up/Down/F6 to the window's 12-slider focus ring
-    and uses Left/Right for crisp 1.0 dB steps (Shift+Left/Right for 0.1 dB fine steps).
+    Custom QSlider that delegates Up/Down/F6 to the window's slider focus ring.
+    Left/Right, the mouse wheel and track clicks move by 1 dB (Shift 0.1 dB, Ctrl 5 dB);
+    a right click resets the slider to its neutral value.
     """
 
     navRequested = pyqtSignal(int)  # -1 = prev, +1 = next, 100 = switch column
     programRequested = pyqtSignal(int)  # PageUp = -1, PageDown = +1 (program sidebar)
     focusedIn = pyqtSignal()
+    resetRequested = pyqtSignal()  # right click: back to the neutral value
 
     def __init__(self, orientation, param_name, parent=None):
         super().__init__(orientation, parent)
         self.param_name = param_name
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.danger_from = None  # slider value (tenths) where the overdrive zone starts
+
+    def step(self, direction, modifiers):
+        units = step_units(self.param_name, modifiers)
+        self.setValue(max(self.minimum(), min(self.maximum(), self.value() + direction * units)))
+
+    def wheelEvent(self, event):
+        delta = event.angleDelta().y() or event.angleDelta().x()
+        if delta:
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
+            self.step(1 if delta > 0 else -1, event.modifiers())
+        event.accept()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self.danger_from is None or self.danger_from >= self.maximum():
+            return
+        # Overdrive zone: an orange line under the groove from +15 dB to the end.
+        opt = QStyleOptionSlider()
+        self.initStyleOption(opt)
+        groove = self.style().subControlRect(QStyle.ComplexControl.CC_Slider, opt,
+                                             QStyle.SubControl.SC_SliderGroove, self)
+        handle = self.style().subControlRect(QStyle.ComplexControl.CC_Slider, opt,
+                                             QStyle.SubControl.SC_SliderHandle, self)
+        span = groove.width() - handle.width()
+        x0 = groove.left() + handle.width() // 2 + QStyle.sliderPositionFromValue(
+            self.minimum(), self.maximum(), self.danger_from, span)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(ORANGE))
+        painter.drawRoundedRect(x0, groove.bottom() + 3, groove.right() - handle.width() // 2 - x0, 3, 1.5, 1.5)
+        painter.end()
 
     def focusInEvent(self, event):
         super().focusInEvent(event)
@@ -577,6 +709,12 @@ class KeyNavSlider(QSlider):
 
     def mousePressEvent(self, event):
         self.setFocus(Qt.FocusReason.MouseFocusReason)
+        if event.button() == Qt.MouseButton.RightButton:
+            self.resetRequested.emit()
+            event.accept()
+            return
+        # A click into the track moves by one step, with the same modifiers as the keys.
+        self.setPageStep(step_units(self.param_name, event.modifiers()))
         super().mousePressEvent(event)
 
     def keyPressEvent(self, event: QKeyEvent):
@@ -599,14 +737,7 @@ class KeyNavSlider(QSlider):
             event.accept()
             return
         if key in (Qt.Key.Key_Left, Qt.Key.Key_Right):
-            direction = 1 if key == Qt.Key.Key_Right else -1
-            if mods & Qt.KeyboardModifier.ShiftModifier:
-                step = 1  # 0.1 dB fine step
-            else:
-                # 1.0 dB standard step (0.5 dB for limiter ceiling near 0 dB)
-                step = 5 if self.param_name == "lim_ceiling_db" else 10
-            new_val = max(self.minimum(), min(self.maximum(), self.value() + direction * step))
-            self.setValue(new_val)
+            self.step(1 if key == Qt.Key.Key_Right else -1, mods)
             event.accept()
             return
         super().keyPressEvent(event)
@@ -627,6 +758,67 @@ class SliderRowWidget(QFrame):
         super().mousePressEvent(event)
 
 
+class _SplitterHandle(QSplitterHandle):
+    def mouseDoubleClickEvent(self, event):
+        self.splitter().reset_requested.emit()
+        event.accept()
+
+
+class SidebarSplitter(QSplitter):
+    """Splitter between program list and editor; a double click on the handle resets the width."""
+
+    reset_requested = pyqtSignal()
+
+    def createHandle(self):
+        return _SplitterHandle(self.orientation(), self)
+
+
+class OverdriveDialog(QDialog):
+    """Warning before overdrive: 'switch on' only works once the box is ticked (Q16)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(t("od_title"))
+        self.setModal(True)
+        self.setStyleSheet(
+            "QDialog { background-color: #14100D; border: 2px solid #FF8A1F; }"
+            "QLabel { color: #EDE6DC; background: transparent; }"
+            "QLabel#od_head { color: #FF8A1F; font-family: \"Fira Sans Condensed\", sans-serif; "
+            "font-size: 19px; font-weight: 800; }"
+            "QCheckBox { color: #FFD9A8; font-weight: 700; }"
+            "QPushButton { background-color: #1F1712; color: #EDE6DC; border: 1px solid #6E1516; "
+            "border-radius: 6px; padding: 6px 14px; font-weight: 700; }"
+            "QPushButton:hover { border-color: #FFD21F; color: #FFD21F; }"
+            "QPushButton:disabled { color: #5E5248; border-color: #3A2A22; }"
+            "QPushButton#od_confirm:enabled { background-color: #FF8A1F; color: #1A0E02; border-color: #FFD9A8; }"
+        )
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 18, 20, 16)
+        lay.setSpacing(12)
+        head = QLabel(t("od_head"))
+        head.setObjectName("od_head")
+        body = QLabel(t("od_text"))
+        body.setWordWrap(True)
+        self.check = QCheckBox(t("od_check"))
+        buttons = QDialogButtonBox()
+        self.btn_confirm = buttons.addButton(t("od_confirm"), QDialogButtonBox.ButtonRole.AcceptRole)
+        self.btn_confirm.setObjectName("od_confirm")
+        self.btn_confirm.setEnabled(False)
+        cancel = buttons.addButton(t("od_cancel"), QDialogButtonBox.ButtonRole.RejectRole)
+        cancel.setDefault(True)
+        self.check.toggled.connect(self.btn_confirm.setEnabled)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        for w in (head, body, self.check):
+            lay.addWidget(w)
+        lay.addWidget(buttons)
+        # Wrapped text needs its height for the final width, or Qt clips the first lines.
+        self.setFixedWidth(560)
+        body.setMinimumHeight(body.heightForWidth(560 - 40) + 4)
+        self.adjustSize()
+        cancel.setFocus()
+
+
 class CinegainMainWindow(QMainWindow):
     def __init__(self, router):
         super().__init__()
@@ -641,6 +833,9 @@ class CinegainMainWindow(QMainWindow):
         self._last_status = None  # last status line written to the debug log
         self._program_dirty = None  # program key whose own values wait for the debounced flush
         self._initial_selection_done = False
+        level = paths.config_get("view_level", VIEW_SIMPLE)
+        self.view_level = level if level in VIEW_LEVELS else VIEW_SIMPLE  # no migration: new default
+        self._overdrive_on = overdrive.is_on()
         self.sliders = {}  # param_name -> dict(slider, val_lbl, title_lbl, row_frame, base_title, unit, is_hero)
         self.slider_order = []  # ordered list of param_names for Up/Down keyboard navigation
         self.slider_ui_elements = {}  # param_name -> dict(label, frame, label_key, tip_key)
@@ -663,6 +858,10 @@ class CinegainMainWindow(QMainWindow):
 
         self.init_ui()
         self.init_tray()
+        self.splitter.setSizes([self._sidebar_width(), max(400, self.width() - self._sidebar_width())])
+        self.apply_overdrive_scale()
+        self.apply_view_level()
+        self.retranslate_view_controls()
 
         # Debounce timer for slider changes (smooth 60fps dragging & keyboard repeating)
         self.pending_params = {}
@@ -752,10 +951,8 @@ class CinegainMainWindow(QMainWindow):
 
     def _save_config(self):
         try:
-            os.makedirs(CONFIG_DIR, exist_ok=True)
-            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                json.dump({"lang": get_current_language()}, f, indent=2)
-        except Exception:
+            paths.config_set(lang=get_current_language())  # keeps view level, sidebar width, ...
+        except OSError:
             pass
 
     def show_language_menu(self):
@@ -837,6 +1034,10 @@ class CinegainMainWindow(QMainWindow):
                 frame.setToolTip(tooltip)
 
         self._refresh_user_preset_buttons_text()
+        if hasattr(self, "view_buttons"):
+            self.retranslate_view_controls()
+            for b in self.film_row:
+                b.setToolTip(f"{t('beta_tip')} · {t('mode_dynamic_tip')}")
 
         if hasattr(self, "tray_open_action"):
             self.tray_open_action.setText(t("tray_open"))
@@ -908,16 +1109,42 @@ class CinegainMainWindow(QMainWindow):
         self.btn_quit.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_quit.clicked.connect(self.quit_app)
 
+        # View level: Simple | Advanced | Pro (segmented, remembered)
+        self.view_buttons = {}
+        view_box = QHBoxLayout()
+        view_box.setSpacing(0)
+        for i, level in enumerate(VIEW_LEVELS):
+            b = QPushButton()
+            b.setObjectName("view_seg")
+            b.setCheckable(True)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            radius = ("border-top-left-radius: 6px; border-bottom-left-radius: 6px;" if i == 0 else
+                      "border-top-right-radius: 6px; border-bottom-right-radius: 6px;" if i == len(VIEW_LEVELS) - 1
+                      else "")
+            b.setStyleSheet(f"QPushButton#view_seg {{ {radius} }}")
+            b.clicked.connect(lambda _c=False, lv=level: self.set_view_level(lv))
+            view_box.addWidget(b)
+            self.view_buttons[level] = b
+
+        # Overdrive: visible in every view level (Q17); switching on needs the warning dialog.
+        self.btn_overdrive = QPushButton()
+        self.btn_overdrive.setObjectName("btn_overdrive")
+        self.btn_overdrive.setCheckable(True)
+        self.btn_overdrive.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_overdrive.clicked.connect(self.toggle_overdrive)
+
         if os.path.exists(LOGO_SVG_PATH):
             hdr.addWidget(brand_label(LOGO_SVG_PATH, 46, "Cinegain"), 0, Qt.AlignmentFlag.AlignVCenter)
         hdr.addLayout(title_box)
         hdr.addStretch()
-        hdr.addWidget(self.lbl_status)
+        hdr.addLayout(view_box)
+        hdr.addWidget(self.btn_overdrive)
+        hdr.addWidget(self.lbl_status, 0, Qt.AlignmentFlag.AlignVCenter)
         hdr.addWidget(self.btn_power)
         hdr.addWidget(self.btn_lang)
         hdr.addWidget(self.btn_quit)
         brands = [(BRAND_ROTESON_PATH, "roteson.de", "https://roteson.de"),
-                  (BRAND_R2W2_PATH, "R²W² Development", None)]
+                  (BRAND_R2W2_PATH, "R²W² Development · GitHub", PROJECT_URL)]
         brands = [b for b in brands if os.path.exists(b[0])]
         if brands:
             hdr.addSpacing(6)
@@ -948,18 +1175,40 @@ class CinegainMainWindow(QMainWindow):
         self.hidden_bar.hide()
         layout.addWidget(self.hidden_bar)
 
-        # Body: program sidebar (left) selects what the editor (right) changes.
-        body = QHBoxLayout()
-        body.setSpacing(14)
+        # Body: program sidebar (left, width adjustable) selects what the editor changes;
+        # the right side has tabs for the sound, the hidden-volume analysis and (pro) the log.
+        self.splitter = SidebarSplitter(Qt.Orientation.Horizontal)
+        self.splitter.setChildrenCollapsible(False)
+        self.splitter.setHandleWidth(10)
         self.sidebar = ProgramSidebar(self.router)
         self.sidebar.selection_changed.connect(self.on_selection_changed)
         self.sidebar.changed.connect(self.refresh_apps)
-        body.addWidget(self.sidebar)
-        editor = QVBoxLayout()
+        self.splitter.addWidget(self.sidebar)
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+        sound_page = QWidget()
+        editor = QVBoxLayout(sound_page)
+        editor.setContentsMargins(0, 6, 0, 0)
         editor.setSpacing(10)
         editor.addWidget(self._build_edit_header())
-        body.addLayout(editor, 1)
-        layout.addLayout(body, 1)
+        self.tabs.addTab(sound_page, "")
+        self.analysis = AnalysisPanel()
+        self.analysis.full_reset_requested.connect(lambda: self.full_volume_reset())
+        self.analysis.auto_reset_changed.connect(self.set_auto_reset)
+        self.analysis.set_auto_reset(paths.config_get("volume_auto_reset", True))
+        self.tabs.addTab(self.analysis, "")
+        self.log_panel = LogPanel()
+        self.tabs.addTab(self.log_panel, "")
+        self.splitter.addWidget(self.tabs)
+        self.splitter.setStretchFactor(0, 0)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.reset_requested.connect(self.reset_sidebar_width)
+        self.splitter.splitterMoved.connect(self._sidebar_moved)
+        self._sidebar_save_timer = QTimer(self)
+        self._sidebar_save_timer.setSingleShot(True)
+        self._sidebar_save_timer.setInterval(600)
+        self._sidebar_save_timer.timeout.connect(self._save_sidebar_width)
+        layout.addWidget(self.splitter, 1)
 
         # 2. Presets Section (Row 1: Pure Boost + Cinema Profiles | Row 2: 8 User Presets)
         self.grp_presets = QGroupBox(amp(t("presets_group").partition("(")[0].partition("（")[0].strip()))
@@ -972,8 +1221,8 @@ class CinegainMainWindow(QMainWindow):
         grid = QGridLayout()
         grid.setSpacing(6)
         fixed_row = [
-            ("clean_linear", "0 dB"), ("boost_5db", "+5 dB"), ("boost_10db", "+10 dB"),
-            ("boost_15db", "+15 dB"), ("boost_20db", "+20 dB"), ("boost_25db", "+25 dB"),
+            ("clean_linear", "0 dB"), ("boost_3db", "+3 dB"), ("boost_6db", "+6 dB"),
+            ("boost_9db", "+9 dB"), ("boost_12db", "+12 dB"), ("boost_15db", "+15 dB"),
         ]
         dynamic_row = ["dialog_boost", "night_mode", "max_loudness"]
 
@@ -990,8 +1239,12 @@ class CinegainMainWindow(QMainWindow):
 
         for col, (pid, tip) in enumerate(fixed_row):
             grid.addWidget(preset_button(pid, f"{t('mode_fixed')} · {tip}"), 0, col)
+        self.film_row = []
         for i, pid in enumerate(dynamic_row):
-            grid.addWidget(preset_button(pid, t("mode_dynamic_tip")), 1, i * 2, 1, 2)
+            b = preset_button(pid, f"{t('beta_tip')} · {t('mode_dynamic_tip')}")
+            b.setProperty("beta", "true")
+            grid.addWidget(b, 1, i * 2, 1, 2)
+            self.film_row.append(b)
         presets_vbox.addLayout(grid)
 
         row2 = QGridLayout()
@@ -1010,6 +1263,7 @@ class CinegainMainWindow(QMainWindow):
             row2.addWidget(b, 0, i)
             self.user_preset_buttons[sid] = b
 
+        self.slot_row = row2
         presets_vbox.addLayout(row2)
         editor.addWidget(self.grp_presets)
 
@@ -1027,13 +1281,13 @@ class CinegainMainWindow(QMainWindow):
         gm_layout.setSpacing(8)
         gm_layout.setContentsMargins(10, 14, 10, 10)
 
-        # HERO CONTROL: Direct Volume Boost (-12 dB to +25 dB)
+        # HERO CONTROL: volume -30 dB to +15 dB (overdrive widens the top to +40 dB)
         self.add_control_slider(
             gm_layout,
             "lbl_input_db",
             "input_db",
-            -12.0,
-            25.0,
+            overdrive.MIN_DB,
+            overdrive.NORMAL_MAX_DB,
             8.0,
             " dB",
             "tip_input_db",
@@ -1146,7 +1400,7 @@ class CinegainMainWindow(QMainWindow):
             "lbl_makeup_db",
             "makeup_db",
             -6.0,
-            18.0,
+            overdrive.NORMAL_MAX_DB,
             2.0,
             " dB",
             "tip_makeup_db",
@@ -1166,6 +1420,8 @@ class CinegainMainWindow(QMainWindow):
         cols_layout.addWidget(self.grp_main, 1)
         cols_layout.addWidget(self.grp_adv, 1)
         editor.addLayout(cols_layout, 1)
+        editor.addStretch(0)  # takes the free height in the simple view instead of an empty panel
+        self._editor_layout = editor
         self.apply_mode_layout(modes.MODE_FIXED)
 
         # 5. Footer with Version, AGPLv3, and roteson.de link
@@ -1249,6 +1505,12 @@ class CinegainMainWindow(QMainWindow):
         )
 
         hdr.addWidget(lbl, 1)
+        if is_hero:
+            # Shown while a raised volume is still gliding up (10 dB/s, decision Q3 0.5.0).
+            self.lbl_ramp = QLabel()
+            self.lbl_ramp.setStyleSheet(f"color: {ORANGE}; font-size: 11px; font-weight: 700;")
+            self.lbl_ramp.hide()
+            hdr.addWidget(self.lbl_ramp)
         hdr.addWidget(val_lbl)
 
         slider = KeyNavSlider(Qt.Orientation.Horizontal, param_name)
@@ -1266,10 +1528,32 @@ class CinegainMainWindow(QMainWindow):
         slider.focusedIn.connect(lambda i=idx: self.set_focused_slider(i, set_qt_focus=False))
         slider.programRequested.connect(self.sidebar.select_step)
         slider.navRequested.connect(lambda delta, i=idx: self.navigate_slider(i, delta))
+        slider.resetRequested.connect(lambda p=param_name: self.reset_slider(p))
         row_frame.clicked.connect(lambda i=idx: self.set_focused_slider(i, set_qt_focus=True))
 
+        # − / + next to the slider: one step per click, held down they repeat.
+        line = QHBoxLayout()
+        line.setSpacing(6)
+        line.addWidget(slider, 1)
+        step_buttons = []
+        for text, direction, name_key in (("−", -1, "step_down"), ("+", 1, "step_up")):
+            b = QToolButton()
+            b.setObjectName("step_btn")
+            b.setText(text)
+            b.setAutoRepeat(True)
+            b.setAutoRepeatDelay(400)
+            b.setAutoRepeatInterval(90)
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # arrow-key navigation stays on the sliders
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setAccessibleName(f"{label_text} {t(name_key)}")
+            b.setToolTip(t("step_tip"))
+            b.clicked.connect(lambda _c=False, sl=slider, d=direction:
+                              sl.step(d, QApplication.keyboardModifiers()))
+            line.addWidget(b, 0)
+            step_buttons.append(b)
+
         box.addLayout(hdr)
-        box.addWidget(slider)
+        box.addLayout(line)
         parent_layout.addWidget(row_frame)
 
         self.sliders[param_name] = {
@@ -1280,6 +1564,8 @@ class CinegainMainWindow(QMainWindow):
             "base_title": label_text,
             "unit": unit,
             "is_hero": is_hero,
+            "step_buttons": step_buttons,
+            "range": (min_val, max_val),
         }
         self._apply_row_focus_style(param_name, False)
 
@@ -1321,10 +1607,181 @@ class CinegainMainWindow(QMainWindow):
             if not target_slider.hasFocus():
                 target_slider.setFocus(Qt.FocusReason.OtherFocusReason)
 
+    # -- view levels, overdrive, sidebar width (0.5.0) -------------------------
+    def set_view_level(self, level):
+        if level not in VIEW_LEVELS:
+            return
+        if level != self.view_level:
+            log.info("view level %s -> %s", self.view_level, level)
+            self.view_level = level
+            try:
+                paths.config_set(view_level=level)
+            except OSError:
+                pass
+        self.apply_view_level()
+
+    def apply_view_level(self):
+        """Shows what the level offers; hidden parts keep working (values stay active)."""
+        level = self.view_level
+        simple = level == VIEW_SIMPLE
+        for lv, b in self.view_buttons.items():
+            b.blockSignals(True)
+            b.setChecked(lv == level)
+            b.blockSignals(False)
+        self.tabs.tabBar().setVisible(not simple)
+        self.tabs.setTabVisible(1, not simple)
+        self.tabs.setTabVisible(2, level == VIEW_PRO)
+        if simple or (level != VIEW_PRO and self.tabs.currentIndex() == 2):
+            self.tabs.setCurrentIndex(0)
+        self.analysis.set_pro(level == VIEW_PRO)
+        for b in self.film_row:
+            b.setVisible(not simple)
+        for b in self.user_preset_buttons.values():
+            b.setVisible(not simple)
+        self.meter_strip.setVisible(not simple)
+        self.grp_adv.setVisible(not simple)
+        last = self._editor_layout.count() - 1
+        self._editor_layout.setStretch(last - 1, 0 if simple else 1)
+        self._editor_layout.setStretch(last, 1 if simple else 0)
+        self.btn_mode_fixed.setVisible(not simple)
+        self.btn_mode_dynamic.setVisible(not simple)
+        if hasattr(self, "hidden_bar"):
+            self.refresh_hidden_bar()
+        self.apply_mode_layout(self._mode)
+        self.update_edit_header()
+
+    def retranslate_view_controls(self):
+        for lv, b in self.view_buttons.items():
+            b.setText(t(f"view_{lv}"))
+            b.setToolTip(t(f"view_{lv}_tip"))
+        self.btn_overdrive.setText(t("od_on") if self._overdrive_on else t("od_off"))
+        self.btn_overdrive.setToolTip(t("od_tip_on") if self._overdrive_on else t("od_tip_off"))
+        self.tabs.setTabText(0, t("tab_sound"))
+        self.tabs.setTabText(1, t("tab_analysis"))
+        self.tabs.setTabText(2, t("tab_log"))
+        self.analysis.retranslate()
+        self.log_panel.retranslate()
+        for info in self.sliders.values():
+            for b in info["step_buttons"]:
+                b.setToolTip(t("step_tip"))
+            info["slider"].setToolTip(t("reset_tip"))
+
+    def toggle_overdrive(self):
+        if self._overdrive_on:
+            self.set_overdrive(False)
+            return
+        self.btn_overdrive.setChecked(False)  # stays off unless the warning is confirmed
+        dlg = OverdriveDialog(self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self.set_overdrive(True)
+
+    def set_overdrive(self, on):
+        """On: scale up to +40 dB until restart. Off: every value above +15 dB drops at once."""
+        overdrive.set_on(on)
+        self._overdrive_on = overdrive.is_on()
+        if not self._overdrive_on:
+            self.param_timer.stop()
+            self.flush_pending_params()
+            self.cap_to_normal_scale()
+        self.apply_overdrive_scale()
+        self.retranslate_view_controls()
+        self.refresh_editor()
+
+    def cap_to_normal_scale(self):
+        """Caps saved values to +15 dB and pushes them (overdrive off, or a fresh start)."""
+        changed = modes.clamp_stored(self.router.registry, overdrive_on=False)
+        if "standard" in changed:
+            run_cinegain("batch", "{}")
+            self._reassert_bypass()
+        for key in changed:
+            if key != "standard":
+                self.router.push_program_params(key)
+        if changed:
+            log.info("capped to +15 dB: %s", ", ".join(changed))
+        return changed
+
+    def apply_overdrive_scale(self):
+        top = overdrive.max_db(self._overdrive_on)
+        self.btn_overdrive.blockSignals(True)
+        self.btn_overdrive.setChecked(self._overdrive_on)
+        self.btn_overdrive.blockSignals(False)
+        for name in CAPPED_SLIDERS:
+            info = self.sliders.get(name)
+            if not info:
+                continue
+            s = info["slider"]
+            s.blockSignals(True)
+            s.setMaximum(int(round(top * 10)))
+            s.blockSignals(False)
+            s.danger_from = int(round(overdrive.NORMAL_MAX_DB * 10)) if self._overdrive_on else None
+            s.update()
+            self._paint_value(name, s.value() / 10.0)
+
+    def _paint_value(self, name, val):
+        info = self.sliders[name]
+        danger = name in CAPPED_SLIDERS and val > overdrive.NORMAL_MAX_DB + 0.01
+        size = "16px" if info["is_hero"] else "13px"
+        info["val_lbl"].setStyleSheet(
+            f'color: {ORANGE if danger else "#FFD21F"}; font-family: "Fira Mono", monospace; '
+            f"font-size: {size}; font-weight: 800;")
+
+    def reset_slider(self, name):
+        """Right click: back to the neutral value (raising glides in the filter, lowering is instant)."""
+        info = self.sliders.get(name)
+        if not info:
+            return
+        info["slider"].setValue(int(round(RESET_VALUES.get(name, 0.0) * 10)))
+
+    def set_auto_reset(self, on):
+        log.info("automatic reset of hidden volumes %s", "on" if on else "off")
+        if self.router.guard is not None:
+            self.router.guard.auto = bool(on)
+        try:
+            paths.config_set(volume_auto_reset=bool(on))
+        except OSError:
+            pass
+
+    def _sidebar_width(self):
+        w = paths.config_get("sidebar_width", SIDEBAR_DEFAULT_W)
+        return int(w) if isinstance(w, (int, float)) and w >= SIDEBAR_MIN_W else SIDEBAR_DEFAULT_W
+
+    def _sidebar_moved(self, pos, index):
+        total = sum(self.splitter.sizes())
+        if total and self.splitter.sizes()[0] > total // 2:  # at most half the window
+            self.splitter.setSizes([total // 2, total - total // 2])
+        self._sidebar_save_timer.start()
+
+    def _save_sidebar_width(self):
+        try:
+            paths.config_set(sidebar_width=int(self.splitter.sizes()[0]))
+        except OSError:
+            pass
+
+    def reset_sidebar_width(self):
+        total = sum(self.splitter.sizes())
+        self.splitter.setSizes([SIDEBAR_DEFAULT_W, max(1, total - SIDEBAR_DEFAULT_W)])
+        self._save_sidebar_width()
+
+    def hidden_db_for(self, key):
+        """Hidden volume (dB) that reaches the speakers for a target: 0.0 when nothing is lowered."""
+        guard = self.router.guard
+        nodes = getattr(guard, "nodes", None) or []
+        if key is STANDARD:
+            mine = [n for n in nodes if n.node_name == "cinegain_output"]
+        else:
+            mine = [n for n in nodes if n.key == key]
+        return min((n.db for n in mine), default=0.0)
+
+    def refresh_hidden_bar(self):
+        affected = [v for v in self._views if v.hidden_db is not None]
+        self.hidden_bar.setVisible(bool(affected) and self.view_level != VIEW_SIMPLE)
+        if affected:
+            self.lbl_hidden_bar.setText(t("hidden_bar", n=len(affected)) + "  " +
+                                        ", ".join(f"{v.label} {v.hidden_db:.0f} dB" for v in affected))
+
     # -- modes -----------------------------------------------------------------
     def _preset_label(self, pid):
-        label = t(f"preset_{pid}")
-        return label if modes.preset_mode(pid) == modes.MODE_FIXED else f"{label}  β"
+        return t(f"preset_{pid}")  # beta presets are marked by a dashed outline, not a symbol
 
     def target_setting(self):
         """(mode, sets, own) of the editing target; a program without own setting shows Standard's."""
@@ -1344,11 +1801,10 @@ class CinegainMainWindow(QMainWindow):
         self.update_edit_header()
 
     def apply_mode_layout(self, mode):
-        """Fixed mode hides the dynamic-only sliders; the five shared ones keep their place."""
+        """Fixed mode hides the dynamic-only sliders; the simple view shows only the volume."""
         self._mode = mode
-        for key in modes.DYNAMIC_ONLY_KEYS:
-            if key in self.sliders:
-                self.sliders[key]["row_frame"].setVisible(mode == modes.MODE_DYNAMIC)
+        for key, info in self.sliders.items():
+            info["row_frame"].setVisible(self._slider_visible(key))
         if hasattr(self, "btn_mode_fixed"):
             for btn, m in ((self.btn_mode_fixed, modes.MODE_FIXED), (self.btn_mode_dynamic, modes.MODE_DYNAMIC)):
                 btn.blockSignals(True)
@@ -1358,6 +1814,8 @@ class CinegainMainWindow(QMainWindow):
             self.set_focused_slider(0, set_qt_focus=False)
 
     def _slider_visible(self, name):
+        if getattr(self, "view_level", VIEW_ADVANCED) == VIEW_SIMPLE:
+            return name == "input_db"
         return self._mode == modes.MODE_DYNAMIC or name not in modes.DYNAMIC_ONLY_KEYS
 
     def set_mode(self, mode):
@@ -1445,12 +1903,12 @@ class CinegainMainWindow(QMainWindow):
                 in_db = params.get("input_db", 0.0)
                 sign = "+" if in_db > 0 else ""
                 text = t("user_slot_saved", name=name, sign=sign, db=in_db)
-                if slot.get("mode") == modes.MODE_DYNAMIC:
-                    text += "  β"
+                btn.setProperty("beta", "true" if slot.get("mode") == modes.MODE_DYNAMIC else "false")
                 btn.setText(amp(text))
                 btn.setToolTip(t("user_slot_saved_tip", name=name, sign=sign, db=in_db))
                 btn.setProperty("userSaved", "true")
             else:
+                btn.setProperty("beta", "false")
                 btn.setText(amp(t("user_slot_free", name=name)))
                 btn.setToolTip(t("user_slot_free_tip", name=name))
                 btn.setProperty("userSaved", "false")
@@ -1478,6 +1936,8 @@ class CinegainMainWindow(QMainWindow):
 
     def on_slider_changed(self, param_name, val, val_lbl, unit):
         val_lbl.setText(self._format_val(param_name, val, unit))
+        if param_name in CAPPED_SLIDERS:
+            self._paint_value(param_name, val)
         if self.selected_key is STANDARD:
             self.pending_params[param_name] = val
             self._sets = modes.apply_values(self._mode, self._sets, {param_name: val})
@@ -1539,6 +1999,12 @@ class CinegainMainWindow(QMainWindow):
                     if idle < 4:
                         values, source = m[1:], t("meter_source", name=label)
                         break
+            ramp = read_ramp(self.meter_pid()) if self.processing else None
+            if ramp is not None and ramp > 0.05:
+                self.lbl_ramp.setText(t("ramp_left", db=f"{ramp:.1f}"))
+                self.lbl_ramp.show()
+            else:
+                self.lbl_ramp.hide()
         except Exception:
             log.exception("meter update failed")
             values, source = None, ""  # a timer slot must never raise (PyQt aborts the app)
@@ -1591,6 +2057,8 @@ class CinegainMainWindow(QMainWindow):
                 s.setValue(int(round(float(v) * 10)))
                 vl.setText(self._format_val(short_k, float(v), u))
                 s.blockSignals(False)
+                if short_k in CAPPED_SLIDERS:
+                    self._paint_value(short_k, float(v))
 
     def apply_factory_preset(self, preset_name):
         """Loads a factory preset into whatever is selected; it brings its mode along (Q6b)."""
@@ -1745,6 +2213,11 @@ class CinegainMainWindow(QMainWindow):
 
         self.btn_power.setEnabled(True)
         self.tray_toggle_action.setEnabled(True)
+        if overdrive.is_on() != self._overdrive_on:  # switched by the CLI
+            self._overdrive_on = overdrive.is_on()
+            self.apply_overdrive_scale()
+            self.retranslate_view_controls()
+            sync_sliders = True
 
         status = "on" if self.processing else ("bypass" if self.is_active else "stopped")
         if status != self._last_status:
@@ -1793,11 +2266,7 @@ class CinegainMainWindow(QMainWindow):
             return
         self._views = views
         self.sidebar.update_views(views, self.processing, self._std_mode)
-        affected = [v for v in views if v.hidden_db is not None]
-        self.hidden_bar.setVisible(bool(affected))
-        if affected:
-            self.lbl_hidden_bar.setText("⚠  " + t("hidden_bar", n=len(affected)) + "  " +
-                                        ", ".join(f"{v.label} {v.hidden_db:.0f} dB" for v in affected))
+        self.refresh_hidden_bar()
         if not self._initial_selection_done:
             # Open on the program that is playing right now, if it is the only one.
             self._initial_selection_done = True
@@ -1823,6 +2292,8 @@ class CinegainMainWindow(QMainWindow):
             "padding: 6px 14px; font-weight: 700; min-width: 72px; }"
             "QPushButton#mode_seg:hover { color: #FFD21F; border-color: #A86B4A; }"
             "QPushButton#mode_seg:checked { background-color: #3D2C07; color: #FFD21F; border: 1px solid #FFD21F; }"
+            "QPushButton#mode_seg[beta=\"true\"] { border-style: dashed; border-color: #E0B83A; }"
+            "QPushButton#mode_seg[beta=\"true\"]:checked { border: 1px dashed #FFD21F; }"
             "QPushButton#mode_seg:focus { border: 2px solid #FFD21F; }"
             "QPushButton#btn_reset_hidden { background-color: #2A0E0E; color: #E8C462; border: 1px solid #A86B4A; "
             "border-radius: 6px; padding: 4px 10px; font-weight: 700; }"
@@ -1858,7 +2329,6 @@ class CinegainMainWindow(QMainWindow):
         hidden_row.addWidget(self.lbl_hidden, 1)
         hidden_row.addWidget(self.btn_reset_hidden, 0)
         text.addLayout(hidden_row)
-        self.lbl_hidden.hide()
         self.btn_reset_hidden.hide()
 
         # Mode switch: Fixed | Dynamic · Beta (segmented, keyboard reachable)
@@ -1875,8 +2345,9 @@ class CinegainMainWindow(QMainWindow):
             btn.setStyleSheet(f"QPushButton#mode_seg {{ {radius} }}")
             btn.clicked.connect(lambda checked=False, m=mode: self.set_mode(m))
             btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.btn_mode_dynamic.setProperty("beta", "true")
         mode_box = QHBoxLayout()
-        mode_box.setSpacing(0)
+        mode_box.setSpacing(4)
         mode_box.addWidget(self.btn_mode_fixed)
         mode_box.addWidget(self.btn_mode_dynamic)
         self._retranslate_mode_switch()
@@ -1895,7 +2366,7 @@ class CinegainMainWindow(QMainWindow):
         self.btn_mode_fixed.setText(t("mode_fixed"))
         self.btn_mode_fixed.setToolTip(t("mode_fixed_tip"))
         self.btn_mode_dynamic.setText(f"{t('mode_dynamic')} · {t('mode_beta')}")
-        self.btn_mode_dynamic.setToolTip(t("mode_dynamic_tip"))
+        self.btn_mode_dynamic.setToolTip(f"{t('beta_tip')} · {t('mode_dynamic_tip')}")
         self.btn_reset_hidden.setText(t("btn_reset_hidden"))
         self.btn_reset_hidden.setToolTip(t("btn_full_reset_tip"))
 
@@ -1904,15 +2375,28 @@ class CinegainMainWindow(QMainWindow):
             return
         key = self.selected_key
         entry = self.router.registry.get(key) if key is not STANDARD else None
-        view = next((v for v in self._views if v.key == key), None) if entry is not None else None
-        hidden_db = view.hidden_db if view is not None else None
-        self.lbl_hidden.setVisible(hidden_db is not None)
-        self.btn_reset_hidden.setVisible(hidden_db is not None)
-        if hidden_db is not None:
-            self.lbl_hidden.setText(t("hidden_edit", db=f"{abs(hidden_db):.0f}"))
+        # Hidden volume is always on show from the advanced view on (0.5.0), also at 0 dB.
+        advanced = self.view_level != VIEW_SIMPLE
+        hidden_db = self.hidden_db_for(key)
+        lowered = hidden_db < -0.05
+        self.lbl_hidden.setVisible(advanced)
+        self.btn_reset_hidden.setVisible(advanced and lowered)
+        if lowered:
+            self.lbl_hidden.setText(t("hidden_edit", db=f"{abs(hidden_db):.1f}"))
+            self.lbl_hidden.setStyleSheet("font-size: 12px; font-weight: 700; color: #E8C462;")
+        else:
+            self.lbl_hidden.setText(t("hidden_none"))
+            self.lbl_hidden.setStyleSheet("font-size: 12px; font-weight: 600; color: #A2968A;")
+        mode, _sets, _own = self.target_setting()
+        extra = ""
+        if not advanced and mode == modes.MODE_DYNAMIC:
+            extra = "  ·  " + t("simple_dynamic_hint")
+        if self.view_level == VIEW_PRO:
+            profile = PROFILE_STANDARD if entry is None or entry["params"] is None else profile_id_for(key)
+            extra += f"  ·  {profile} · pid {self.router.sinks.pid(profile) or '—'}"
         if entry is None:
             self.lbl_edit_target.setText(amp(t("prog_standard")).upper())
-            self.lbl_edit_state.setText(t("edit_state_standard"))
+            self.lbl_edit_state.setText(t("edit_state_standard") + extra)
             self.btn_back_standard.hide()
             return
         self.lbl_edit_target.setText(entry["label"].upper())
@@ -1922,7 +2406,7 @@ class CinegainMainWindow(QMainWindow):
             state = t("edit_state_own")
         else:
             state = t("edit_state_follows")
-        self.lbl_edit_state.setText(state)
+        self.lbl_edit_state.setText(state + extra)
         self.btn_back_standard.setText(t("btn_back_standard"))
         self.btn_back_standard.setToolTip(t("btn_back_standard_tip"))
         self.btn_back_standard.setVisible(entry["params"] is not None)
@@ -2054,7 +2538,7 @@ class CinegainMainWindow(QMainWindow):
 
     @staticmethod
     def _tray_preset_label(pid):
-        return {"boost_10db": "+10 dB Boost", "boost_20db": "+20 dB Boost"}.get(pid) or t(f"preset_{pid}")
+        return {"boost_6db": "+6 dB Boost", "boost_12db": "+12 dB Boost"}.get(pid) or t(f"preset_{pid}")
 
     def open_debug_log(self):
         log.info("debug log opened from the tray")
@@ -2163,7 +2647,13 @@ def main():
         QMessageBox.warning(None, "Cinegain", t("already_running", holder=lock.holder() or "?"))
         sys.exit(1)
 
-    win = CinegainMainWindow(Router(guard=VolumeGuard()))
+    # Overdrive never survives a restart (Q2a): switch it off before anything is pushed.
+    overdrive.set_on(False)
+    router = Router(guard=VolumeGuard(auto=bool(paths.config_get("volume_auto_reset", True))))
+    capped = modes.clamp_stored(router.registry, overdrive_on=False)
+    if capped:
+        log.info("start: capped saved values to +15 dB: %s", ", ".join(capped))
+    win = CinegainMainWindow(router)
     win.router_lock = lock
     win.raise_server = start_raise_server(win)
     win.show()

@@ -1,5 +1,5 @@
 Name:           cinegain
-Version:        0.4.0
+Version:        0.5.0
 Release:        1%{?dist}
 Summary:        Realtime volume booster, dialogue clarity optimizer & film audio processor for PipeWire
 
@@ -54,6 +54,9 @@ install -Dm644 assets/icons/cinegain.png %{buildroot}%{_datadir}/icons/hicolor/2
 %{_datadir}/icons/hicolor/256x256/apps/cinegain.png
 
 %changelog
+* Wed Nov 11 2026 Tobias Moos <tobias@roteson.de> - 0.5.0-1
+- Volume first: scale -30..+15 dB, overdrive to +40 dB, gentle 10 dB/s rise, analysis of hidden volumes, view levels
+
 * Wed Nov 11 2026 Tobias Moos <tobias@roteson.de> - 0.4.0-1
 - Fixed and dynamic (beta) mode per program, hidden-volume guard, 6 user slots
 

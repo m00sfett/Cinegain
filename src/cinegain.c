@@ -131,7 +131,7 @@ static const char *const port_names[P_COUNT] = {
 static const LADSPA_PortRangeHint port_hints[P_COUNT] = {
 	{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0},
 	{LADSPA_HINT_TOGGLED | LADSPA_HINT_DEFAULT_0, 0, 1}, /* bypass */
-	{BB, -25, 25},     /* input_db */
+	{BB, -30, 40},     /* input_db (normal scale -30..+15, overdrive up to +40) */
 	{BB, 10, 400},     /* highpass_hz */
 	{BB, -15, 15},     /* bass_db */
 	{BB, -15, 15},     /* dialog_db */
@@ -151,7 +151,7 @@ static const LADSPA_PortRangeHint port_hints[P_COUNT] = {
 	{BB, 0, 30},       /* comp_knee_db */
 	{BB, 0.1f, 500},   /* comp_attack_ms */
 	{BB, 5, 5000},     /* comp_release_ms */
-	{BB, -24, 36},     /* makeup_db */
+	{BB, -24, 40},     /* makeup_db */
 	{BB, -24, 0},      /* lim_ceiling_db */
 	{BB, 5, 2000},     /* lim_release_ms */
 	{BB, -120, 20}, {BB, -60, 60}, {BB, -60, 0}, {BB, -60, 0}, /* meters */
@@ -230,7 +230,16 @@ typedef struct {
 	uint32_t magic;
 	uint32_t seq;
 	float level_db, leveler_db, gr_db, limit_db;
+	float ramp_db; /* dB still to go before every gain has reached its target (0 = settled) */
 } meter_shm;
+
+/* Gains only rise this fast; a lower value applies at once (user decision 2026-11-11):
+ * 0 -> +25 dB takes 2.5 s, so there is time to react, while turning down is instant. */
+#define RAMP_DB_PER_S 10.0
+enum { RG_INPUT, RG_BASS, RG_DIALOG, RG_TREBLE, RG_MID, RG_SIDE, RG_MAKEUP, RG_N };
+static const int ramp_port[RG_N] = {
+	P_INPUT_DB, P_BASS_DB, P_DIALOG_DB, P_TREBLE_DB, P_MID_DB, P_SIDE_DB, P_MAKEUP_DB,
+};
 
 typedef struct {
 	LADSPA_Data *port[P_COUNT];
@@ -260,6 +269,10 @@ typedef struct {
 
 	/* meters (block peak/mean values) */
 	double meter_level, meter_gr, meter_limit;
+
+	/* applied (ramped) values of the gain controls */
+	double ramp[RG_N];
+	int ramp_valid;
 } Cinegain;
 
 static LADSPA_Handle instantiate(const LADSPA_Descriptor *d, unsigned long rate)
@@ -318,18 +331,39 @@ static void activate(LADSPA_Handle h)
 	k->lev_peak = 0.0;
 	k->comp_env_db = -120.0;
 	k->eq_valid = 0;
+	k->ramp_valid = 0;
 }
+
 
 static inline float ctl(Cinegain *k, int p, float fallback)
 {
 	return k->port[p] ? *k->port[p] : fallback;
 }
 
+/* Moves every applied gain towards its control value: down at once, up at
+ * RAMP_DB_PER_S. A fresh instance starts at 0 dB (or lower), so a sink that starts
+ * with a big boost fades in instead of blasting. Returns the dB still to go. */
+static double update_ramps(Cinegain *k, unsigned long n)
+{
+	const double step = RAMP_DB_PER_S * (double)n / k->rate;
+	double left = 0.0;
+	for (int g = 0; g < RG_N; g++) {
+		double want = ctl(k, ramp_port[g], 0);
+		if (!k->ramp_valid) k->ramp[g] = want < 0.0 ? want : 0.0;
+		if (want <= k->ramp[g]) k->ramp[g] = want;
+		else if (want - k->ramp[g] <= step) k->ramp[g] = want;
+		else k->ramp[g] += step;
+		if (want - k->ramp[g] > left) left = want - k->ramp[g];
+	}
+	k->ramp_valid = 1;
+	return left;
+}
+
 static void update_eq(Cinegain *k)
 {
 	float v[6] = {
-		ctl(k, P_HIGHPASS_HZ, 20), ctl(k, P_BASS_DB, 0), ctl(k, P_DIALOG_DB, 0),
-		ctl(k, P_DIALOG_HZ, 2500), ctl(k, P_DIALOG_Q, 0.9f), ctl(k, P_TREBLE_DB, 0),
+		ctl(k, P_HIGHPASS_HZ, 20), (float)k->ramp[RG_BASS], (float)k->ramp[RG_DIALOG],
+		ctl(k, P_DIALOG_HZ, 2500), ctl(k, P_DIALOG_Q, 0.9f), (float)k->ramp[RG_TREBLE],
 	};
 	if (k->eq_valid && memcmp(v, k->eq_cache, sizeof(v)) == 0) return;
 	memcpy(k->eq_cache, v, sizeof(v));
@@ -355,17 +389,24 @@ static void run(LADSPA_Handle h, unsigned long n)
 	if (!inL || !inR || !outL || !outR) return;
 
 	if (ctl(k, P_BYPASS, 0) > 0.5f) {
+		k->ramp_valid = 0; /* switching the filter back on fades the boost in again */
 		if (outL != inL) memmove(outL, inL, n * sizeof(float));
 		if (outR != inR) memmove(outR, inR, n * sizeof(float));
 		return;
 	}
 
+	/* gains glide linearly across the block from their old to their new value */
+	const double in_from = k->ramp_valid ? db2lin(k->ramp[RG_INPUT]) : -1.0;
+	const double mk_from = k->ramp_valid ? db2lin(k->ramp[RG_MAKEUP]) : -1.0;
+	const double ramp_left = update_ramps(k, n);
 	update_eq(k);
 
 	const double rate = k->rate;
-	const double in_gain = db2lin(ctl(k, P_INPUT_DB, 0));
-	const double mid_g = db2lin(ctl(k, P_MID_DB, 0));
-	const double side_g = db2lin(ctl(k, P_SIDE_DB, 0));
+	const double in_gain = db2lin(k->ramp[RG_INPUT]);
+	const double in_start = in_from < 0.0 ? in_gain : in_from;
+	const double in_inc = n ? (in_gain - in_start) / (double)n : 0.0;
+	const double mid_g = db2lin(k->ramp[RG_MID]);
+	const double side_g = db2lin(k->ramp[RG_SIDE]);
 
 	const int lev_on = ctl(k, P_LEVELER, 1) > 0.5f;
 	const double lev_target = ctl(k, P_LEV_TARGET_DB, -20);
@@ -386,7 +427,9 @@ static void run(LADSPA_Handle h, unsigned long n)
 	const double knee = ctl(k, P_COMP_KNEE_DB, 6);
 	const double att = coef_ms(ctl(k, P_COMP_ATTACK_MS, 10), rate);
 	const double rel = coef_ms(ctl(k, P_COMP_RELEASE_MS, 250), rate);
-	const double makeup = db2lin(ctl(k, P_MAKEUP_DB, 0));
+	const double makeup = db2lin(k->ramp[RG_MAKEUP]);
+	const double mk_start = mk_from < 0.0 ? makeup : mk_from;
+	const double mk_inc = n ? (makeup - mk_start) / (double)n : 0.0;
 
 	const double ceil_lin = db2lin(ctl(k, P_LIM_CEILING_DB, -1));
 	const double lim_rel = coef_ms(ctl(k, P_LIM_RELEASE_MS, 100), rate);
@@ -396,7 +439,8 @@ static void run(LADSPA_Handle h, unsigned long n)
 	double blk_peak = 0.0, blk_gr = 0.0, blk_lim = 1.0;
 
 	for (unsigned long i = 0; i < n; i++) {
-		double l = inL[i] * in_gain, r = inR[i] * in_gain;
+		const double ig = in_start + in_inc * (double)(i + 1);
+		double l = inL[i] * ig, r = inR[i] * ig;
 
 		/* EQ: identical coefficients per channel keep the image stable */
 		for (int b = 0; b < EQ_N; b++) {
@@ -449,7 +493,7 @@ static void run(LADSPA_Handle h, unsigned long n)
 			gr = (1.0 / ratio - 1.0) * over;
 		}
 		if (gr < blk_gr) blk_gr = gr;
-		double cg = db2lin(gr) * makeup;
+		double cg = db2lin(gr) * (mk_start + mk_inc * (double)(i + 1));
 		l *= cg; r *= cg;
 
 		/* look-ahead limiter: the gain needed for this sample is known
@@ -488,6 +532,7 @@ static void run(LADSPA_Handle h, unsigned long n)
 		k->shm->leveler_db = (float)k->lev_gain_db;
 		k->shm->gr_db = (float)blk_gr;
 		k->shm->limit_db = (float)lin2db(blk_lim);
+		k->shm->ramp_db = (float)ramp_left;
 		__atomic_store_n(&k->shm->seq, k->shm->seq + 1, __ATOMIC_RELEASE);
 	}
 	if (k->port[P_METER_LEVEL_DB]) *k->port[P_METER_LEVEL_DB] = (float)lin2db(blk_peak);

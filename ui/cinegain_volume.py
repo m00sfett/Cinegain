@@ -100,10 +100,13 @@ def set_node_volume(node_id, value):
 
 
 class VolumeGuard:
-    def __init__(self, scanner=scan_nodes, setter=set_node_volume, clock=time.time):
+    def __init__(self, scanner=scan_nodes, setter=set_node_volume, clock=time.time, auto=True):
         self.scanner = scanner
         self.setter = setter
         self.clock = clock
+        # Automatic fade-back for routed programs and Cinegain outputs. Off: everything
+        # is only reported, so lowerings can be watched in the analysis view (Q9 0.5.0).
+        self.auto = auto
         self.fades = {}      # node id -> (start dB, start time)
         self._last = {}      # node id -> last seen volume (for change logging)
         self.nodes = []
@@ -128,7 +131,7 @@ class VolumeGuard:
             self._last[n.id] = n.volume
             if n.volume >= HIDDEN_EPS or n.id in self.fades:
                 continue
-            if n.is_cinegain_output or n.key in auto_keys:
+            if self.auto and (n.is_cinegain_output or n.key in auto_keys):
                 self.fades[n.id] = (n.db, now)
                 log.info("fading node %s (%s) from %.1f dB back to 0 dB over %.0f s", n.id,
                          n.key if not n.is_cinegain_output else n.node_name, n.db, FADE_S)
@@ -202,3 +205,167 @@ def clean_stream_properties(path=None, backup_dir=None, stamp=None):
         f.writelines(out)
     log.info("cleaned %d saved stream volumes in %s (backup %s)", changed, path, backup)
     return changed, backup
+
+
+# -- analysis view (0.5.0) ---------------------------------------------------------
+KIND_STREAM = "stream"              # playback stream of a program
+KIND_OUTPUT = "cinegain_output"     # Cinegain's own stream into the hardware
+KIND_SINK = "cinegain_sink"         # Cinegain filter input
+KIND_HARDWARE = "hardware"          # sound card output, shown read-only
+EDITABLE_KINDS = (KIND_STREAM, KIND_OUTPUT, KIND_SINK)
+
+
+def _unescape(name):
+    return name.replace("\\s", " ")
+
+
+def read_stored(path=None):
+    """Saved playback volumes of WirePlumber: {application.name: {"volume", "mute"}}."""
+    path = path or paths.WIREPLUMBER_STREAM_PROPS
+    out = {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return out
+    for line in lines:
+        m = re.match(r"Output/Audio:application\.name:(.*?)=(\{.*\})\s*$", line)
+        if not m:
+            continue
+        try:
+            data = json.loads(m.group(2))
+        except ValueError:
+            continue
+        if isinstance(data, dict) and isinstance(data.get("volume"), (int, float)):
+            out[_unescape(m.group(1))] = {"volume": float(data["volume"]), "mute": bool(data.get("mute"))}
+    return out
+
+
+def _props_entry(info):
+    for p in (info.get("params") or {}).get("Props") or []:
+        if isinstance(p, dict) and isinstance(p.get("volume"), (int, float)):
+            return p
+    return {}
+
+
+def inspect_nodes(dump, stored=None):
+    """
+    Every playback node the analysis view lists, as dicts:
+    id, kind, label, key, node_name, hidden (linear), normal (linear, loudest channel),
+    mute, editable, stored (WirePlumber's saved volume or None).
+    """
+    stored = stored or {}
+    rows = []
+    for obj in dump if isinstance(dump, list) else []:
+        if not isinstance(obj, dict) or obj.get("type") != "PipeWire:Interface:Node":
+            continue
+        info = obj.get("info") or {}
+        props = info.get("props") or {}
+        cls = props.get("media.class")
+        name = props.get("node.name") or ""
+        if cls == "Stream/Output/Audio":
+            kind = KIND_OUTPUT if name.startswith(OUTPUT_PREFIX) else KIND_STREAM
+        elif cls == "Audio/Sink":
+            kind = KIND_SINK if name.startswith("cinegain_") else KIND_HARDWARE
+        else:
+            continue
+        p = _props_entry(info)
+        if not p:
+            continue
+        app = props.get("application.name") or ""
+        label = app or props.get("node.description") or props.get("media.name") or name
+        chans = [float(v) for v in p.get("channelVolumes") or [] if isinstance(v, (int, float))]
+        saved = stored.get(app) if kind == KIND_STREAM and app else None
+        rows.append({
+            "id": obj.get("id"), "kind": kind, "label": label, "node_name": name,
+            "key": make_key(app or name, props.get("application.process.binary")),
+            "hidden": float(p.get("volume", 1.0)), "normal": max(chans) if chans else 1.0,
+            "mute": bool(p.get("mute")), "editable": kind in EDITABLE_KINDS,
+            "stored": saved["volume"] if saved else None,
+        })
+    order = {KIND_STREAM: 0, KIND_OUTPUT: 1, KIND_SINK: 2, KIND_HARDWARE: 3}
+    rows.sort(key=lambda r: (order[r["kind"]], r["label"].lower(), r["id"] or 0))
+    return rows
+
+
+def scan_analysis():
+    try:
+        dump = json.loads(subprocess.check_output(["pw-dump"], stderr=subprocess.DEVNULL))
+    except (subprocess.CalledProcessError, ValueError, OSError) as e:
+        log.warning("pw-dump for the analysis view failed: %s", e)
+        return []
+    return inspect_nodes(dump, read_stored())
+
+
+def set_hidden(node_id, fraction, label="", who="user"):
+    """Sets a node's hidden volume to 0..100 % (never above: boosting is Cinegain's job, Q19)."""
+    value = max(0.0, min(1.0, float(fraction)))
+    ok = set_node_volume(node_id, value)
+    if ok:
+        log.info("hidden volume of node %s (%s) set to %.6f = %.1f dB by %s",
+                 node_id, label, value, to_db(value), who)
+    return ok
+
+
+_HIST_PATTERNS = (
+    ("lowered", re.compile(r"hidden volume of node (\d+) \(([^,]*), ([^)]*)\) is [0-9.]+ = (-?[0-9.]+|-inf) dB(?: \(was (-?[0-9.]+) dB\))?")),
+    ("auto", re.compile(r"fading node (\d+) \(([^)]*)\) from (-?[0-9.]+) dB")),
+    ("set", re.compile(r"hidden volume of node (\d+) \(([^)]*)\) set to [0-9.]+ = (-?[0-9.]+|-inf) dB by (\w+)")),
+    ("full_reset", re.compile(r"full volume reset")),
+)
+_LOG_LINE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)[.,]\d+ \d+ \S+ \S+\s+(\S+): (.*)$")
+
+
+def history(log_path=None, days=7, limit=500, key=None, now=None):
+    """
+    Hidden-volume events from the debug log (and its rotated files), newest first:
+    dicts with time (epoch), kind (lowered/auto/set/full_reset), key, db, was_db, who.
+    """
+    base = log_path or paths.LOG_FILE
+    files = [f"{base}.{i}" for i in range(4, 0, -1)] + [base]
+    cutoff = (now or time.time()) - days * 86400
+    events = []
+    for path in files:
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+        except OSError:
+            continue
+        for line in lines:
+            m = _LOG_LINE.match(line.rstrip("\n"))
+            if not m:
+                continue
+            try:
+                ts = time.mktime(time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"))
+            except ValueError:
+                continue
+            if ts < cutoff:
+                continue
+            msg = m.group(3)
+            for kind, rx in _HIST_PATTERNS:
+                hit = rx.search(msg)
+                if not hit:
+                    continue
+                ev = {"time": ts, "kind": kind, "key": "", "db": None, "was_db": None, "who": ""}
+                if kind == "lowered":
+                    ev.update(key=hit.group(2), db=_f(hit.group(4)), was_db=_f(hit.group(5)))
+                elif kind == "auto":
+                    ev.update(key=hit.group(2), db=0.0, was_db=_f(hit.group(3)), who="auto")
+                elif kind == "set":
+                    ev.update(key=hit.group(2), db=_f(hit.group(3)), who=hit.group(4))
+                else:
+                    ev.update(who="user")
+                if key is None or ev["key"] == key or kind == "full_reset":
+                    events.append(ev)
+                break
+    events.sort(key=lambda e: e["time"], reverse=True)
+    return events[:limit]
+
+
+def _f(v):
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except ValueError:
+        return None

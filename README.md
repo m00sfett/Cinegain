@@ -4,24 +4,31 @@
 [![PipeWire](https://img.shields.io/badge/Audio-PipeWire-blue.svg)](https://pipewire.org)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-yellow.svg)](https://www.python.org/)
 [![GUI: PyQt6](https://img.shields.io/badge/GUI-PyQt6-green.svg)](https://riverbankcomputing.com/software/pyqt/)
-[![Version](https://img.shields.io/badge/Release-v0.4.0-orange.svg)](https://github.com/m00sfett/cinegain/releases)
+[![Version](https://img.shields.io/badge/Release-v0.5.0-orange.svg)](https://github.com/m00sfett/cinegain/releases)
 
-> **Realtime Volume Booster, Dialogue Clarity Optimizer & Film Audio Processor for Linux (PipeWire).**
+> **Louder than your system allows — and finally a look at the volumes PipeWire hides from you. For Linux (PipeWire).**
 
-Cinegain solves the classic movie audio problem on Linux: **quiet, mumbled dialogues drowned out by deafening explosions and loud background music**. It also serves as a clean, distortion-free **system volume booster** capable of pushing media audio up to **+25 dB** while keeping the output below full scale (0 dBFS).
+Cinegain has two main features:
 
-Unlike simple equalizers or aggressive compressors that distort the entire mix, Cinegain runs a dedicated low-latency C99 LADSPA DSP filter chain directly inside PipeWire. It isolates the center speech channel, elevates quiet whispers, softens harsh transients, and caps peaks with a look-ahead peak limiter.
+1. **Volume above the system limit (the hero feature).** Any program — browser, video player, a read-aloud voice — gets louder than 100 % system volume, cleanly, with a look-ahead limiter that keeps the output below full scale. The scale runs from **−30 dB to +15 dB**; **overdrive** widens the top to **+40 dB** after an explicit warning. Raising the volume always glides up at 10 dB/s, so a slip of the mouse never blasts you; turning it down is instant.
+2. **Hidden volumes: see, set, reset.** PipeWire keeps a second volume per stream that no mixer shows, and WirePlumber restores it for every new stream. On the author's machine Chrome sat at −48 dB and Electron apps at −84 dB while every mixer showed 100 %. Cinegain's *Analysis* view lists every playback node with its hidden volume, the mixer volume and WirePlumber's saved value, lets you set or reset each one and keeps a 7-day timeline of every lowering.
+
+Everything runs in a small C99 LADSPA plugin inside PipeWire, per program if you like. The film-sound chain (leveler, compressor, speech focus) is still there as *Dynamic · Beta*. Details: [docs/SPEC.md](docs/SPEC.md).
 
 ---
 
 ## Key Features
 
-- **Two Modes per Program — *Fixed* and *Dynamic · Beta*:**
-  *Fixed* (the main feature) is a plain volume boost up to +25 dB with a fixed tone (voices, bass, treble, stereo width). Nothing analyses the signal; only the look-ahead limiter guards against clipping. *Dynamic · Beta* is the full film-sound chain below (leveler, compressor, speech focus). Each mode keeps its own values, so switching back and forth loses nothing. Standard and every program with its own setting have their own mode.
-- **Hidden-Volume Guard & Full Volume Reset:**
-  PipeWire keeps a second, hidden volume per stream that pavucontrol and desktop mixers do not show; WirePlumber remembers it and restores it for every new stream (Chrome was found at -48 dB, Electron apps at -84 dB). Cinegain fades it back to 0 dB for programs it routes and for its own output streams, and shows a warning badge and bar for all others. *Full volume reset* (button, tray or `cinegain volume-reset`) puts hidden volumes back to 0 dB, normal stream volumes to 100 %, unmutes and cleans the saved values; it lowers Cinegain's own gain first so nothing blasts. Every change is logged.
-- **Direct Software Volume Booster (+25 dB):**
-  Instantly amplifies quiet movie files, streams, or low-volume laptop speakers up to +25 dB.
+- **Volume first — −30 to +15 dB, overdrive to +40 dB:**
+  The hero slider sits on top. `−`/`+` buttons next to every slider step 1 dB (Shift 0.1 dB, Ctrl 5 dB, hold to repeat); the same steps work with the arrow keys, the mouse wheel and clicks into the track. Right-click a slider to reset it. Quick steps `0`, `+3`, `+6`, `+9`, `+12`, `+15 dB`. Overdrive is switched on in the title bar after a warning with a confirmation box; it lasts until Cinegain restarts and switching it off drops everything above +15 dB at once.
+- **Gentle rise, instant fall:**
+  Every gain inside the plugin rises at most 10 dB/s and falls immediately — for slider moves, presets, the tray, the CLI, a filter that starts or is switched back on. The hero slider shows how many dB are still to go.
+- **Hidden-volume analysis:**
+  Table of all playback streams, Cinegain's own nodes and (read-only) the sound cards: hidden volume, mixer volume, mute, WirePlumber's saved value; set 0–100 % or reset per row; timeline of the last 7 days with who did what. Automatic fade-back for programs routed through Cinegain can be switched off to watch lowerings happen. *Full volume reset* (button, tray or `cinegain volume reset`) puts hidden volumes back to 0 dB, normal volumes to 100 %, unmutes and cleans the saved values, lowering Cinegain's own gain first so nothing blasts.
+- **Three view levels:**
+  *Simple* shows only the volume. *Advanced* adds all sliders, presets and slots, the hidden volume and the analysis view, and *Dynamic · Beta*. *Pro* adds raw values (node IDs, sinks, linear values) and the debug log inside the app. The level is remembered.
+- **Two modes per program — *Fixed* and *Dynamic · Beta*:**
+  *Fixed* is a plain volume boost with a fixed tone (voices, bass, treble, stereo width). *Dynamic · Beta* is the film-sound chain below. Beta features wear a dashed outline. Each mode keeps its own values.
 - **Intelligent Dialogue Leveler:**
   Continuously monitors RMS dialogue levels with peak look-ahead, boosting quiet speech passages while gracefully pulling back during loud action scenes.
 - **Acoustic Presence Filter (2.5 kHz):**
@@ -31,9 +38,9 @@ Unlike simple equalizers or aggressive compressors that distort the entire mix, 
 - **Look-Ahead Peak Limiter:**
   A 5 ms look-ahead on sample peaks pulls the output down to the configured ceiling (default -0.5 dBFS) before the peak arrives. Measured overshoot above the ceiling stays around 0.2 dB. A soft safety clip with a hard stop keeps the output at or below 0 dBFS, even when pushed to maximum gain. The limiter works on sample peaks only and does not detect inter-sample (true-peak) overs.
 - **Red-Yellow-Black Desktop Interface:**
-  Modern two-column layout with high-contrast hero sliders, real-time feedback, and system tray integration.
+  Two-column layout with a high-contrast hero slider, real-time meters, a resizable program list and system tray integration.
 - **Full Keyboard Navigation:**
-  Control every parameter using the keyboard (`↑`/`↓` to switch sliders, `←`/`→` for 1.0 dB steps, `Shift + ←`/`→` for 0.1 dB fine tuning).
+  Control every parameter using the keyboard (`↑`/`↓` to switch sliders, `←`/`→` for 1 dB, `Shift` 0.1 dB, `Ctrl` 5 dB, `F6` other column, `Page Up`/`Page Down` program).
 - **6 User Slots:**
   Store and recall your own settings, including their mode, with live match indicators and slot renaming.
 - **Settings per Program, Remembered Permanently:**
@@ -43,7 +50,7 @@ Unlike simple equalizers or aggressive compressors that distort the entire mix, 
 - **Multi-Language Support (19 Languages):**
   Instant live translation switcher in the title bar (Material Translate `A / 文` icon): English, German, Spanish, French, Italian, Portuguese, Dutch, Polish, Turkish, Russian, Ukrainian, Arabic, Hindi, Indonesian, Vietnamese, Japanese, Korean, Simplified Chinese, Traditional Chinese.
 - **Headless Daemon & CLI:**
-  Full command-line interface (`cinegain start`, `stop`, `status`, `set`, `batch`, `mode`, `preset`, `route`, `watch`, `apps`, `templates`, `volume-reset`, `log`, `reset`) for scripting or headless desktop environments.
+  Full command-line interface (`cinegain start`, `stop`, `status`, `set`, `batch`, `mode`, `preset`, `route`, `watch`, `apps`, `templates`, `volume`, `overdrive`, `log`, `reset`) for scripting or headless desktop environments.
 
 ---
 
@@ -107,13 +114,13 @@ Download the `.deb` package from the [Releases page](https://github.com/m00sfett
 
 ```bash
 sudo apt update
-sudo apt install ./cinegain_0.4.0_amd64.deb
+sudo apt install ./cinegain_0.5.0_amd64.deb
 ```
 
 *Or build the `.deb` package yourself:*
 ```bash
 ./packaging/debian/build-deb.sh
-sudo apt install ./packaging/cinegain_0.4.0_amd64.deb
+sudo apt install ./packaging/cinegain_0.5.0_amd64.deb
 ```
 
 > [!NOTE]
@@ -126,18 +133,18 @@ sudo apt install ./packaging/cinegain_0.4.0_amd64.deb
 Download the `.rpm` package from the [Releases page](https://github.com/m00sfett/cinegain/releases) or build it using the spec file:
 
 ```bash
-sudo dnf install ./cinegain-0.4.0-1.x86_64.rpm
+sudo dnf install ./cinegain-0.5.0-1.x86_64.rpm
 ```
 
 ---
 
 ### Method 5: Standalone Release Archive (Universal Tarball)
 
-Download `cinegain-0.4.0-linux-x86_64.tar.gz` from [GitHub Releases](https://github.com/m00sfett/cinegain/releases):
+Download `cinegain-0.5.0-linux-x86_64.tar.gz` from [GitHub Releases](https://github.com/m00sfett/cinegain/releases):
 
 ```bash
-tar -xzvf cinegain-0.4.0-linux-x86_64.tar.gz
-cd cinegain-0.4.0-linux-x86_64
+tar -xzvf cinegain-0.5.0-linux-x86_64.tar.gz
+cd cinegain-0.5.0-linux-x86_64
 ./install.sh        # Installs for current user (~/.local)
 # or: sudo ./install.sh --system  # Installs system-wide (/usr/local)
 ```
@@ -175,17 +182,18 @@ Start the interface from your desktop application launcher or terminal:
 cinegain-gui
 ```
 
-- **Filter Toggle:** Click the large red/green button in the banner to toggle Cinegain on or off without altering your slider positions.
-- **Language Switcher:** Click the `🌐` / `A / 文` button in the title banner to instantly switch between 19 languages.
-- **Mode switch:** *Fixed | Dynamic · Beta* in the header next to the program name. Fixed shows the five shared sliders (volume and voices left, bass, treble and stereo width right); Dynamic adds leveler, center, compressor, makeup and limiter below them. A β in the sidebar marks programs that run dynamic.
-- **Factory Presets:** All presets are always visible. The volume steps (`Neutral 0 dB`, `+5`…`+25 dB`) switch to *Fixed*, the film presets marked β (`Film & Serie`, `Night Mode`, `Max Cinema`) to *Dynamic*.
-- **User Slots:** Six slots. Click an empty slot to save the current mode and values. Left-click to load (mode included); right-click to rename, overwrite or clear.
-- **Hidden volume:** A red `-48 dB` badge on a program, a hint in the header and a bar above everything appear when PipeWire secretly turns a stream down. *Reset* fixes one program, *Full volume reset* all of them.
-- **Keyboard Controls:** Use `↑` / `↓` to select sliders. Press `←` / `→` for 1.0 dB steps, or hold `Shift` for fine 0.1 dB steps.
-- **Programs (sidebar):** Click *Standard* or a program; the header above the presets names what you are editing. The first slider move or preset gives a program its own setting, *Back to Standard* discards it. The switch in each row routes the program through Cinegain or straight to the speakers. Programs silent for more than a week fold away under *Silent for a while*. Right-click a program to rename it, set its own volume back to 100 % or forget it. A yellow volume badge (e.g. `40 %`) means the program itself is turned down; one click fixes it.
-- **Presets & user slots:** A click loads the values into the selected program (or Standard). Loaded templates keep their saved values while you adjust the sound. Right-click a slot to store the current values in it, rename or clear it.
-- **Keyboard:** `Page Up` / `Page Down` switch the program; arrows work as before.
-- **Reset everything:** The button in the bottom left asks for confirmation, backs up the current state and restarts the window in factory state.
+- **View level:** *Simple | Advanced | Pro* in the title bar. Simple shows only the volume; Advanced adds every slider, presets, slots, hidden volumes, the *Analysis* tab and *Dynamic · Beta*; Pro adds raw values and the *Log* tab.
+- **Volume:** the hero slider (−30 to +15 dB). `−`/`+` next to every slider: 1 dB, `Shift` 0.1 dB, `Ctrl` 5 dB, hold to repeat. Right-click a slider to reset it to neutral. Raising glides at 10 dB/s (the slider shows what is still to go), lowering is instant.
+- **Overdrive:** the orange button in the title bar. A warning with a confirmation box comes first; then the volume (and the dynamic make-up gain) reach +40 dB, the zone above +15 dB is marked orange. Off — or a restart — drops everything above +15 dB at once.
+- **Filter Toggle:** the large button in the banner switches every filter to pass-through without moving streams, so browsers do not pause.
+- **Language Switcher:** the `A / 文` button switches between 19 languages.
+- **Mode switch:** *Fixed | Dynamic · Beta* in the header next to the program name (Advanced and Pro). Dynamic adds leveler, center, compressor, make-up and limiter below the five shared sliders. Beta features have a dashed outline.
+- **Presets:** volume steps `Neutral 0 dB`, `+3`…`+15 dB` (Fixed); film presets `Film & Serie`, `Night Mode`, `Max Cinema` (Dynamic · Beta, dashed).
+- **User Slots:** six slots. Click an empty slot to save the current mode and values, left-click to load, right-click to rename, overwrite or clear.
+- **Hidden volume:** the header always shows the hidden volume of the selected target (0 dB when nothing is lowered). A red `-48 dB` badge on a program and a bar under the banner appear when PipeWire turns a stream down. The *Analysis* tab shows every node, lets you set or reset it and keeps a 7-day timeline; *Reset automatically* there decides whether Cinegain fades routed programs back by itself.
+- **Programs (sidebar):** drag the handle between list and editor to make it wider (double-click resets to 280 px). Click *Standard* or a program; the first change gives a program its own setting, *Back to Standard* discards it. The switch routes a program through Cinegain or straight to the speakers. Right-click a program to rename it, set its own volume back to 100 % or forget it.
+- **Keyboard:** `↑`/`↓` select sliders, `←`/`→` change them (`Shift` 0.1 dB, `Ctrl` 5 dB), `F6` jumps to the other column, `Page Up`/`Page Down` switch the program.
+- **Reset everything:** the button in the bottom left asks for confirmation, backs up the current state and restarts the window in factory state.
 
 ### 2. Command-Line Interface (CLI)
 Cinegain provides a standalone daemon controller:
@@ -200,14 +208,15 @@ cinegain status
 # Output status as structured JSON:
 cinegain status --json
 
-# Adjust parameters live (works while filter is active or inactive):
+# Adjust parameters live (works while filter is active or inactive);
+# the volume range is -30..+15 dB, up to +40 dB with overdrive:
 cinegain set input_db 12.0
 cinegain set dialog_db 5.0
 cinegain set lev_max_boost_db 18.0
 
 # Apply a preset via CLI:
 cinegain preset dialog_boost
-cinegain preset boost_10db
+cinegain preset boost_9db
 cinegain preset clean_linear
 
 # Apply per-program routing once, or keep it applied without the GUI
@@ -229,9 +238,17 @@ cinegain mode dynamic                  # Standard: dynamic (beta)
 cinegain mode fixed --app chrome       # Chrome: fixed (gets its own setting)
 cinegain batch '{"input_db": 12}' --mode fixed
 
-# Undo secretly lowered stream volumes (hidden PipeWire volume):
-cinegain volume-reset
-cinegain volume-reset --app chatgpt
+# Hidden PipeWire volumes: list, set (0-100 %), reset (volume-reset still works):
+cinegain volume                        # every playback node: hidden, mixer and saved volume
+cinegain volume list --json
+cinegain volume set chromium 100
+cinegain volume reset                  # full volume reset
+cinegain volume reset chatgpt          # only one program
+
+# Overdrive (volume up to +40 dB until Cinegain restarts):
+cinegain overdrive                     # show
+cinegain overdrive on --confirm        # without --confirm it prints the warning
+cinegain overdrive off                 # values above +15 dB drop at once
 
 # Reset everything to factory settings (state is backed up first):
 cinegain reset
@@ -248,6 +265,8 @@ cinegain log --path     # where the file is
 
 **Debug log.** Every stream that appears, moves or disappears (with program, sink and reason), every filter process start, stop or crash, every parameter push, the filters' meters every 10 s while audio flows, every GUI action and every error is written to the log (rotating, 5 × 2 MB). The stderr of each PipeWire filter process goes to `pipewire-<profile>.log` next to it. Set the level with `CINEGAIN_LOG_LEVEL` or `"log_level"` in `~/.config/cinegain/config.json` (default `DEBUG`), the directory with `CINEGAIN_LOG_DIR`. The tray menu has "Open debug log".
 
+**Settings file.** `~/.config/cinegain/config.json` keeps the language, the view level (`view_level`), the sidebar width (`sidebar_width`) and the automatic hidden-volume reset (`volume_auto_reset`). Overdrive is never saved.
+
 **Filter off.** "Filter ausschalten" switches every Cinegain filter to pass-through. Streams and sinks stay in place, so browsers do not pause the video. "Quit" or `cinegain stop` really stops the filter chain.
 
 ---
@@ -258,7 +277,7 @@ cinegain log --path     # where the file is
 Audio Input (L / R)
        │
        ▼
- [ Direct Volume Boost Stage (-12 dB .. +25 dB) ]
+ [ Volume Stage (-30 dB .. +15 dB, overdrive +40 dB; rises at 10 dB/s, falls at once) ]
        │
        ▼
  [ 120 Hz Sub-Bass Shelf EQ ] ───► [ 8 kHz High-Shelf Brilliance EQ ]

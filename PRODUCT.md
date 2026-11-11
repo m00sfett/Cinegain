@@ -2,25 +2,30 @@
 
 ## Zweck
 
-Cinegain ist ein Desktop- und System-Tray-Werkzeug für Linux (PipeWire), das zwei Alltagsprobleme ohne Qualitätsverlust und ohne Browser-DRM-Einschränkungen löst:
+Cinegain ist ein Desktop- und System-Tray-Werkzeug für Linux (PipeWire) mit zwei Hauptfunktionen (Neuausrichtung 0.5.0, Spezifikation in `docs/SPEC.md`):
 
-1. **Softwareseitige Lautstärke-Verstärkung (Volume Booster bis +25 dB):**
-   Macht leise Streams, Videos, Browser oder einzelne Programme sofort lauter als 100 % Systemlautstärke – geschützt durch einen Look-Ahead-Limiter gegen Übersteuern.
-2. **Echtzeit-Filmton- & Dialog-Optimierung:**
-   Hebt flüsterleise Dialoge automatisch an (Sprach-EQ + Mid/Side-Fokus + Gated Leveler) und fängt ohrenbetäubende Effekte sanft ab.
+1. **Lautstärke über das Systemmaß (Hauptfunktion):** Jedes Programm wird lauter als 100 % Systemlautstärke, von −30 bis +15 dB, mit Overdrive bis +40 dB. Lauter wird mit 10 dB/s angefahren, leiser wirkt sofort. Ein Look-Ahead-Limiter verhindert Übersteuern.
+2. **Versteckte Lautstärken sehen, einstellen, zurücksetzen:** PipeWire führt pro Stream eine zweite Lautstärke, die kein Mixer zeigt. WirePlumber stellt sie bei jedem neuen Stream wieder her. Cinegain zeigt sie in einer Analyse-Ansicht samt 7-Tage-Zeitleiste, setzt sie pro Knoten und setzt sie zurück.
 
-## Modi (seit 0.4.0)
+Die frühere Filmton-Optimierung (Leveler, Kompressor, Sprachfokus) bleibt als Modus **Dynamisch · Beta**.
 
-- **Fest (Hauptfunktion):** feste Lautstärke-Anhebung bis +25 dB plus feste Klangfarbe (Stimmen, Bass, Höhen, Stereo-Breite). Keine Signalanalyse; nur der Limiter schützt vor Übersteuern.
-- **Dynamisch · Beta:** die volle Filmton-Kette (Leveler, Kompressor, Sprachfokus), ausdrücklich als Beta gekennzeichnet.
+## Ansichtsstufen
+
+- **Einfach:** nur lauter oder leiser stellen. Hauptregler, Schnellstufen, Filter an/aus, Overdrive.
+- **Erweitert:** alle Regler, Presets und Speicherplätze, versteckte Lautstärken, Analyse, Dynamisch · Beta.
+- **Profi:** zusätzlich Rohwerte und das Debug-Log in der App.
+
+## Modi
+
+- **Fest:** feste Lautstärke-Anhebung plus feste Klangfarbe (Stimmen, Bass, Höhen, Stereo-Breite). Keine Signalanalyse.
+- **Dynamisch · Beta:** die volle Filmton-Kette. Beta-Funktionen tragen einen gestrichelten Rahmen.
 - Jeder Modus hat einen eigenen Wertesatz. Standard und jedes Programm mit eigener Einstellung haben ihren eigenen Modus.
-- **Wächter für versteckte Lautstärke:** macht heimlich abgesenkte Stream-Lautstärken sichtbar und setzt sie zurück („Lautstärke voll zurücksetzen“).
 
 ## Nutzungssituation
 
-- **Modus:** `Operate` (Werkzeug zur direkten Klangsteuerung am Schreibtisch oder vom Sofa aus).
-- **Umgebung:** Häufig abends oder im abgedunkelten Raum beim Film- und Serienschauen, oft mit schneller Bedienung per Maus oder ausschließlich per Pfeiltasten (`↑`/`↓`/`←`/`→`).
+- **Modus:** `Operate`, also ein Werkzeug zur direkten Klangsteuerung am Schreibtisch oder vom Sofa aus. Dazu kommt Analyse, wenn Programme rätselhaft leise werden.
+- **Umgebung:** häufig abends oder im abgedunkelten Raum, oft mit schneller Bedienung per Maus oder ausschließlich per Tastatur (`↑`/`↓`/`←`/`→`, Shift 0,1 dB, Strg 5 dB).
 - **Primäre Aktionen:**
-  1. Direkt-Verstärkung (`input_db`, `-12 dB` bis `+25 dB`) regeln oder einen Schnell-Boost (`+5` bis `+25 dB` / Film-Profil / Eigenes Preset) wählen.
-  2. Sprachfokus und Dynamik feinabstimmen.
-  3. Links ein Programm wählen und es oben mit Presets und Reglern einstellen; Programme ohne eigene Einstellung folgen „Standard". Ein Schalter pro Programm entscheidet, ob es durch Cinegain läuft. Die Liste bleibt dauerhaft gespeichert, auch über Pausen und Neustarts hinweg.
+  1. Ein Programm (oder Standard) lauter oder leiser stellen: mit Hauptregler, ±-Knöpfen oder Schnellstufen (0 bis +15 dB).
+  2. Nachsehen, ob ein Programm heimlich abgesenkt ist, und es zurücksetzen.
+  3. Bei Bedarf Klangfarbe oder Dynamisch · Beta feinabstimmen.

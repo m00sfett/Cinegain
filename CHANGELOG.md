@@ -15,6 +15,52 @@ Categories follow the standard Keep a Changelog taxonomy: `Added`, `Changed`, `D
 
 ---
 
+## [0.5.0] - 2026-11-11
+
+Minor-Version mit Freigabe des Nutzers (Grill-Runde 0.5.0, Q14b). Die Produktausrichtung ändert sich: Hauptfunktion ist die Lautstärke über das Systemmaß, zweite Hauptfunktion die Analyse versteckter Lautstärken. Dazu kommen Overdrive, Ansichtsstufen und eine neue Skala. Spezifikation: `docs/SPEC.md`.
+
+### Added
+- **Overdrive:** erweitert Lautstärke und Make-up von +15 dB auf +40 dB.
+  - Einschalten nur über einen Warndialog mit Checkbox, in der CLI mit `cinegain overdrive on --confirm`.
+  - Gilt nur bis zum Neustart. Ausschalten oder Neustart kappt gespeicherte Werte über +15 dB sofort.
+  - Der Schalter steht in jeder Ansichtsstufe in der Titelleiste. Die Zone über +15 dB ist orange markiert.
+- **Sanftes Hochfahren im Plugin:** Alle Verstärkungen steigen höchstens mit 10 dB/s und fallen sofort.
+  - Das gilt für Regler, Presets, Tray, CLI, neu startende Filter und das Wiedereinschalten nach „Filter ausschalten“.
+  - Der Hauptregler zeigt, wie viele dB noch fehlen. Die Meterdatei hat dafür das neue Feld `ramp_db`.
+- **±-Knöpfe neben jedem Regler** mit Auto-Repeat. Schritte 1 dB, mit Shift 0,1 dB, mit Strg 5 dB. Dieselben Schritte gelten jetzt auch für Pfeiltasten, Mausrad und Klick in die Bahn.
+- **Rechtsklick auf einen Regler** setzt ihn auf den neutralen Wert.
+- **Analyse-Ansicht (Tab „Analyse“):**
+  - Liste aller Ausgabe-Streams, Cinegain-Knoten und, nur lesend, der Soundkarten.
+  - Pro Knoten: versteckte Lautstärke, Mixer-Lautstärke, Stummschaltung, gespeicherter WirePlumber-Wert, Regler 0–100 %, Zurücksetzen.
+  - Zeitleiste der letzten 7 Tage aus dem Debug-Log.
+  - Die automatische Rückblende lässt sich abschalten. Bei offener Ansicht wird alle 0,5 s abgetastet.
+- **Ansichtsstufen Einfach / Erweitert / Profi.** Die Stufe wird gespeichert. Profi zeigt zusätzlich Rohwerte und das Debug-Log in einem Tab.
+- **Versteckte Lautstärke im Bearbeitungskopf** ab Erweitert immer sichtbar, auch bei 0 dB.
+- **Verstellbare Programmliste:** ziehbarer Trenner, Startbreite 280 px, Breite gespeichert, Doppelklick setzt zurück.
+- **CLI:**
+  - `cinegain overdrive [on --confirm|off|status]`
+  - `cinegain volume [list|set|reset]`. `volume-reset` bleibt als alter Name.
+  - `cinegain status` nennt den Overdrive-Zustand.
+- Das R²W²-Logo in der Titelleiste verlinkt auf das GitHub-Projekt.
+- `docs/SPEC.md` mit Zielbild, Nicht-Zielen und Akzeptanzkriterien.
+
+### Changed
+- **Skala:**
+  - Lautstärke von −30 bis +15 dB, vorher −12 bis +25 dB.
+  - Make-up höchstens +15 dB, mit Overdrive +40 dB.
+  - Die Plugin-Grenzen sind erweitert: `input_db` −30 bis +40 dB, `makeup_db` bis +40 dB.
+  - Gespeicherte Werte über +15 dB werden beim Start gekappt.
+- **Schnellstufen:**
+  - Die Lautstärke-Presets heißen jetzt +3, +6, +9, +12 und +15 dB (vorher +5 bis +25 dB). Neue IDs `boost_3db` bis `boost_15db`.
+  - „Max-Kino“ startet bei +15 dB statt +18 dB.
+  - Das Tray-Menü bietet +6 und +12 dB.
+- **Beta-Kennzeichnung:** gestrichelter Rahmen und Tooltip statt β. Das gilt für die Film-Presets, „Dynamisch · Beta“, dynamische Speicherplätze und das Etikett „Dynamisch“ in der Programmliste.
+- **Voll-Reset:** gleicht Cinegains Verstärkung bis −30 dB aus (vorher −12 dB).
+- **Einstellungen:** `config.json` wird zusammengeführt statt überschrieben. Sprache, Ansichtsstufe, Sidebar-Breite und Automatik bleiben nebeneinander erhalten.
+- **Doku:** README, PRODUCT.md und DESIGN.md sind auf die neue Ausrichtung umgestellt. Untertitel und Tooltip nennen die neue Skala. Der Reset-Dialog spricht von 6 statt 8 Speicherplätzen.
+
+---
+
 ## [0.4.0] - 2026-11-11
 
 Minor-Version mit Freigabe des Nutzers: neuer Betriebsmodus pro Programm und umgebaute Preset-Leiste.
