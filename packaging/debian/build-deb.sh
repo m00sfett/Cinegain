@@ -45,7 +45,7 @@ Version: ${VERSION}
 Section: sound
 Priority: optional
 Architecture: ${ARCH}
-Depends: pipewire (>= 0.4.00), pipewire-pulse | pulseaudio-utils, python3 (>= 3.10), python3-pyqt6
+Depends: pipewire (>= 0.3.50), pipewire-pulse | pulseaudio-utils, python3 (>= 3.10), python3-pyqt6
 Maintainer: Tobias Moos <tobias@roteson.de>
 Description: Realtime volume booster & dialogue clarity optimizer for PipeWire
  Cinegain is a dedicated realtime audio DSP processor designed for movies, TV

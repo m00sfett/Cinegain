@@ -58,7 +58,7 @@ Everything runs in a small C99 LADSPA plugin inside PipeWire, per program if you
 
 ### Runtime Requirements
 All installation methods require:
-- **Linux OS** with **PipeWire** (>= 0.4.00) and `pipewire-pulse` (default audio stack on Arch, CachyOS, Fedora 34+, Ubuntu 22.10+, Debian 12+, openSUSE).
+- **Linux OS** with **PipeWire** (>= 0.3.50) and `pipewire-pulse` (default audio stack on Arch, CachyOS, Fedora 34+, Ubuntu 22.10+, Debian 12+, openSUSE).
 - **Python** (>= 3.10).
 - **PyQt6** (`python-pyqt6` / `python3-pyqt6`) for the graphical desktop interface. *(The headless CLI works without PyQt6).*
 - Standard C math library (`libm`).
