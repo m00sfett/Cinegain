@@ -15,7 +15,7 @@ Categories follow the standard Keep a Changelog taxonomy: `Added`, `Changed`, `D
 
 ---
 
-## [0.5.1] - Unreleased
+## [0.5.1] - 2026-11-11
 
 Patch-Version: nur Packaging und Release-Ablauf, das Programm selbst ist unverändert.
 
