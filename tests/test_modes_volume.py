@@ -1397,7 +1397,7 @@ class TestOneDumpPerTick(unittest.TestCase):
         self.assertEqual(st["params"], reference_params(self.dump, 12))
         self.assertEqual(st["params"], {"input_db": 6.0, "bypass": 0.0})
         self.assertEqual(set(st), {"active", "node_id", "preset", "mode", "sets", "params", "overdrive",
-                                   "profile_sinks", "version"})
+                                   "profile_sinks", "version", "bypass"})
         saved = modes.load_standard()
         self.dump = fake_dump(std_params=None)                  # running, but shows no cinegain:* parameters
         st, code = self.status()
