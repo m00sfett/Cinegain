@@ -393,6 +393,25 @@ class TestRouting(Base):
         self.router.tick(active=True)
         self.assertEqual(self.sinks.started, ["x", "x"])
 
+    def test_failing_sink_start_does_not_stop_the_tick(self):
+        """#31: one program whose sink cannot start must not break routing for the others."""
+        self.stream(1, "Spotify", "spotify")
+        self.stream(2, "Firefox", "firefox")
+        self.router.tick(active=True)
+        self.give_own(SPOTIFY)
+        self.give_own(FIREFOX)
+        real_start = self.sinks.start
+
+        def start(profile_id, params, description="Cinegain"):
+            if "Spotify" in description:
+                raise ValueError("bad escape")
+            return real_start(profile_id, params, description)
+
+        self.sinks.start = start
+        views = self.router.tick(active=True)
+        self.assertEqual(len(self.sinks.started), 1)  # Firefox still got its sink
+        self.assertEqual({v.label for v in views}, {"Spotify", "Firefox"})
+
     def test_own_streams_are_ignored(self):
         self.pulse.streams.append(Stream(9, "53", node_name="cinegain_output_app_spotify_abc123"))
         views = self.router.tick(active=True)
