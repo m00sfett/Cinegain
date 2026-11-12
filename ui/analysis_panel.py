@@ -62,6 +62,8 @@ QPlainTextEdit {{ background-color: #0E0B09; color: {INK_MUTED}; border: 1px sol
     font-family: "Fira Mono", monospace; font-size: 11px; selection-background-color: #3D2C07; }}
 """
 
+SET_DEBOUNCE_MS = 300   # a wheel or key burst on a slider ends in one set / one fade (#34)
+
 # column ids; the pro view adds node id and node name
 COL_NAME, COL_KIND, COL_HIDDEN, COL_NORMAL, COL_SAVED, COL_SET, COL_RESET, COL_ID, COL_NODE = range(9)
 
@@ -97,6 +99,14 @@ class AnalysisPanel(QWidget):
         self.fade_timer.timeout.connect(self._step_own_fades)
         self._ids = []
         self._history_at = 0.0
+        # Slider changes wait for SET_DEBOUNCE_MS of quiet; until applied (and while the fade
+        # they started runs) the slider keeps the wanted value instead of snapping back.
+        self._pending = {}   # node id -> slider
+        self._wanted = {}    # node id -> fraction the user asked for
+        self.set_timer = QTimer(self)
+        self.set_timer.setSingleShot(True)
+        self.set_timer.setInterval(SET_DEBOUNCE_MS)
+        self.set_timer.timeout.connect(self._apply_pending)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(2, 4, 2, 2)
@@ -129,7 +139,7 @@ class AnalysisPanel(QWidget):
         self.table.verticalHeader().hide()
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.table.setFocusPolicy(Qt.FocusPolicy.StrongFocus)  # reachable with Tab and the arrow keys (#34)
         self.table.setShowGrid(False)
         hdr = self.table.horizontalHeader()
         hdr.setSectionResizeMode(COL_NAME, QHeaderView.ResizeMode.Stretch)
@@ -152,7 +162,7 @@ class AnalysisPanel(QWidget):
         self.timeline.setAlternatingRowColors(True)
         self.timeline.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.timeline.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.timeline.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.timeline.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.timeline.setShowGrid(False)
         th = self.timeline.horizontalHeader()
         th.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
@@ -201,6 +211,7 @@ class AnalysisPanel(QWidget):
         self.timeline.setHorizontalHeaderLabels([t("analysis_col_time"), t("analysis_col_name"),
                                                  t("analysis_col_event"), t("analysis_col_by")])
         self._ids = []  # rebuild rows (kind texts, buttons)
+        self._pending.clear()
         self.set_pro(self.pro)
         if self.isVisible():
             self.refresh()
@@ -236,10 +247,11 @@ class AnalysisPanel(QWidget):
             if r["editable"]:
                 s = QSlider(Qt.Orientation.Horizontal)
                 s.setRange(0, 100)
-                s.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+                s.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+                s.setTracking(False)   # a drag reports once, on release; click, wheel and keys at once
                 s.setCursor(Qt.CursorShape.PointingHandCursor)
                 s.setToolTip(t("analysis_set_tip"))
-                s.sliderReleased.connect(lambda sl=s, nid=r["id"]: self._set_from_slider(nid, sl))
+                s.valueChanged.connect(lambda _v, sl=s, nid=r["id"]: self._slider_changed(nid, sl))
                 wrap = QWidget()
                 lay = QHBoxLayout(wrap)
                 lay.setContentsMargins(8, 0, 8, 0)
@@ -284,7 +296,7 @@ class AnalysisPanel(QWidget):
         wrap = self.table.cellWidget(i, COL_SET)
         if wrap is not None:
             s = wrap.findChild(QSlider)
-            if s is not None and not s.isSliderDown():
+            if s is not None and not s.isSliderDown() and not self._holds_wanted(r["id"], r["hidden"]):
                 s.blockSignals(True)
                 s.setValue(int(round(r["hidden"] * 100)))
                 s.blockSignals(False)
@@ -294,6 +306,19 @@ class AnalysisPanel(QWidget):
 
     def _row(self, node_id):
         return next((r for r in self.rows if r["id"] == node_id), None)
+
+    def _holds_wanted(self, node_id, hidden):
+        """True while the slider of a node must keep the value the user asked for (#34)."""
+        if node_id in self._pending:
+            return True
+        wanted = self._wanted.get(node_id)
+        if wanted is None:
+            return False
+        guard = vol.live_guard() or self._own_guard
+        if node_id in guard.fades and abs(hidden - wanted) >= 0.005:
+            return True              # the fade towards it is still running
+        del self._wanted[node_id]
+        return False
 
     def _apply(self, node_id, fraction):
         """Lowering is instant, raising fades in at <= 10 dB/s (#27)."""
@@ -315,10 +340,21 @@ class AnalysisPanel(QWidget):
         if not self._own_guard.fades:
             self.fade_timer.stop()
 
-    def _set_from_slider(self, node_id, slider):
-        self._apply(node_id, slider.value() / 100.0)
+    def _slider_changed(self, node_id, slider):
+        """Click in the groove, wheel, keys or the end of a drag: set after a short quiet time."""
+        self._pending[node_id] = slider
+        self.set_timer.start()
+
+    def _apply_pending(self):
+        pending, self._pending = self._pending, {}
+        for node_id, slider in pending.items():
+            fraction = slider.value() / 100.0
+            self._wanted[node_id] = fraction
+            self._apply(node_id, fraction)
 
     def _reset(self, node_id):
+        self._pending.pop(node_id, None)
+        self._wanted.pop(node_id, None)
         self._apply(node_id, 1.0)
 
     # -- timeline ---------------------------------------------------------------

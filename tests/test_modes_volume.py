@@ -935,6 +935,88 @@ class TestSetHidden(unittest.TestCase):
         del app
 
 
+class TestAnalysisSliders(unittest.TestCase):
+    """#34: a click in the groove, the wheel and the keys only moved the slider; the refresh put it back."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+            from PyQt6.QtWidgets import QApplication
+            import analysis_panel
+        except ImportError as e:  # pragma: no cover - PyQt6 missing
+            raise unittest.SkipTest(f"PyQt6 not available: {e}")
+        cls.ap = analysis_panel
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        import cinegain_volume as vol
+        vol._live = None
+        self.sets = []
+        self.rows = [{"id": 5, "kind": "stream", "label": "Spotify", "key": "spotify::spotify",
+                      "node_name": "Spotify", "hidden": 0.5, "normal": 1.0, "mute": False,
+                      "editable": True, "stored": None}]
+        self.panel = self.ap.AnalysisPanel(scanner=lambda: self.rows, history=lambda key=None: [],
+                                           setter=lambda *a: self.sets.append(a) or True)
+        self.panel.refresh()
+        self.slider = self.panel.table.cellWidget(0, self.ap.COL_SET).findChild(self.ap.QSlider)
+
+    def settle(self):
+        """Lets the debounce time pass."""
+        self.assertTrue(self.panel.set_timer.isActive())
+        self.panel.set_timer.stop()
+        self.panel._apply_pending()
+
+    def test_groove_click_wheel_and_keys_set_the_value_debounced(self):
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtTest import QTest
+        from PyQt6.QtWidgets import QAbstractSlider
+        s = self.slider
+        self.assertEqual(s.value(), 50)
+        s.triggerAction(QAbstractSlider.SliderAction.SliderPageStepAdd)      # click in the groove
+        self.assertEqual(s.value(), 60)
+        self.panel.refresh()                                                 # the 0.5 s refresh must not undo it
+        self.assertEqual(s.value(), 60)
+        for _ in range(3):                                                   # mouse wheel notches
+            s.triggerAction(QAbstractSlider.SliderAction.SliderSingleStepAdd)
+        QTest.keyClick(s, Qt.Key.Key_Right)                                  # keyboard
+        self.assertEqual(s.value(), 64)
+        self.assertEqual(self.sets, [])                                      # nothing written per notch ...
+        self.settle()
+        self.assertEqual([(a[0], a[1]) for a in self.sets], [(5, 0.64)])     # ... one set for the burst
+
+    def test_slider_keeps_the_wanted_value_while_the_raise_fades(self):
+        import cinegain_volume as vol
+        s = self.slider
+        s.setValue(80)
+        guard = self.panel._own_guard
+        guard.fades[5] = vol.Fade(-6.0, -2.0, 0.0, lambda db, final: True)  # the raise runs, hidden still 0.5
+        self.settle()
+        self.panel.refresh()
+        self.assertEqual(s.value(), 80)
+        self.rows[0]["hidden"] = 0.8                                         # reached
+        guard.fades.clear()
+        self.panel.refresh()
+        self.assertEqual(s.value(), 80)
+        self.rows[0]["hidden"] = 0.3                                         # something external lowered it later
+        self.panel.refresh()
+        self.assertEqual(s.value(), 30)                                      # the view follows reality again
+
+    def test_drag_reports_once_and_everything_is_reachable_by_keyboard(self):
+        from PyQt6.QtCore import Qt
+        s = self.slider
+        s.setSliderDown(True)
+        for v in (55, 60, 70):
+            s.setSliderPosition(v)                                           # tracking off: silent while dragging
+        self.assertFalse(self.panel.set_timer.isActive())
+        s.setSliderDown(False)
+        self.settle()
+        self.assertEqual([(a[0], a[1]) for a in self.sets], [(5, 0.7)])
+        self.assertEqual(self.panel.table.focusPolicy(), Qt.FocusPolicy.StrongFocus)
+        self.assertEqual(self.panel.timeline.focusPolicy(), Qt.FocusPolicy.StrongFocus)
+        self.assertEqual(s.focusPolicy(), Qt.FocusPolicy.StrongFocus)
+
+
 class TestHistoryIncremental(unittest.TestCase):
     """#39: history() and the log tail read only what is new, with the same result as reading everything."""
 
