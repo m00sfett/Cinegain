@@ -75,6 +75,14 @@ class FakePulse:
                 s.sink = sid
         self.moves.append((str(index), sink))
 
+    def set_volume_pct(self, index, pct):
+        self.volume_sets = getattr(self, "volume_sets", [])
+        self.volume_sets.append((str(index), pct))
+        for s in self.streams:
+            if s.index == str(index):
+                s.volume_pct = s.volume_min_pct = int(round(pct))
+        return True
+
     def set_volume_100(self, index):
         self.volume_resets.append(str(index))
         for s in self.streams:
@@ -525,18 +533,19 @@ class TestPulseParsing(unittest.TestCase):
         data = [{"index": 7, "sink": 53, "mute": False, "corked": True,
                  "volume": {"front-left": {"value_percent": "40%"}, "front-right": {"value_percent": "40%"}},
                  "properties": {"application.name": "Chromium", "application.process.binary": "ChatGPT",
-                                "node.name": "Chromium"}}]
+                                "node.name": "Chromium", "object.id": "95", "object.serial": "376059"}}]
         (s,) = parse_streams_json(json.dumps(data))
-        self.assertEqual((s.index, s.sink, s.app_name, s.binary, s.volume_pct, s.corked),
-                         ("7", "53", "Chromium", "ChatGPT", 40, True))
+        self.assertEqual((s.index, s.sink, s.app_name, s.binary, s.volume_pct, s.corked, s.node_id),
+                         ("7", "53", "Chromium", "ChatGPT", 40, True, 95))
 
     def test_text(self):
         text = ('Sink Input #150371\n\tDriver: PipeWire\n\tSink: 134557\n\tCorked: no\n\tMute: no\n'
                 '\tVolume: front-left: 65536 / 100% / 0,00 dB,   front-right: 65536 / 100% / 0,00 dB\n'
                 '\tProperties:\n\t\tapplication.name = "Chromium"\n'
-                '\t\tapplication.process.binary = "ChatGPT"\n\t\tnode.name = "Chromium"\n')
+                '\t\tapplication.process.binary = "ChatGPT"\n\t\tnode.name = "Chromium"\n'
+                '\t\tobject.id = "95"\n')
         (s,) = parse_streams_text(text)
-        self.assertEqual((s.index, s.sink, s.binary, s.volume_pct), ("150371", "134557", "ChatGPT", 100))
+        self.assertEqual((s.index, s.sink, s.binary, s.volume_pct, s.node_id), ("150371", "134557", "ChatGPT", 100, 95))
 
 
 class TestReset(Base):
@@ -575,6 +584,13 @@ class TestReset(Base):
             content = f.read()
         self.assertNotIn("cinegain", content)
         self.assertIn("alsa_output.hdmi", content)
+
+    def test_wireplumber_cleanup_can_keep_targets_of_running_sinks(self):
+        with open(paths.WIREPLUMBER_STREAM_PROPS, "w") as f:
+            f.write('a={"target":"cinegain_sink", "mute":false}\nb={"mute":false, "target":"cinegain_app_x"}\n')
+        self.assertTrue(clean_wireplumber_targets(paths.WIREPLUMBER_STREAM_PROPS, keep={"cinegain_sink"}))
+        with open(paths.WIREPLUMBER_STREAM_PROPS) as f:
+            self.assertEqual(f.read(), 'a={"target":"cinegain_sink", "mute":false}\nb={"mute":false}\n')
 
 
 class TestUpdatedExecutable(Base):
@@ -695,6 +711,93 @@ class TestDebugLog(Base):
             last = f.read().splitlines()[-1]
         self.assertRegex(last, r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3} \d+ test INFO  cinegain.probe: hello log$")
         self.assertTrue(cinegain_log.tail(lines=1)[0].endswith("hello log\n"))
+
+
+class TestHardening(unittest.TestCase):
+    """#42: runtime dir without XDG_RUNTIME_DIR, control characters in the log, atomic writes."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="cinegain-hard-")
+
+    def test_runtime_fallback_is_private_and_refuses_traps(self):
+        import stat as st
+        uid = os.getuid()
+        base = paths.fallback_runtime_base(uid, self.tmp)
+        self.assertEqual(base, os.path.join(self.tmp, f"cinegain-{uid}"))
+        self.assertEqual(st.S_IMODE(os.lstat(base).st_mode), 0o700)
+        # an old 0755 directory of ours is tightened, not replaced
+        os.chmod(base, 0o755)
+        self.assertEqual(paths.fallback_runtime_base(uid, self.tmp), base)
+        self.assertEqual(st.S_IMODE(os.lstat(base).st_mode), 0o700)
+        # a planted symlink is never followed: a fresh private directory is used instead
+        trap_tmp = tempfile.mkdtemp(prefix="cinegain-trap-")
+        target = os.path.join(trap_tmp, "elsewhere")
+        os.mkdir(target, 0o755)
+        os.symlink(target, os.path.join(trap_tmp, f"cinegain-{uid}"))
+        other = paths.fallback_runtime_base(uid, trap_tmp)
+        self.assertNotEqual(other, os.path.join(trap_tmp, f"cinegain-{uid}"))
+        self.assertTrue(paths._is_private_dir(other, uid))
+        self.assertEqual(st.S_IMODE(os.stat(target).st_mode), 0o755)  # the link target is untouched
+        # a directory that belongs to someone else (simulated by a wrong uid) is refused too
+        self.assertNotEqual(paths.fallback_runtime_base(uid + 1, self.tmp),
+                            os.path.join(self.tmp, f"cinegain-{uid + 1}"))
+
+    def test_atomic_write_replaces_the_file_and_keeps_its_rights(self):
+        import stat as st
+        for mode in (0o644, 0o600):
+            path = os.path.join(self.tmp, f"stream-properties-{mode:o}")
+            with open(path, "w") as f:
+                f.write('a={"target":"cinegain_x", "volume":0.5}\n')
+            os.chmod(path, mode)
+            inode = os.stat(path).st_ino
+            self.assertTrue(clean_wireplumber_targets(path))
+            self.assertNotEqual(os.stat(path).st_ino, inode)  # renamed into place, never truncated
+            self.assertEqual(st.S_IMODE(os.stat(path).st_mode), mode)
+            self.assertEqual(open(path).read(), 'a={"volume":0.5}\n')
+        self.assertEqual([n for n in os.listdir(self.tmp) if n.startswith(".tmp-")], [])
+
+    def test_stream_properties_cleanup_is_atomic_with_a_private_backup(self):
+        import stat as st
+        from cinegain_volume import clean_stream_properties
+        path = os.path.join(self.tmp, "stream-properties")
+        with open(path, "w") as f:
+            f.write('Output/Audio:application.name:X={"volume":0.25}\n')
+        os.chmod(path, 0o640)
+        inode = os.stat(path).st_ino
+        n, backup = clean_stream_properties(path, backup_dir=os.path.join(self.tmp, "bk"), stamp="s")
+        self.assertEqual(n, 1)
+        self.assertNotEqual(os.stat(path).st_ino, inode)
+        self.assertEqual(st.S_IMODE(os.stat(path).st_mode), 0o640)
+        self.assertEqual(st.S_IMODE(os.stat(os.path.dirname(backup)).st_mode), 0o700)
+
+    def test_control_characters_cannot_forge_log_lines(self):
+        import logging
+        import time as _t
+        import cinegain_log
+        import cinegain_volume as vol
+        log_path = os.path.join(self.tmp, "forge.log")
+        handler = logging.FileHandler(log_path, encoding="utf-8")
+        handler.setFormatter(cinegain_log.SafeFormatter(cinegain_log.FORMAT, cinegain_log.DATEFMT))
+        handler.addFilter(cinegain_log._ComponentFilter())
+        logger = logging.getLogger("cinegain.volume")  # a logger history() reads
+        logger.addHandler(handler)
+        level = logger.level
+        logger.setLevel(logging.INFO)
+        stamp = _t.strftime("%Y-%m-%d %H:%M:%S")
+        evil = f"X\n{stamp}.001 1 gui INFO  cinegain.volume: full volume reset done\u2028Y"
+        try:
+            logger.info("stream appeared: %s", evil)
+            logger.info("app %s: full volume reset done", "Y")  # the words inside a message
+            logger.error("boom", exc_info=(ValueError, ValueError("e"), None))
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(level)
+            handler.close()
+        lines = open(log_path, encoding="utf-8").read().splitlines()
+        self.assertIn("\\x0a", lines[0])
+        self.assertIn("\\u2028", lines[0])
+        self.assertEqual(vol.history(log_path), [])  # nothing forged
+        self.assertIn("ValueError: e", "\n".join(lines[1:]))     # tracebacks still readable
 
 
 class TestRouterLock(unittest.TestCase):

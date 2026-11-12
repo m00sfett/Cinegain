@@ -1,5 +1,5 @@
 """
-Strings added in 0.5.0: view levels, overdrive, step buttons, analysis view.
+Strings added in 0.5.0: view levels, overdrive, step buttons, analysis view (0.5.2: more timeline events).
 Merged into i18n.TRANSLATIONS after the older tables; keys here override older
 values of the same name (subtitle and volume tooltip got the new scale).
 """
@@ -24,6 +24,9 @@ KEYS = (
     "analysis_by_auto", "analysis_by_user", "analysis_by_unknown",
     "log_title", "log_refresh",
     "btn_reset_hidden_tip",
+    # 0.5.2 (#44): more timeline events
+    "analysis_ev_raised", "analysis_ev_mixer", "analysis_ev_muted", "analysis_ev_unmuted",
+    "analysis_ev_link_failed", "analysis_by_external",
 )
 
 _TEXTS = {
@@ -65,6 +68,8 @@ _TEXTS = {
         "automatic", "you", "unknown",
         "Debug log · {path}", "Refresh",
         "Resets only the hidden volume of this entry to 0 dB; other programs stay as they are. Cinegain lowers its own gain first so nothing blasts.",
+        "raised to {db} (was {was})", "mixer {db} (was {was})",
+        "muted", "unmuted", "WirePlumber: link failed", "external",
     ),
     "de": (
         "Lauter als das System erlaubt, plus versteckte Lautstärken im Blick · Tasten: ↑↓ wählen, ←→ 1 dB (Shift 0,1 · Strg 5)",
@@ -105,6 +110,8 @@ _TEXTS = {
         "automatisch", "du", "unbekannt",
         "Debug-Log · {path}", "Aktualisieren",
         "Setzt nur die versteckte Lautstärke dieses Eintrags auf 0 dB zurück; andere Programme bleiben unverändert. Cinegain senkt vorher die eigene Verstärkung, damit nichts knallt.",
+        "angehoben auf {db} (vorher {was})", "Mixer {db} (vorher {was})",
+        "stummgeschaltet", "Stumm aufgehoben", "WirePlumber: Verbindung fehlgeschlagen", "extern",
     ),
     "es": (
         "Más alto de lo que permite el sistema, y los volúmenes ocultos a la vista · Teclas: ↑↓ elegir, ←→ 1 dB (Shift 0,1 · Ctrl 5)",
@@ -144,6 +151,8 @@ _TEXTS = {
         "automático", "tú", "desconocido",
         "Registro · {path}", "Actualizar",
         "Restablece solo el volumen oculto de esta entrada a 0 dB; los demás programas no cambian. Cinegain baja antes su propia ganancia para evitar sustos.",
+        "subido a {db} (antes {was})", "mezclador {db} (antes {was})",
+        "silenciado", "sonido activado", "WirePlumber: falló la conexión", "externo",
     ),
     "fr": (
         "Plus fort que le système ne le permet, et les volumes cachés en vue · Touches : ↑↓ choisir, ←→ 1 dB (Shift 0,1 · Ctrl 5)",
@@ -183,6 +192,8 @@ _TEXTS = {
         "automatique", "vous", "inconnu",
         "Journal · {path}", "Actualiser",
         "Remet à 0 dB seulement le volume caché de cette entrée ; les autres programmes restent inchangés. Cinegain baisse d'abord son propre gain pour éviter un choc.",
+        "monté à {db} (avant {was})", "mixeur {db} (avant {was})",
+        "coupé", "son rétabli", "WirePlumber : échec de liaison", "externe",
     ),
     "it": (
         "Più forte di quanto permetta il sistema, e i volumi nascosti in vista · Tasti: ↑↓ scegli, ←→ 1 dB (Shift 0,1 · Ctrl 5)",
@@ -222,6 +233,8 @@ _TEXTS = {
         "automatico", "tu", "sconosciuto",
         "Log · {path}", "Aggiorna",
         "Riporta a 0 dB solo il volume nascosto di questa voce; gli altri programmi restano invariati. Cinegain abbassa prima il proprio guadagno per evitare colpi.",
+        "alzato a {db} (prima {was})", "mixer {db} (prima {was})",
+        "silenziato", "audio riattivato", "WirePlumber: collegamento non riuscito", "esterno",
     ),
     "pt": (
         "Mais alto do que o sistema permite, e os volumes ocultos à vista · Teclas: ↑↓ escolher, ←→ 1 dB (Shift 0,1 · Ctrl 5)",
@@ -261,6 +274,8 @@ _TEXTS = {
         "automático", "você", "desconhecido",
         "Log · {path}", "Atualizar",
         "Repõe a 0 dB apenas o volume oculto desta entrada; os outros programas ficam como estão. O Cinegain baixa primeiro o seu próprio ganho para evitar sustos.",
+        "aumentado para {db} (antes {was})", "mixer {db} (antes {was})",
+        "silenciado", "som reativado", "WirePlumber: falha na ligação", "externo",
     ),
     "nl": (
         "Luider dan het systeem toestaat, en verborgen volumes in beeld · Toetsen: ↑↓ kiezen, ←→ 1 dB (Shift 0,1 · Ctrl 5)",
@@ -300,6 +315,8 @@ _TEXTS = {
         "automatisch", "jij", "onbekend",
         "Debuglog · {path}", "Vernieuwen",
         "Zet alleen het verborgen volume van dit item terug naar 0 dB; andere programma's blijven ongewijzigd. Cinegain verlaagt eerst de eigen versterking, zodat er niets knalt.",
+        "verhoogd naar {db} (was {was})", "mixer {db} (was {was})",
+        "gedempt", "dempen opgeheven", "WirePlumber: koppeling mislukt", "extern",
     ),
     "pl": (
         "Głośniej, niż pozwala system, i ukryte głośności na widoku · Klawisze: ↑↓ wybór, ←→ 1 dB (Shift 0,1 · Ctrl 5)",
@@ -339,6 +356,8 @@ _TEXTS = {
         "automatycznie", "ty", "nieznany",
         "Dziennik · {path}", "Odśwież",
         "Przywraca do 0 dB tylko ukrytą głośność tego wpisu; inne programy zostają bez zmian. Cinegain najpierw obniża własne wzmocnienie, żeby nic nie huknęło.",
+        "podgłośniono do {db} (wcześniej {was})", "mikser {db} (wcześniej {was})",
+        "wyciszono", "wyłączono wyciszenie", "WirePlumber: połączenie nieudane", "zewnętrznie",
     ),
     "ru": (
         "Громче, чем позволяет система, и скрытая громкость на виду · Клавиши: ↑↓ выбор, ←→ 1 дБ (Shift 0,1 · Ctrl 5)",
@@ -378,6 +397,8 @@ _TEXTS = {
         "автоматически", "вы", "неизвестно",
         "Журнал · {path}", "Обновить",
         "Сбрасывает до 0 дБ только скрытую громкость этой записи; остальные программы не меняются. Cinegain сначала снижает собственное усиление, чтобы не было резкого скачка.",
+        "повышено до {db} (было {was})", "микшер {db} (было {was})",
+        "звук выключен", "звук включён", "WirePlumber: ошибка соединения", "извне",
     ),
     "tr": (
         "Sistemin izin verdiğinden daha yüksek, gizli ses seviyeleri de görünür · Tuşlar: ↑↓ seç, ←→ 1 dB (Shift 0,1 · Ctrl 5)",
@@ -417,6 +438,8 @@ _TEXTS = {
         "otomatik", "siz", "bilinmiyor",
         "Günlük · {path}", "Yenile",
         "Yalnızca bu girdinin gizli ses düzeyini 0 dB'ye döndürür; diğer programlar olduğu gibi kalır. Cinegain, ani patlama olmasın diye önce kendi kazancını düşürür.",
+        "{db} seviyesine yükseltildi (önce {was})", "mikser {db} (önce {was})",
+        "sessize alındı", "ses açıldı", "WirePlumber: bağlantı başarısız", "harici",
     ),
     "uk": (
         "Гучніше, ніж дозволяє система, і прихована гучність на виду · Клавіші: ↑↓ вибір, ←→ 1 дБ (Shift 0,1 · Ctrl 5)",
@@ -456,6 +479,8 @@ _TEXTS = {
         "автоматично", "ви", "невідомо",
         "Журнал · {path}", "Оновити",
         "Скидає до 0 дБ лише приховану гучність цього запису; інші програми не змінюються. Cinegain спершу знижує власне підсилення, щоб не було різкого стрибка.",
+        "підвищено до {db} (було {was})", "мікшер {db} (було {was})",
+        "звук вимкнено", "звук увімкнено", "WirePlumber: помилка з'єднання", "ззовні",
     ),
     "ar": (
         "أعلى مما يسمح به النظام، مع إظهار مستويات الصوت المخفية · المفاتيح: ↑↓ اختيار، ←→ 1 ديسيبل (Shift 0.1 · Ctrl 5)",
@@ -495,6 +520,8 @@ _TEXTS = {
         "تلقائي", "أنت", "غير معروف",
         "سجل التصحيح · {path}", "تحديث",
         "يعيد إلى 0 ديسيبل مستوى الصوت المخفي لهذا العنصر فقط؛ تبقى البرامج الأخرى كما هي. يخفض Cinegain كسبه الخاص أولًا حتى لا يحدث دوي مفاجئ.",
+        "رُفع إلى {db} (كان {was})", "المازج {db} (كان {was})",
+        "كُتم الصوت", "أُلغي الكتم", "WirePlumber: فشل الربط", "خارجي",
     ),
     "hi": (
         "सिस्टम की सीमा से ज़्यादा तेज़, और छिपे वॉल्यूम सामने · कुंजियाँ: ↑↓ चुनें, ←→ 1 dB (Shift 0.1 · Ctrl 5)",
@@ -534,6 +561,8 @@ _TEXTS = {
         "स्वचालित", "आप", "अज्ञात",
         "डीबग लॉग · {path}", "रीफ़्रेश",
         "केवल इस प्रविष्टि की छिपी हुई वॉल्यूम को 0 dB पर लौटाता है; अन्य प्रोग्राम जैसे हैं वैसे रहते हैं। Cinegain पहले अपना गेन घटाता है ताकि अचानक तेज़ आवाज़ न हो।",
+        "{db} तक बढ़ाया गया (पहले {was})", "मिक्सर {db} (पहले {was})",
+        "म्यूट किया गया", "म्यूट हटाया गया", "WirePlumber: लिंक विफल", "बाहरी",
     ),
     "id": (
         "Lebih keras dari batas sistem, plus volume tersembunyi terlihat jelas · Tombol: ↑↓ pilih, ←→ 1 dB (Shift 0,1 · Ctrl 5)",
@@ -573,6 +602,8 @@ _TEXTS = {
         "otomatis", "kamu", "tidak diketahui",
         "Log debug · {path}", "Segarkan",
         "Hanya mengembalikan volume tersembunyi entri ini ke 0 dB; program lain tidak berubah. Cinegain menurunkan penguatannya sendiri lebih dulu agar tidak ada ledakan suara.",
+        "dinaikkan ke {db} (sebelumnya {was})", "mixer {db} (sebelumnya {was})",
+        "dibisukan", "bisu dimatikan", "WirePlumber: tautan gagal", "eksternal",
     ),
     "ja": (
         "システムの上限より大きく、隠れた音量も見える · キー: ↑↓ 選択, ←→ 1 dB (Shift 0.1 · Ctrl 5)",
@@ -612,6 +643,8 @@ _TEXTS = {
         "自動", "あなた", "不明",
         "デバッグログ · {path}", "更新",
         "このエントリの隠れた音量だけを 0 dB に戻します。他のプログラムは変わりません。Cinegain は先に自身のゲインを下げるので、急な大音量は出ません。",
+        "{db} に上げられた (前 {was})", "ミキサー {db} (前 {was})",
+        "ミュート", "ミュート解除", "WirePlumber: リンク失敗", "外部",
     ),
     "ko": (
         "시스템 한계보다 크게, 숨은 볼륨도 한눈에 · 키: ↑↓ 선택, ←→ 1 dB (Shift 0.1 · Ctrl 5)",
@@ -651,6 +684,8 @@ _TEXTS = {
         "자동", "사용자", "알 수 없음",
         "디버그 로그 · {path}", "새로 고침",
         "이 항목의 숨겨진 볼륨만 0 dB로 되돌립니다. 다른 프로그램은 그대로입니다. Cinegain이 먼저 자체 게인을 낮추므로 갑자기 커지지 않습니다.",
+        "{db}(으)로 높아짐 (이전 {was})", "믹서 {db} (이전 {was})",
+        "음소거됨", "음소거 해제", "WirePlumber: 연결 실패", "외부",
     ),
     "vi": (
         "To hơn mức hệ thống cho phép, và âm lượng ẩn hiện rõ · Phím: ↑↓ chọn, ←→ 1 dB (Shift 0,1 · Ctrl 5)",
@@ -690,6 +725,8 @@ _TEXTS = {
         "tự động", "bạn", "không rõ",
         "Nhật ký gỡ lỗi · {path}", "Làm mới",
         "Chỉ đặt lại âm lượng ẩn của mục này về 0 dB; các chương trình khác giữ nguyên. Cinegain hạ độ khuếch đại của chính nó trước nên không bị tiếng nổ.",
+        "được tăng lên {db} (trước {was})", "bộ trộn {db} (trước {was})",
+        "đã tắt tiếng", "đã bật tiếng", "WirePlumber: liên kết thất bại", "bên ngoài",
     ),
     "zh-CN": (
         "比系统允许的更响，隐藏音量一目了然 · 按键: ↑↓ 选择, ←→ 1 dB (Shift 0.1 · Ctrl 5)",
@@ -729,6 +766,8 @@ _TEXTS = {
         "自动", "您", "未知",
         "调试日志 · {path}", "刷新",
         "仅将此条目的隐藏音量恢复到 0 dB，其他程序保持不变。Cinegain 会先降低自身增益，避免突然爆音。",
+        "被调高到 {db} (之前 {was})", "混音器 {db} (之前 {was})",
+        "已静音", "已取消静音", "WirePlumber: 连接失败", "外部",
     ),
     "zh-TW": (
         "比系統允許的更響，隱藏音量一目瞭然 · 按鍵: ↑↓ 選擇, ←→ 1 dB (Shift 0.1 · Ctrl 5)",
@@ -768,6 +807,8 @@ _TEXTS = {
         "自動", "您", "未知",
         "除錯日誌 · {path}", "重新整理",
         "僅將此項目的隱藏音量恢復到 0 dB，其他程式維持不變。Cinegain 會先降低自身增益，避免突然爆音。",
+        "被調高到 {db} (之前 {was})", "混音器 {db} (之前 {was})",
+        "已靜音", "已取消靜音", "WirePlumber: 連接失敗", "外部",
     ),
 }
 

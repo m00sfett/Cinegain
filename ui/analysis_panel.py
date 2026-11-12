@@ -90,6 +90,11 @@ class AnalysisPanel(QWidget):
         self.history_source = history
         self.pro = False
         self.rows = []
+        # Raises fade in (#27): on the router's guard while it runs, else on this one.
+        self._own_guard = vol.VolumeGuard(scanner=lambda: [])
+        self.fade_timer = QTimer(self)
+        self.fade_timer.setInterval(50)
+        self.fade_timer.timeout.connect(self._step_own_fades)
         self._ids = []
         self._history_at = 0.0
 
@@ -290,19 +295,31 @@ class AnalysisPanel(QWidget):
     def _row(self, node_id):
         return next((r for r in self.rows if r["id"] == node_id), None)
 
-    def _set_from_slider(self, node_id, slider):
+    def _apply(self, node_id, fraction):
+        """Lowering is instant, raising fades in at <= 10 dB/s (#27)."""
         r = self._row(node_id)
         if r is not None:
-            self.setter(node_id, slider.value() / 100.0, r["label"], "user")
+            guard = vol.live_guard() or self._own_guard
+            self.setter(node_id, fraction, r["label"], "user", r["hidden"], guard)
+            if guard is self._own_guard and guard.fades:
+                self.fade_timer.start()
         self.refresh()
         self.refresh_history(force=True)
 
+    def _step_own_fades(self):
+        try:
+            self._own_guard.step()
+        except Exception:
+            log.exception("hidden volume fade step failed")
+            self._own_guard.fades.clear()
+        if not self._own_guard.fades:
+            self.fade_timer.stop()
+
+    def _set_from_slider(self, node_id, slider):
+        self._apply(node_id, slider.value() / 100.0)
+
     def _reset(self, node_id):
-        r = self._row(node_id)
-        if r is not None:
-            self.setter(node_id, 1.0, r["label"], "user")
-        self.refresh()
-        self.refresh_history(force=True)
+        self._apply(node_id, 1.0)
 
     # -- timeline ---------------------------------------------------------------
     def _refill_filter(self):
@@ -340,9 +357,17 @@ class AnalysisPanel(QWidget):
         for i, ev in enumerate(events):
             when = time.strftime("%d.%m. %H:%M:%S", time.localtime(ev["time"]))
             name = labels.get(ev["key"], ev["key"]) or "—"
+            was = _fmt_db(ev["was_db"]) if ev["was_db"] is not None else "?"
             if ev["kind"] == "lowered":
-                text = t("analysis_ev_lowered", db=_fmt_db(ev["db"]),
-                         was=_fmt_db(ev["was_db"]) if ev["was_db"] is not None else "?")
+                text = t("analysis_ev_lowered", db=_fmt_db(ev["db"]), was=was)
+            elif ev["kind"] == "raised":
+                text = t("analysis_ev_raised", db=_fmt_db(ev["db"]), was=was)
+            elif ev["kind"] == "mixer":
+                text = t("analysis_ev_mixer", db=_fmt_db(ev["db"]), was=was)
+            elif ev["kind"] in ("muted", "unmuted"):
+                text = t(f"analysis_ev_{ev['kind']}")
+            elif ev["kind"] == "link_failed":
+                text = t("analysis_ev_link_failed")
             elif ev["kind"] == "auto":
                 text = t("analysis_ev_auto", db=_fmt_db(ev["was_db"]))
             elif ev["kind"] == "set":
@@ -350,6 +375,7 @@ class AnalysisPanel(QWidget):
             else:
                 text = t("analysis_ev_full_reset")
             who = {"auto": t("analysis_by_auto"), "user": t("analysis_by_user"), "cli": "CLI",
+                   "external": t("analysis_by_external"), "wireplumber": "WirePlumber",
                    "": t("analysis_by_unknown")}.get(ev["who"], ev["who"])
             for c, value in enumerate((when, name, text, who)):
                 item = QTableWidgetItem(value)

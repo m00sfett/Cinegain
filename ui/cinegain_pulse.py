@@ -11,6 +11,7 @@ import re
 import subprocess
 
 import cinegain_log
+import cinegain_paths as paths
 
 log = cinegain_log.get("pulse")
 
@@ -24,11 +25,16 @@ def is_cinegain_name(name):
 class Stream:
     """One playback stream (PulseAudio sink-input)."""
 
-    __slots__ = ("index", "sink", "app_name", "binary", "node_name", "volume_pct", "muted", "corked")
+    __slots__ = ("index", "sink", "app_name", "binary", "node_name", "volume_pct", "muted", "corked",
+                 "node_id", "volume_min_pct")
 
     def __init__(self, index, sink, app_name="", binary="", node_name="", volume_pct=100,
-                 muted=False, corked=False):
+                 muted=False, corked=False, node_id=None, volume_min_pct=None):
         self.index = str(index)
+        # quietest channel: a fade to 100 % starts there, so no channel jumps up (#29)
+        self.volume_min_pct = int(volume_pct if volume_min_pct is None else volume_min_pct)
+        # PipeWire node id ("object.id"); the pulse index is the object serial, not the id.
+        self.node_id = int(node_id) if str(node_id or "").isdigit() else None
         self.sink = str(sink)
         self.app_name = app_name or ""
         self.binary = binary or ""
@@ -91,8 +97,10 @@ def parse_streams_json(text):
                 binary=props.get("application.process.binary", ""),
                 node_name=props.get("node.name", ""),
                 volume_pct=max(vols) if vols else 100,
+                volume_min_pct=min(vols) if vols else 100,
                 muted=item.get("mute", False),
                 corked=item.get("corked", False),
+                node_id=props.get("object.id"),
             )
         )
     return streams
@@ -105,7 +113,8 @@ def parse_streams_text(text):
         if not lines:
             continue
         fields = {"index": lines[0].strip(), "sink": "", "app_name": "", "binary": "",
-                  "node_name": "", "volume_pct": 100, "muted": False, "corked": False}
+                  "node_name": "", "volume_pct": 100, "muted": False, "corked": False, "node_id": None,
+                  "volume_min_pct": None}
         for raw in lines[1:]:
             s = raw.strip()
             if s.startswith("Sink:"):
@@ -118,10 +127,12 @@ def parse_streams_text(text):
                 pcts = [int(p) for p in re.findall(r"(\d+)%", s)]
                 if pcts:
                     fields["volume_pct"] = max(pcts)
+                    fields["volume_min_pct"] = min(pcts)
             else:
                 for key, prop in (("app_name", "application.name"),
                                   ("binary", "application.process.binary"),
-                                  ("node_name", "node.name")):
+                                  ("node_name", "node.name"),
+                                  ("node_id", "object.id")):
                     m = re.match(re.escape(prop) + r'\s*=\s*"(.*)"$', s)
                     if m:
                         fields[key] = m.group(1)
@@ -184,6 +195,11 @@ class PulseControl:
     def move(self, stream_index, sink_name):
         return _quiet(["pactl", "move-sink-input", str(stream_index), sink_name])
 
+    def set_volume_pct(self, stream_index, pct):
+        """Mixer volume of a stream, all channels, in % (fractions allowed: raw volume units)."""
+        raw = int(round(65536 * max(0.0, float(pct)) / 100.0))
+        return _quiet(["pactl", "set-sink-input-volume", str(stream_index), str(raw)])
+
     def set_volume_100(self, stream_index):
         _quiet(["pactl", "set-sink-input-volume", str(stream_index), "100%"])
         _quiet(["pactl", "set-sink-input-mute", str(stream_index), "0"])
@@ -193,11 +209,26 @@ class PulseControl:
         _quiet(["pactl", "set-sink-mute", sink_name, "0"])
 
 
-def clean_wireplumber_targets(path):
+_TARGET = r'"target"\s*:\s*"(?P<name>(?:cinegain|kinoton)[^"]*)"'
+_TARGET_PATTERNS = (
+    (re.compile(r',\s*' + _TARGET), ""),
+    (re.compile(_TARGET + r'\s*,\s*'), ""),
+    (re.compile(r'\{\s*' + _TARGET + r'\s*\}'), "{}"),
+)
+
+
+def strip_cinegain_targets(text, keep=()):
+    """Drops saved `"target":"cinegain..."` entries, except targets named in keep."""
+    for rx, repl in _TARGET_PATTERNS:
+        text = rx.sub(lambda m, r=repl: m.group(0) if m.group("name") in keep else r, text)
+    return text
+
+
+def clean_wireplumber_targets(path, keep=()):
     """
     Removes sticky Cinegain targets from WirePlumber's stream-properties so that
-    streams are not trapped on a sink that no longer exists. Returns True if the
-    file changed.
+    streams are not trapped on a sink that no longer exists. `keep` = sink names
+    that still exist and may stay. Returns True if the file changed.
     """
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -206,14 +237,11 @@ def clean_wireplumber_targets(path):
         return False
     if "cinegain" not in content and "kinoton" not in content:
         return False
-    cleaned = re.sub(r',\s*"target"\s*:\s*"(?:cinegain|kinoton)[^"]*"', "", content)
-    cleaned = re.sub(r'"target"\s*:\s*"(?:cinegain|kinoton)[^"]*"\s*,\s*', "", cleaned)
-    cleaned = re.sub(r'\{\s*"target"\s*:\s*"(?:cinegain|kinoton)[^"]*"\s*\}', "{}", cleaned)
+    cleaned = strip_cinegain_targets(content, keep)
     if cleaned == content:
         return False
     try:
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(cleaned)
+        paths.write_text_atomic(path, cleaned)  # WirePlumber may read it any moment (#42)
     except OSError:
         return False
     return True
