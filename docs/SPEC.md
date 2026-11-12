@@ -1,6 +1,6 @@
 # Cinegain — Spezifikation
 
-Stand: 0.5.0 (2026-11-11). Grundlage sind die Grill-Runden vom 2026-11-11. Diese Datei beschreibt, was Cinegain leisten soll und woran man das prüft. Wie es gebaut ist, steht im Code, in `DESIGN.md` (Gestaltung) und in `CHANGELOG.md` (Verlauf).
+Stand: 0.5.2 (2026-11-12). Grundlage sind die Grill-Runden vom 2026-11-11. Diese Datei beschreibt, was Cinegain leisten soll und woran man das prüft. Wie es gebaut ist, steht im Code, in `DESIGN.md` (Gestaltung) und in `CHANGELOG.md` (Verlauf).
 
 ## 1. Zielbild
 
@@ -43,7 +43,8 @@ Das Plugin akzeptiert `input_db` von −30 bis +40 dB und `makeup_db` von −24 
 - Das gilt für jede Änderung: Regler, Preset, Speicherplatz, Tray, CLI, neu startender Filter, Wiedereinschalten nach „Filter ausschalten“.
 - Ein frisch gestarteter Filter beginnt bei 0 dB (oder tiefer) und fährt hoch.
 - Die Meterdatei meldet, wie viele dB noch fehlen (`ramp_db`). Der Hauptregler zeigt das als „fährt hoch … noch X dB“.
-- Bekannte Grenze: Wird ein Stream auf eine Sink verschoben, die schon hochgefahren ist, gibt es dort keine Rampe.
+- Dasselbe gilt für Limiter-Decke, Leveler-Ziel und die Obergrenze des Levelers (`lev_max_boost_db`). Der Leveler selbst steigt im Normalbetrieb mit seiner eigenen Gleitzeit. Auf höchstens 10 dB/s begrenzt ist er nur beim Ausgleiten nach „Leveler aus“ (zurück auf 0 dB aus einer Absenkung) und nach „Filter an“, bis er sein Ziel zum ersten Mal erreicht hat. Absenkungen wirken immer sofort.
+- Wird ein Stream auf eine andere Sink verschoben, die schon hochgefahren sein kann, sinkt seine versteckte Lautstärke vorher kurz auf −30 dB und blendet danach wieder auf den alten Wert ein. Dort gibt es also keine Lücke in der Rampe. Streams, die ohnehin leiser sind, bleiben unberührt (`VolumeGuard.duck`, Router).
 
 ### 3.4 Bedienung der Regler
 
@@ -76,9 +77,11 @@ Sie ist ein eigener Tab, ab der Stufe Erweitert. Die Tabelle hat eine Zeile pro 
 
 ### 4.2 Automatik und Reset
 
-- **Automatisch zurücksetzen** (Standard: an, gespeichert in `config.json` als `volume_auto_reset`): Programme über Cinegain und Cinegains eigene Ausgänge werden in 3 s auf 0 dB zurückgeblendet. Ist es aus, wird alles nur angezeigt und protokolliert.
+- **Automatisch zurücksetzen** (Standard: an, gespeichert in `config.json` als `volume_auto_reset`): Programme über Cinegain und Cinegains eigene Ausgänge werden auf 0 dB zurückgeblendet. Ist es aus, wird alles nur angezeigt und protokolliert.
+- **Fades der versteckten Lautstärke:** höchstens 10 dB/s, höchstens 1 dB pro Schritt, mindestens 3 s Dauer (`FADE_S`, `MAX_RISE_DB_S`, `MAX_STEP_DB` in `cinegain_volume.py`). Der letzte Schritt landet genau auf dem Ziel. Das gilt für die Automatik, den Voll-Reset und das Zurückblenden nach dem Absenken beim Verschieben (siehe 3.3).
 - **Lautstärke voll zurücksetzen** (Leiste, Analyse-Tab, Tray, `cinegain volume reset`):
-  - versteckte Lautstärken auf 0 dB, normale Stream-Lautstärken auf 100 %, Stummschaltung aus
+  - versteckte Lautstärken auf 0 dB, normale Stream-Lautstärken (Mixer) auf 100 %. Nichts steigt schneller als 10 dB/s: Was Cinegain durch Absenken der eigenen Verstärkung ausgleichen kann, kommt sofort zurück, der Restpegel und der Mixer werden eingeblendet.
+  - Stummschaltungen bleiben bestehen, weil Aufheben ein Sprung auf volle Lautstärke wäre. Die CLI meldet, wie viele Streams stumm geblieben sind.
   - WirePlumber-Datei bereinigen, vorher sichern
   - Cinegains eigene Verstärkung vorher um den zurückkommenden Betrag senken, höchstens bis −30 dB
 - Im Bearbeitungskopf steht die versteckte Lautstärke des Ziels ab Erweitert immer, auch bei 0 dB.
@@ -89,7 +92,11 @@ Sie ist ein eigener Tab, ab der Stufe Erweitert. Die Tabelle hat eine Zeile pro 
 - `cinegain volume set <id|programm> <prozent>`
 - `cinegain volume reset [programm]`
 
+`cinegain volume reset --restart-wireplumber [--yes]` startet WirePlumber nach dem Reset neu, damit die bereinigten gespeicherten Werte nicht zurückgeschrieben werden. Ohne `--yes` fragt die CLI vorher nach, weil dabei alle Audio-Verbindungen neu aufgebaut werden und die Wiedergabe kurz pausieren kann.
+
 `cinegain volume-reset` bleibt als alter Name erhalten.
+
+**Filter:** `cinegain filter [on|off|status]` zeigt den Filter-Zustand oder schaltet ihn. Aus heißt Durchreichen ohne Verarbeitung. Der Zustand bleibt über `set`, `batch`, `preset` und `start` erhalten. Das Wiedereinschalten fährt die Verstärkung wie in 3.3 neu hoch.
 
 ## 5. Ansichtsstufen
 
