@@ -2,7 +2,7 @@
 # Builds a native Debian/Ubuntu .deb package for Cinegain
 set -e
 
-VERSION="0.5.3"
+VERSION="0.5.4"
 ARCH="amd64"
 PKG_DIR="/tmp/cinegain-deb-build/cinegain_${VERSION}_${ARCH}"
 

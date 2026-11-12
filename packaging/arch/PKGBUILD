@@ -1,6 +1,6 @@
 # Maintainer: Tobias Moos <tobias@roteson.de>
 pkgname=cinegain
-pkgver=0.5.3
+pkgver=0.5.4
 pkgrel=1
 pkgdesc="Realtime volume booster, dialogue clarity optimizer & film audio processor for PipeWire"
 arch=('x86_64')
