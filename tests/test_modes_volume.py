@@ -1781,6 +1781,24 @@ class TestHistoryIncremental(unittest.TestCase):
         self.write(self.log, [], mode="w")
         self.assertEqual(cinegain_log.tail(self.log), [])
 
+    def test_history_respects_since_cutoff_and_timeline_names(self):
+        # #63: history_since hides pre-reset entries; internal ::cinegain_output keys get readable names.
+        import analysis_panel
+        self.write(self.log, [self.line()])
+        all_evs = self.vol.history(log_path=self.log, now=self.now, journal=False)
+        self.assertEqual(len(all_evs), 1)
+        cutoff = all_evs[0]["time"] + 1
+        self.assertEqual(self.vol.history(log_path=self.log, now=self.now, journal=False, since=cutoff), [])
+        # A logged global reset also hides older entries without needing `since`.
+        import time
+        ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(all_evs[0]["time"] + 2))
+        self.write(self.log, [f"{ts}.000 1 gui INFO  cinegain.volume: global reset done\n"])
+        self.assertEqual(self.vol.history(log_path=self.log, now=self.now, journal=False), [])
+        self.assertNotIn("::", analysis_panel._timeline_name("::cinegain_output", {}))
+        app_label = analysis_panel._timeline_name("::cinegain_output_app_chrome_google_chrome_eb8b16", {})
+        self.assertNotIn("::", app_label)
+        self.assertIn("Chrome Google Chrome", app_label)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

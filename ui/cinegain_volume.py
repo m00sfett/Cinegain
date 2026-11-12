@@ -742,6 +742,7 @@ _HIST_PATTERNS = (
     ("auto", re.compile(r"fading node (\d+) \(([^)]*)\) from (-?[0-9.]+) dB")),
     ("set", re.compile(r"hidden volume of node (\d+) \(([^)]*)\) set to [0-9.]+ = (-?[0-9.]+|-inf) dB by (\w+)")),
     ("full_reset", re.compile(r"full volume reset done")),
+    ("global_reset", re.compile(r"global reset done")),
 )
 _LOG_LINE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)[.,]\d+ \d+ \S+ \S+\s+(\S+): (.*)$")
 
@@ -842,7 +843,7 @@ def _file_events(cache, path):
     return entry[1] + tail if tail else entry[1], ident
 
 
-def history(log_path=None, days=7, limit=500, key=None, now=None, journal=None):
+def history(log_path=None, days=7, limit=500, key=None, now=None, journal=None, since=None):
     """
     Volume events from the debug log (and its rotated files), newest first: dicts
     with time (epoch), kind (lowered/raised/mixer/muted/unmuted/auto/set/full_reset,
@@ -855,18 +856,28 @@ def history(log_path=None, days=7, limit=500, key=None, now=None, journal=None):
     base = log_path or paths.LOG_FILE
     files = [f"{base}.{i}" for i in range(4, 0, -1)] + [base]
     cutoff = (now or time.time()) - days * 86400
+    if since:
+        cutoff = max(cutoff, float(since))
     events = []
-    if journal if journal is not None else log_path is None:
-        events.extend(wireplumber_events(cutoff))
     cache = _HISTORY_CACHE.setdefault(base, {})
     seen = set()
+    log_events = []
     for path in files:
         file_events, ident = _file_events(cache, path)
         if ident is not None:
             seen.add(ident)
-        for ev in file_events:
-            if ev["time"] >= cutoff and (key is None or ev["key"] == key or ev["kind"] == "full_reset"):
-                events.append(dict(ev))
+        log_events.extend(file_events)
+    if since is None:
+        resets = [ev["time"] for ev in log_events if ev["kind"] == "global_reset"]
+        if resets:
+            cutoff = max(cutoff, max(resets))
+    if journal if journal is not None else log_path is None:
+        events.extend(ev for ev in wireplumber_events(cutoff) if ev["time"] >= cutoff)
+    for ev in log_events:
+        if ev["kind"] == "global_reset":
+            continue
+        if ev["time"] >= cutoff and (key is None or ev["key"] == key or ev["kind"] == "full_reset"):
+            events.append(dict(ev))
     for ident in [i for i in cache if i not in seen]:
         del cache[ident]                 # deleted or rotated out
     events.sort(key=lambda e: e["time"], reverse=True)
