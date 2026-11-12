@@ -23,6 +23,7 @@ KEYS = (
     "analysis_ev_lowered", "analysis_ev_auto", "analysis_ev_set", "analysis_ev_full_reset",
     "analysis_by_auto", "analysis_by_user", "analysis_by_unknown",
     "log_title", "log_refresh",
+    "btn_reset_hidden_tip",
 )
 
 _TEXTS = {
@@ -63,6 +64,7 @@ _TEXTS = {
         "lowered to {db} (was {was})", "faded back from {db} to 0 dB", "set to {db}", "full volume reset",
         "automatic", "you", "unknown",
         "Debug log · {path}", "Refresh",
+        "Resets only the hidden volume of this entry to 0 dB; other programs stay as they are. Cinegain lowers its own gain first so nothing blasts.",
     ),
     "de": (
         "Lauter als das System erlaubt, plus versteckte Lautstärken im Blick · Tasten: ↑↓ wählen, ←→ 1 dB (Shift 0,1 · Strg 5)",
@@ -102,6 +104,7 @@ _TEXTS = {
         "Lautstärke voll zurückgesetzt",
         "automatisch", "du", "unbekannt",
         "Debug-Log · {path}", "Aktualisieren",
+        "Setzt nur die versteckte Lautstärke dieses Eintrags auf 0 dB zurück; andere Programme bleiben unverändert. Cinegain senkt vorher die eigene Verstärkung, damit nichts knallt.",
     ),
     "es": (
         "Más alto de lo que permite el sistema, y los volúmenes ocultos a la vista · Teclas: ↑↓ elegir, ←→ 1 dB (Shift 0,1 · Ctrl 5)",
@@ -140,6 +143,7 @@ _TEXTS = {
         "bajado a {db} (antes {was})", "devuelto de {db} a 0 dB", "ajustado a {db}", "restablecimiento completo",
         "automático", "tú", "desconocido",
         "Registro · {path}", "Actualizar",
+        "Restablece solo el volumen oculto de esta entrada a 0 dB; los demás programas no cambian. Cinegain baja antes su propia ganancia para evitar sustos.",
     ),
     "fr": (
         "Plus fort que le système ne le permet, et les volumes cachés en vue · Touches : ↑↓ choisir, ←→ 1 dB (Shift 0,1 · Ctrl 5)",
@@ -178,6 +182,7 @@ _TEXTS = {
         "baissé à {db} (avant {was})", "ramené de {db} à 0 dB", "réglé à {db}", "réinitialisation complète",
         "automatique", "vous", "inconnu",
         "Journal · {path}", "Actualiser",
+        "Remet à 0 dB seulement le volume caché de cette entrée ; les autres programmes restent inchangés. Cinegain baisse d'abord son propre gain pour éviter un choc.",
     ),
     "it": (
         "Più forte di quanto permetta il sistema, e i volumi nascosti in vista · Tasti: ↑↓ scegli, ←→ 1 dB (Shift 0,1 · Ctrl 5)",
@@ -216,6 +221,7 @@ _TEXTS = {
         "abbassato a {db} (prima {was})", "riportato da {db} a 0 dB", "impostato a {db}", "ripristino completo",
         "automatico", "tu", "sconosciuto",
         "Log · {path}", "Aggiorna",
+        "Riporta a 0 dB solo il volume nascosto di questa voce; gli altri programmi restano invariati. Cinegain abbassa prima il proprio guadagno per evitare colpi.",
     ),
     "pt": (
         "Mais alto do que o sistema permite, e os volumes ocultos à vista · Teclas: ↑↓ escolher, ←→ 1 dB (Shift 0,1 · Ctrl 5)",
@@ -254,6 +260,7 @@ _TEXTS = {
         "baixado para {db} (antes {was})", "trazido de {db} para 0 dB", "ajustado para {db}", "redefinição completa",
         "automático", "você", "desconhecido",
         "Log · {path}", "Atualizar",
+        "Repõe a 0 dB apenas o volume oculto desta entrada; os outros programas ficam como estão. O Cinegain baixa primeiro o seu próprio ganho para evitar sustos.",
     ),
     "nl": (
         "Luider dan het systeem toestaat, en verborgen volumes in beeld · Toetsen: ↑↓ kiezen, ←→ 1 dB (Shift 0,1 · Ctrl 5)",
@@ -292,6 +299,7 @@ _TEXTS = {
         "verlaagd naar {db} (was {was})", "van {db} terug naar 0 dB", "ingesteld op {db}", "volume volledig teruggezet",
         "automatisch", "jij", "onbekend",
         "Debuglog · {path}", "Vernieuwen",
+        "Zet alleen het verborgen volume van dit item terug naar 0 dB; andere programma's blijven ongewijzigd. Cinegain verlaagt eerst de eigen versterking, zodat er niets knalt.",
     ),
     "pl": (
         "Głośniej, niż pozwala system, i ukryte głośności na widoku · Klawisze: ↑↓ wybór, ←→ 1 dB (Shift 0,1 · Ctrl 5)",
@@ -330,6 +338,7 @@ _TEXTS = {
         "ściszono do {db} (wcześniej {was})", "przywrócono z {db} do 0 dB", "ustawiono na {db}", "pełny reset głośności",
         "automatycznie", "ty", "nieznany",
         "Dziennik · {path}", "Odśwież",
+        "Przywraca do 0 dB tylko ukrytą głośność tego wpisu; inne programy zostają bez zmian. Cinegain najpierw obniża własne wzmocnienie, żeby nic nie huknęło.",
     ),
     "ru": (
         "Громче, чем позволяет система, и скрытая громкость на виду · Клавиши: ↑↓ выбор, ←→ 1 дБ (Shift 0,1 · Ctrl 5)",
@@ -368,6 +377,7 @@ _TEXTS = {
         "снижено до {db} (было {was})", "возвращено с {db} до 0 дБ", "задано {db}", "полный сброс громкости",
         "автоматически", "вы", "неизвестно",
         "Журнал · {path}", "Обновить",
+        "Сбрасывает до 0 дБ только скрытую громкость этой записи; остальные программы не меняются. Cinegain сначала снижает собственное усиление, чтобы не было резкого скачка.",
     ),
     "tr": (
         "Sistemin izin verdiğinden daha yüksek, gizli ses seviyeleri de görünür · Tuşlar: ↑↓ seç, ←→ 1 dB (Shift 0,1 · Ctrl 5)",
@@ -406,6 +416,7 @@ _TEXTS = {
         "{db} seviyesine kısıldı (önce {was})", "{db} seviyesinden 0 dB'ye döndürüldü", "{db} olarak ayarlandı", "tam ses sıfırlama",
         "otomatik", "siz", "bilinmiyor",
         "Günlük · {path}", "Yenile",
+        "Yalnızca bu girdinin gizli ses düzeyini 0 dB'ye döndürür; diğer programlar olduğu gibi kalır. Cinegain, ani patlama olmasın diye önce kendi kazancını düşürür.",
     ),
     "uk": (
         "Гучніше, ніж дозволяє система, і прихована гучність на виду · Клавіші: ↑↓ вибір, ←→ 1 дБ (Shift 0,1 · Ctrl 5)",
@@ -444,6 +455,7 @@ _TEXTS = {
         "знижено до {db} (було {was})", "повернуто з {db} до 0 дБ", "задано {db}", "повне скидання гучності",
         "автоматично", "ви", "невідомо",
         "Журнал · {path}", "Оновити",
+        "Скидає до 0 дБ лише приховану гучність цього запису; інші програми не змінюються. Cinegain спершу знижує власне підсилення, щоб не було різкого стрибка.",
     ),
     "ar": (
         "أعلى مما يسمح به النظام، مع إظهار مستويات الصوت المخفية · المفاتيح: ↑↓ اختيار، ←→ 1 ديسيبل (Shift 0.1 · Ctrl 5)",
@@ -482,6 +494,7 @@ _TEXTS = {
         "خُفّض إلى {db} (كان {was})", "أُعيد من {db} إلى 0 ديسيبل", "ضُبط على {db}", "إعادة تعيين كاملة للصوت",
         "تلقائي", "أنت", "غير معروف",
         "سجل التصحيح · {path}", "تحديث",
+        "يعيد إلى 0 ديسيبل مستوى الصوت المخفي لهذا العنصر فقط؛ تبقى البرامج الأخرى كما هي. يخفض Cinegain كسبه الخاص أولًا حتى لا يحدث دوي مفاجئ.",
     ),
     "hi": (
         "सिस्टम की सीमा से ज़्यादा तेज़, और छिपे वॉल्यूम सामने · कुंजियाँ: ↑↓ चुनें, ←→ 1 dB (Shift 0.1 · Ctrl 5)",
@@ -520,6 +533,7 @@ _TEXTS = {
         "{db} तक घटाया गया (पहले {was})", "{db} से 0 dB पर लौटाया गया", "{db} पर सेट", "पूरा वॉल्यूम रीसेट",
         "स्वचालित", "आप", "अज्ञात",
         "डीबग लॉग · {path}", "रीफ़्रेश",
+        "केवल इस प्रविष्टि की छिपी हुई वॉल्यूम को 0 dB पर लौटाता है; अन्य प्रोग्राम जैसे हैं वैसे रहते हैं। Cinegain पहले अपना गेन घटाता है ताकि अचानक तेज़ आवाज़ न हो।",
     ),
     "id": (
         "Lebih keras dari batas sistem, plus volume tersembunyi terlihat jelas · Tombol: ↑↓ pilih, ←→ 1 dB (Shift 0,1 · Ctrl 5)",
@@ -558,6 +572,7 @@ _TEXTS = {
         "diturunkan ke {db} (sebelumnya {was})", "dikembalikan dari {db} ke 0 dB", "diatur ke {db}", "reset volume penuh",
         "otomatis", "kamu", "tidak diketahui",
         "Log debug · {path}", "Segarkan",
+        "Hanya mengembalikan volume tersembunyi entri ini ke 0 dB; program lain tidak berubah. Cinegain menurunkan penguatannya sendiri lebih dulu agar tidak ada ledakan suara.",
     ),
     "ja": (
         "システムの上限より大きく、隠れた音量も見える · キー: ↑↓ 選択, ←→ 1 dB (Shift 0.1 · Ctrl 5)",
@@ -596,6 +611,7 @@ _TEXTS = {
         "{db} に下げられた (前 {was})", "{db} から 0 dB に戻した", "{db} に設定", "音量の完全リセット",
         "自動", "あなた", "不明",
         "デバッグログ · {path}", "更新",
+        "このエントリの隠れた音量だけを 0 dB に戻します。他のプログラムは変わりません。Cinegain は先に自身のゲインを下げるので、急な大音量は出ません。",
     ),
     "ko": (
         "시스템 한계보다 크게, 숨은 볼륨도 한눈에 · 키: ↑↓ 선택, ←→ 1 dB (Shift 0.1 · Ctrl 5)",
@@ -634,6 +650,7 @@ _TEXTS = {
         "{db}(으)로 낮아짐 (이전 {was})", "{db}에서 0 dB로 복원", "{db}(으)로 설정", "볼륨 전체 초기화",
         "자동", "사용자", "알 수 없음",
         "디버그 로그 · {path}", "새로 고침",
+        "이 항목의 숨겨진 볼륨만 0 dB로 되돌립니다. 다른 프로그램은 그대로입니다. Cinegain이 먼저 자체 게인을 낮추므로 갑자기 커지지 않습니다.",
     ),
     "vi": (
         "To hơn mức hệ thống cho phép, và âm lượng ẩn hiện rõ · Phím: ↑↓ chọn, ←→ 1 dB (Shift 0,1 · Ctrl 5)",
@@ -672,6 +689,7 @@ _TEXTS = {
         "bị giảm xuống {db} (trước {was})", "đưa từ {db} về 0 dB", "đặt thành {db}", "đặt lại âm lượng hoàn toàn",
         "tự động", "bạn", "không rõ",
         "Nhật ký gỡ lỗi · {path}", "Làm mới",
+        "Chỉ đặt lại âm lượng ẩn của mục này về 0 dB; các chương trình khác giữ nguyên. Cinegain hạ độ khuếch đại của chính nó trước nên không bị tiếng nổ.",
     ),
     "zh-CN": (
         "比系统允许的更响，隐藏音量一目了然 · 按键: ↑↓ 选择, ←→ 1 dB (Shift 0.1 · Ctrl 5)",
@@ -710,6 +728,7 @@ _TEXTS = {
         "被调低到 {db} (之前 {was})", "从 {db} 恢复到 0 dB", "设置为 {db}", "完全重置音量",
         "自动", "您", "未知",
         "调试日志 · {path}", "刷新",
+        "仅将此条目的隐藏音量恢复到 0 dB，其他程序保持不变。Cinegain 会先降低自身增益，避免突然爆音。",
     ),
     "zh-TW": (
         "比系統允許的更響，隱藏音量一目瞭然 · 按鍵: ↑↓ 選擇, ←→ 1 dB (Shift 0.1 · Ctrl 5)",
@@ -748,6 +767,7 @@ _TEXTS = {
         "被調低到 {db} (之前 {was})", "從 {db} 恢復到 0 dB", "設定為 {db}", "完全重設音量",
         "自動", "您", "未知",
         "除錯日誌 · {path}", "重新整理",
+        "僅將此項目的隱藏音量恢復到 0 dB，其他程式維持不變。Cinegain 會先降低自身增益，避免突然爆音。",
     ),
 }
 

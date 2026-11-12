@@ -197,6 +197,25 @@ class TestRouterVolume(tr.Base):
         self.assertEqual(self.volumes.nodes[32].volume, 0.01)
 
 
+    def test_reset_of_standard_leaves_the_programs_alone(self):
+        """#32: the key GUI passes for Standard resets only Standard's output, not "everything"."""
+        self.stream(1, "Chromium", "ChatGPT")
+        self.volumes.nodes[31] = NodeVolume(31, "Chromium", "ChatGPT", "Chromium", 0.01)
+        self.volumes.nodes[33] = NodeVolume(33, "", "", "cinegain_output", 0.5)
+        self.router.tick()
+        std_key = self.volumes.nodes[33].key
+        self.assertEqual(std_key, tr.make_key("cinegain_output", ""))
+        report = self.router.full_volume_reset(
+            standard=(lambda: {"mode": "fixed", "sets": modes.apply_values("fixed", None, {"input_db": 3.0})},
+                      lambda mode, sets: None), only=std_key)
+        for _ in range(int(FADE_S * 10) + 5):
+            self.clock.t += 0.1
+            self.router.guard.step()
+        self.assertEqual(self.volumes.nodes[33].volume, 1.0)
+        self.assertEqual(self.volumes.nodes[31].volume, 0.01)  # the program keeps its hidden volume
+        self.assertEqual(report["file_entries"], 0)  # saved WirePlumber file not cleaned
+
+
 class TestCliModes(unittest.TestCase):
     """CLI functions with the live node lookup replaced: nothing reaches PipeWire."""
 

@@ -33,10 +33,10 @@ from cinegain_volume import VolumeGuard  # noqa: E402
 from cinegain_lock import RouterLock, gui_socket_path  # noqa: E402
 import cinegain_paths as paths  # noqa: E402
 from cinegain_profiles import (  # noqa: E402
-    DEFAULT_PARAMS, PROFILE_STANDARD, STANDARD_SINK, ProfileCatalog, SinkProcesses, full_params, read_meter,
-    read_ramp,
+    DEFAULT_PARAMS, PROFILE_STANDARD, STANDARD_OUTPUT, STANDARD_SINK, ProfileCatalog, SinkProcesses, full_params,
+    read_meter, read_ramp,
 )
-from cinegain_registry import profile_id_for  # noqa: E402
+from cinegain_registry import make_key, profile_id_for  # noqa: E402
 from cinegain_router import Router  # noqa: E402
 from i18n import t, set_language, get_available_languages, get_current_language  # noqa: E402
 
@@ -2330,7 +2330,7 @@ class CinegainMainWindow(QMainWindow):
         self.btn_reset_hidden = QPushButton()
         self.btn_reset_hidden.setObjectName("btn_reset_hidden")
         self.btn_reset_hidden.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_reset_hidden.clicked.connect(lambda: self.full_volume_reset(only=self.selected_key))
+        self.btn_reset_hidden.clicked.connect(self.reset_selected_hidden)
         hidden_row.addWidget(self.lbl_hidden, 1)
         hidden_row.addWidget(self.btn_reset_hidden, 0)
         text.addLayout(hidden_row)
@@ -2373,7 +2373,7 @@ class CinegainMainWindow(QMainWindow):
         self.btn_mode_dynamic.setText(f"{t('mode_dynamic')} · {t('mode_beta')}")
         self.btn_mode_dynamic.setToolTip(f"{t('beta_tip')} · {t('mode_dynamic_tip')}")
         self.btn_reset_hidden.setText(t("btn_reset_hidden"))
-        self.btn_reset_hidden.setToolTip(t("btn_full_reset_tip"))
+        self.btn_reset_hidden.setToolTip(t("btn_reset_hidden_tip"))
 
     def update_edit_header(self):
         if not hasattr(self, "lbl_edit_target"):
@@ -2525,6 +2525,22 @@ class CinegainMainWindow(QMainWindow):
     def _save_standard_and_push(self, mode, sets):
         run_cinegain("batch", json.dumps(sets[mode]), "--mode", mode)
         self._reassert_bypass()
+
+    def _standard_output_key(self):
+        """Node key of Standard's own output stream (what Router.full_volume_reset(only=...) matches)."""
+        for n in getattr(self.router.guard, "nodes", None) or []:
+            if n.node_name == STANDARD_OUTPUT:
+                return n.key
+        return make_key(STANDARD_OUTPUT, "")
+
+    def reset_selected_hidden(self):
+        """
+        Reset button in the edit header: only the selected target. Standard has no program
+        key (STANDARD is None, and only=None would mean "everything"), so it resets just its
+        own output stream (#32).
+        """
+        key = self._standard_output_key() if self.selected_key is STANDARD else self.selected_key
+        return self.full_volume_reset(only=key)
 
     def full_volume_reset(self, only=None):
         """Full volume reset (all programs) or the reset of one program's hidden volume."""

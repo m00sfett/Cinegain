@@ -569,6 +569,22 @@ class TestProgramEditing(unittest.TestCase):
         self.win.set_view_level("simple")
         self.assertIn(self.gui.t("simple_dynamic_hint"), self.win.lbl_edit_state.text())
 
+    def test_header_reset_button_never_means_everything(self):
+        """#32: with Standard selected only=None used to run the global full reset."""
+        from cinegain_registry import make_key as mk
+        seen = []
+        self.router.full_volume_reset = lambda standard=None, clean_file=True, only=None: seen.append(only) or {}
+        self.win.sidebar.select(CHROME)
+        self.win.btn_reset_hidden.click()
+        self.assertEqual(seen, [CHROME])
+        self.win.sidebar.select(None)
+        self.assertIsNone(self.win.selected_key)
+        self.win.btn_reset_hidden.click()
+        self.assertEqual(seen, [CHROME, mk("cinegain_output", "")])
+        self.assertNotIn(None, seen)
+        self.win.full_volume_reset()  # the global buttons (sidebar, tray) still reset everything
+        self.assertEqual(seen[-1], None)
+
     def test_overdrive_widens_the_scale_and_off_caps_at_once(self):
         import cinegain_overdrive as od
         s = self.slider()
