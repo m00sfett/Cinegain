@@ -26,6 +26,7 @@ try:
 except ImportError:
     HAVE_QT = False
 
+import cinegain_bypass as bypass_state  # noqa: E402
 import cinegain_paths as paths  # noqa: E402
 from cinegain_registry import AppRegistry, make_key, profile_id_for  # noqa: E402
 from cinegain_router import Router  # noqa: E402
@@ -55,6 +56,8 @@ class TestProgramEditing(unittest.TestCase):
         paths.write_json_atomic(paths.STATE_FILE, {
             "preset": "custom", "mode": "fixed", "params": {"input_db": 8.0},
             "sets": {"fixed": {"input_db": 8.0}, "dynamic": {"input_db": 8.0}}})
+        bypass_state.set_on(False)
+        self.addCleanup(bypass_state.set_on, False)
         self.calls = []
 
         def fake_run(*args):
@@ -253,12 +256,17 @@ class TestProgramEditing(unittest.TestCase):
             self.assertEqual(self.sinks.stopped, [])
             self.assertEqual(self.pulse.moves, moves)
             self.assertIn({"bypass": 1.0}, pushed)
-            # Loading a Standard preset while off must not switch processing back on.
+            self.assertTrue(bypass_state.is_on())  # the CLI reads the same state (#33)
+            # Loading a Standard preset while off must not switch processing back on: the CLI
+            # keeps the flag (tested in test_modes_volume), the GUI does not push bypass itself.
             pushed.clear()
             self.win.apply_standard_preset("boost_12db")
-            self.assertEqual(pushed[-1], {"bypass": 1.0})
+            self.assertNotIn({"bypass": 0.0}, pushed)
+            self.assertTrue(self.router.bypass)
+            self.assertTrue(bypass_state.is_on())
             self.win.toggle_power()
             self.assertFalse(self.router.bypass)
+            self.assertFalse(bypass_state.is_on())
             self.assertEqual(pushed[-1], {"bypass": 0.0})
             self.assertEqual(self.win.btn_power.text(), self.gui.t("btn_power_off"))
         finally:
@@ -569,6 +577,35 @@ class TestProgramEditing(unittest.TestCase):
         self.win.set_view_level("simple")
         self.assertIn(self.gui.t("simple_dynamic_hint"), self.win.lbl_edit_state.text())
 
+    def test_heartbeat_follows_the_filter_state_of_the_cli(self):
+        """#33: `cinegain filter off` in a terminal shows up in the GUI; a stopped filter clears the flag."""
+        self.win.on_heartbeat()
+        self.assertFalse(self.router.bypass)
+        bypass_state.set_on(True)
+        self.win.on_heartbeat()
+        self.assertTrue(self.router.bypass)
+        self.assertFalse(self.win.processing)
+        bypass_state.set_on(False)
+        self.win.on_heartbeat()
+        self.assertFalse(self.router.bypass)
+        self.assertTrue(self.win.processing)
+
+    def test_header_reset_button_never_means_everything(self):
+        """#32: with Standard selected only=None used to run the global full reset."""
+        from cinegain_registry import make_key as mk
+        seen = []
+        self.router.full_volume_reset = lambda standard=None, clean_file=True, only=None: seen.append(only) or {}
+        self.win.sidebar.select(CHROME)
+        self.win.btn_reset_hidden.click()
+        self.assertEqual(seen, [CHROME])
+        self.win.sidebar.select(None)
+        self.assertIsNone(self.win.selected_key)
+        self.win.btn_reset_hidden.click()
+        self.assertEqual(seen, [CHROME, mk("cinegain_output", "")])
+        self.assertNotIn(None, seen)
+        self.win.full_volume_reset()  # the global buttons (sidebar, tray) still reset everything
+        self.assertEqual(seen[-1], None)
+
     def test_overdrive_widens_the_scale_and_off_caps_at_once(self):
         import cinegain_overdrive as od
         s = self.slider()
@@ -589,6 +626,46 @@ class TestProgramEditing(unittest.TestCase):
         self.assertEqual(s.maximum(), 150)
         self.assertEqual(s.value(), 150)
         self.assertEqual(AppRegistry().get(CHROME)["params"]["input_db"], 15.0)
+
+    def _start_after_overdrive_session(self, chrome_db, standard_db):
+        """Stored values of a session that ran with overdrive; the GUI then restarts (flag cleared)."""
+        import cinegain_modes as modes
+        import cinegain_overdrive as od
+        import cinegain_router
+        reg = AppRegistry()
+        od.set_on(True)
+        reg.set_setting(CHROME, "fixed", {"fixed": {"input_db": chrome_db}})
+        modes.save_standard("fixed", {"fixed": {"input_db": standard_db}})
+        od.set_on(False)
+        self.sinks.live.update({"standard", profile_id_for(CHROME)})
+        pushed = []
+        orig = (cinegain_router.push_params, cinegain_router.find_node_id)
+        cinegain_router.push_params = lambda node, params: pushed.append(dict(params)) or True
+        cinegain_router.find_node_id = lambda name: 1
+        self.calls.clear()
+        try:
+            win = self.gui.open_main_window(Router(registry=AppRegistry(), sinks=self.sinks, pulse=self.pulse))
+        finally:
+            cinegain_router.push_params, cinegain_router.find_node_id = orig
+        win.timer.stop()
+        win.meter_timer.stop()
+        win.tray.hide()
+        win.deleteLater()
+        self.app.processEvents()
+        return pushed
+
+    def test_start_pushes_the_capped_values_to_filters_that_kept_running(self):
+        """#30: after a GUI restart the saved values are capped; surviving filters must follow at once."""
+        pushed = self._start_after_overdrive_session(chrome_db=28.0, standard_db=30.0)
+        self.assertEqual(AppRegistry().get(CHROME)["params"]["input_db"], 15.0)
+        self.assertEqual(paths.read_json(paths.STATE_FILE)["params"]["input_db"], 15.0)
+        self.assertIn(("batch", "{}"), [c[:2] for c in self.calls])  # Standard filter gets the capped state
+        self.assertEqual([p["input_db"] for p in pushed], [15.0])  # the program's own sink, capped
+
+    def test_start_pushes_nothing_when_no_value_was_capped(self):
+        pushed = self._start_after_overdrive_session(chrome_db=12.0, standard_db=9.0)
+        self.assertEqual(pushed, [])
+        self.assertFalse([c for c in self.calls if c[0] == "batch"])
 
     def test_overdrive_needs_the_confirmed_dialog(self):
         import cinegain_overdrive as od
@@ -663,6 +740,58 @@ class TestProgramEditing(unittest.TestCase):
         self.win.set_auto_reset(False)
         self.assertFalse(self.router.guard.auto)
         self.assertFalse(paths.config_get("volume_auto_reset"))
+
+    def test_meter_strip_hides_leveler_and_comp_in_fixed_mode(self):
+        """#43 U1: fixed mode shows only IN and LIMIT; dynamic shows all four."""
+        strip = self.win.meter_strip
+        names = lambda: [name for _i, name, _lo, _hi in strip.shown_bars()]  # noqa: E731
+        self.assertEqual(names(), ["IN", "LIMIT"])
+        self.assertEqual([i for i, *_ in strip.shown_bars()], [0, 3])  # values keep their index
+        self.win.set_mode("dynamic")
+        self.assertEqual(names(), ["IN", "LEVELER", "COMP", "LIMIT"])
+        self.win.set_mode("fixed")
+        self.assertEqual(names(), ["IN", "LIMIT"])
+        strip.set_values((-12.0, 6.0, -3.0, -1.0), "x")
+        self.assertFalse(strip.grab().isNull())  # paints with and without values
+
+    def test_subtitle_is_one_line_and_keyboard_help_sits_in_a_tooltip(self):
+        """#43 U2."""
+        for lang in ("en", "de"):
+            self.win.change_language(lang)
+            sub = self.win.lbl_subtitle.text()
+            self.assertEqual(sub, self.gui.t("app_subtitle"))
+            self.assertNotIn("↑", sub)
+            self.assertFalse(self.win.lbl_subtitle.wordWrap())
+            self.assertIn("↑↓", self.win.lbl_kbd_help.toolTip())
+            self.assertIn(self.gui.t("kbd_program"), self.win.lbl_kbd_help.toolTip())
+        self.win.change_language("en")
+
+    def test_hero_gradient_has_no_red_at_the_quiet_end(self):
+        """#43 U3: red means alarm/off; the hero fill starts in dark gold."""
+        rule = self.gui.CI_STYLESHEET.split("QSlider#hero_slider::sub-page:horizontal", 1)[1].split("}", 1)[0]
+        self.assertIn("qlineargradient", rule)
+        gradient = rule.split("border:")[0]
+        for red in ("#D01822", "#B11218", "#FF5546", "#6E1516"):
+            self.assertNotIn(red, gradient)
+
+    def test_empty_slots_get_translated_default_names_saved_names_stay(self):
+        """#43 U4: only the stored default "User N" is translated; typed names are kept."""
+        stored = {"user_1": {"name": "Music", "params": {"input_db": 1.0}},
+                  "user_3": {"name": "User 3", "params": None},
+                  "user_4": {"name": "User 2", "params": None},   # typed by the user, not slot 4's default
+                  "user_5": {"name": "Kino", "params": None}}
+        paths.write_json_atomic(paths.USER_PRESETS_FILE, stored)
+        self.win.user_presets = self.win._load_user_presets()
+        self.win.change_language("de")
+        text = {sid: b.text().replace("&&", "&") for sid, b in self.win.user_preset_buttons.items()}
+        self.assertIn("Music", text["user_1"])
+        self.assertEqual(text["user_2"], "Platz 2 (frei)")      # no entry at all
+        self.assertEqual(text["user_3"], "Platz 3 (frei)")      # stored default
+        self.assertEqual(text["user_4"], "User 2 (frei)")       # a name the user chose stays
+        self.assertEqual(text["user_5"], "Kino (frei)")
+        self.assertEqual(paths.read_json(paths.USER_PRESETS_FILE), stored)  # nothing rewritten
+        self.win.change_language("en")
+        self.assertEqual(self.win.user_preset_buttons["user_3"].text(), "User 3 (empty)")
 
 
 @unittest.skipUnless(HAVE_QT, "PyQt6 not installed")

@@ -147,8 +147,12 @@ class Router:
                                 self._start_attempts[profile] = now
                                 log.info("own sink %s for %s not up: starting it (stream #%s waits on %s)",
                                          profile, key, s.index, current)
-                                self.sinks.start(profile, self._sink_params(entry["params"]),
-                                                 f"Cinegain · {entry['label']}")
+                                try:
+                                    self.sinks.start(profile, self._sink_params(entry["params"]),
+                                                     f"Cinegain · {entry['label']}")
+                                except Exception:
+                                    # one broken program must not stop the tick for all others (#31)
+                                    log.exception("starting own sink %s for %s failed", profile, key)
                         else:
                             log.warning("standard sink %s missing: stream #%s (%s) stays on %s",
                                         STANDARD_SINK, s.index, key, current)

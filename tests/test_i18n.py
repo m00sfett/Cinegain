@@ -59,6 +59,16 @@ class TestLanguageMapping(unittest.TestCase):
         for lang, table in self.i18n.TRANSLATIONS.items():
             self.assertEqual(set(table), reference, f"key set differs for {lang}")
 
+    def test_07_default_slot_name_and_keyboard_help_exist_in_every_language(self):
+        """#43: the default slot name takes {n}; the subtitle carries no keyboard help any more."""
+        for lang, table in self.i18n.TRANSLATIONS.items():
+            self.assertIn("{n}", table["slot_default_name"], lang)
+            self.assertIn("↑↓", table["kbd_help_tip"], lang)
+            self.assertNotIn("↑", table["app_subtitle"], lang)
+            if lang != "en":
+                self.assertNotEqual(table["slot_default_name"], "User {n}", lang)
+        self.assertEqual(self.i18n.TRANSLATIONS["de"]["slot_default_name"].format(n=2), "Platz 2")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -393,6 +393,25 @@ class TestRouting(Base):
         self.router.tick(active=True)
         self.assertEqual(self.sinks.started, ["x", "x"])
 
+    def test_failing_sink_start_does_not_stop_the_tick(self):
+        """#31: one program whose sink cannot start must not break routing for the others."""
+        self.stream(1, "Spotify", "spotify")
+        self.stream(2, "Firefox", "firefox")
+        self.router.tick(active=True)
+        self.give_own(SPOTIFY)
+        self.give_own(FIREFOX)
+        real_start = self.sinks.start
+
+        def start(profile_id, params, description="Cinegain"):
+            if "Spotify" in description:
+                raise ValueError("bad escape")
+            return real_start(profile_id, params, description)
+
+        self.sinks.start = start
+        views = self.router.tick(active=True)
+        self.assertEqual(len(self.sinks.started), 1)  # Firefox still got its sink
+        self.assertEqual({v.label for v in views}, {"Spotify", "Firefox"})
+
     def test_own_streams_are_ignored(self):
         self.pulse.streams.append(Stream(9, "53", node_name="cinegain_output_app_spotify_abc123"))
         views = self.router.tick(active=True)
@@ -456,6 +475,32 @@ class TestRuntimeConf(unittest.TestCase):
         self.assertIn('plugin = "/x/cinegain.so"', conf)
         self.assertIn("priority.session   = 0", conf)
         self.assertIn('node.description = "Cinegain · Nacht"', conf)
+
+    def _descriptions(self, label, profile="app_x_abc"):
+        """node.description / media.name values as a JSON-style parser reads them back."""
+        import json
+        conf = build_runtime_conf(self.template, "/x/cinegain.so", profile, {"input_db": 3.0}, label)
+        out = []
+        for line in conf.splitlines():
+            for key in ("node.description", "media.name"):
+                if line.strip().startswith(key):
+                    out.append(json.loads(line.split("=", 1)[1].strip()))
+        return conf, out
+
+    def test_label_with_backslash_quote_or_newline_cannot_break_the_conf(self):
+        """#31: a Windows path as program name raised re.error and froze the whole router."""
+        for label in (r"Wine C:\Games\x", "ends with a slash\\", 'say "hi"', "two\nlines\tand\x00ctl",
+                      r"\1 \g<0>"):
+            with self.subTest(label=label):
+                conf, found = self._descriptions(label)
+                clean = "".join(ch for ch in label if ch >= " ")
+                self.assertEqual(found, [clean] * 3, "node.description x2 and media.name must all round-trip")
+                self.assertIn('"input_db"         = 3.0', conf)  # the rest of the conf stays intact
+                self.assertEqual(conf.count("{") , conf.count("}"))
+
+    def test_plain_labels_stay_unchanged(self):
+        _, found = self._descriptions("Cinegain · Nächste Größe")
+        self.assertEqual(found, ["Cinegain · Nächste Größe"] * 3)
 
     def test_standard_conf_keeps_standard_names(self):
         conf = build_runtime_conf(self.template, "/x/cinegain.so", "standard", {}, "Cinegain")

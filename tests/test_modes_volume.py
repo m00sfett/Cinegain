@@ -683,6 +683,25 @@ class TestRouterVolume(tr.Base):
         self.assertEqual(self.volumes.nodes[32].volume, 0.01)
 
 
+    def test_reset_of_standard_leaves_the_programs_alone(self):
+        """#32: the key GUI passes for Standard resets only Standard's output, not "everything"."""
+        self.stream(1, "Chromium", "ChatGPT")
+        self.volumes.nodes[31] = NodeVolume(31, "Chromium", "ChatGPT", "Chromium", 0.01)
+        self.volumes.nodes[33] = NodeVolume(33, "", "", "cinegain_output", 0.5)
+        self.router.tick()
+        std_key = self.volumes.nodes[33].key
+        self.assertEqual(std_key, tr.make_key("cinegain_output", ""))
+        report = self.router.full_volume_reset(
+            standard=(lambda: {"mode": "fixed", "sets": modes.apply_values("fixed", None, {"input_db": 3.0})},
+                      lambda mode, sets: None), only=std_key)
+        for _ in range(int(FADE_S * 10) + 5):
+            self.clock.t += 0.1
+            self.router.guard.step()
+        self.assertEqual(self.volumes.nodes[33].volume, 1.0)
+        self.assertEqual(self.volumes.nodes[31].volume, 0.01)  # the program keeps its hidden volume
+        self.assertEqual(report["file_entries"], 0)  # saved WirePlumber file not cleaned
+
+
 class TestCliModes(unittest.TestCase):
     """CLI functions with the live node lookup replaced: nothing reaches PipeWire."""
 
@@ -715,6 +734,346 @@ class TestCliModes(unittest.TestCase):
         rc, out = self.run_cli("mode", "dynamic")
         self.assertEqual((rc, out.strip()), (0, "Standard: dynamic"))
         self.assertEqual(modes.load_standard()["params"]["comp_ratio"], 6.0)
+
+
+class TestFilterStateInCli(unittest.TestCase):
+    """#33: set/batch/preset/start keep the filter in the state the user chose (on or off)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cli = SourceFileLoader("cinegain_cli_filter", os.path.join(tr.BASE_DIR, "bin", "cinegain")).load_module()
+
+    def setUp(self):
+        import cinegain_bypass as bp
+        for p in paths.USER_STATE_FILES:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(p)
+        self.bp = bp
+        bp.set_on(False)
+        self.addCleanup(bp.set_on, False)
+        cli = self.cli
+        self.pushed = []
+        self.started = []
+        self.node = [7]  # node id of the running filter, or None
+        outer = self
+
+        class FakeSinks:
+            def start(self, profile, params, description=""):
+                outer.started.append(dict(params))
+                outer.node[0] = 7
+                return 1
+
+            def stop(self, *a, **kw):
+                outer.node[0] = None
+
+            def running(self):
+                return set()
+
+        class FakeRouter:
+            bypass = False
+
+            def release_all(self):
+                pass
+
+            def set_bypass(self, on):
+                outer.pushed.append(("router.set_bypass", on))
+                return []
+
+        class FakePulse:
+            def set_sink_volume_100(self, name):
+                pass
+
+        self.saved = {n: getattr(cli, n) for n in ("get_cinegain_node_id", "push_params", "wait_for_node",
+                                                     "standard_sinks", "make_router", "PulseControl",
+                                                     "_kill_legacy_processes", "clean_wireplumber_targets")}
+        cli.get_cinegain_node_id = lambda: outer.node[0]
+        cli.push_params = lambda node, params: outer.pushed.append(dict(params)) or True
+        cli.wait_for_node = lambda name: outer.node[0]
+        cli.standard_sinks = FakeSinks
+        cli.make_router = FakeRouter
+        cli.PulseControl = FakePulse
+        cli._kill_legacy_processes = lambda: None
+        cli.clean_wireplumber_targets = lambda path: False
+
+    def tearDown(self):
+        for n, v in self.saved.items():
+            setattr(self.cli, n, v)
+
+    def run_cli(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = self.cli.main(list(argv))
+        return rc, out.getvalue(), err.getvalue()
+
+    def live_bypass(self):
+        """bypass of the last parameter set pushed to the filter."""
+        sets = [p for p in self.pushed if isinstance(p, dict)]
+        return sets[-1]["bypass"]
+
+    COMMANDS = (("set", "input_db", "6"), ("set", "bass_db", "-2"), ("batch", '{"input_db": 4}'),
+                ("preset", "boost_6db"), ("preset", "night_mode"), ("start",))
+
+    def test_commands_leave_a_switched_off_filter_off(self):
+        self.bp.set_on(True)
+        for argv in self.COMMANDS:
+            with self.subTest(argv=argv):
+                self.pushed.clear()
+                self.assertEqual(self.run_cli(*argv)[0], 0)
+                self.assertEqual(self.live_bypass(), 1.0)  # never a blip of processing
+                self.assertTrue(self.bp.is_on())
+                self.assertEqual({p["bypass"] for p in self.pushed if isinstance(p, dict)}, {1.0})
+
+    def test_commands_leave_a_switched_on_filter_on(self):
+        for argv in self.COMMANDS:
+            with self.subTest(argv=argv):
+                self.pushed.clear()
+                self.assertEqual(self.run_cli(*argv)[0], 0)
+                self.assertEqual(self.live_bypass(), 0.0)  # and never switch it off on their own
+                self.assertFalse(self.bp.is_on())
+
+    def test_a_fresh_start_creates_the_sink_in_the_remembered_state(self):
+        for off in (True, False):
+            with self.subTest(filter_off=off):
+                self.bp.set_on(off)
+                self.node[0] = None
+                self.started.clear()
+                self.assertEqual(self.run_cli("start")[0], 0)
+                self.assertEqual(self.started[0]["bypass"], 1.0 if off else 0.0)
+
+    def test_filter_command_switches_on_purpose_and_reports(self):
+        rc, out, _ = self.run_cli("filter", "off")
+        self.assertEqual((rc, self.bp.is_on()), (0, True))
+        self.assertIn("OFF", out)
+        self.assertIn(("router.set_bypass", True), self.pushed)
+        self.assertIn("OFF", self.run_cli("filter")[1])
+        self.assertTrue(json.loads(self.run_cli("status", "--json")[1])["bypass"])
+        rc, out, _ = self.run_cli("filter", "on")
+        self.assertEqual((rc, self.bp.is_on()), (0, False))
+        self.assertIn(("router.set_bypass", False), self.pushed)
+
+    def test_explicit_bypass_values_in_set_and_batch_still_switch(self):
+        self.assertEqual(self.run_cli("set", "bypass", "1")[0], 0)
+        self.assertTrue(self.bp.is_on())
+        self.assertEqual(self.run_cli("batch", '{"bypass": 0, "bass_db": 1}')[0], 0)
+        self.assertFalse(self.bp.is_on())
+        self.assertEqual(modes.load_standard()["sets"]["fixed"]["bass_db"], 1.0)
+
+    def test_filter_needs_a_running_filter_and_stop_clears_the_state(self):
+        self.node[0] = None
+        rc, _out, err = self.run_cli("filter", "off")
+        self.assertEqual(rc, 1)
+        self.assertIn("not active", err)
+        self.assertFalse(self.bp.is_on())
+        self.node[0] = 7
+        self.bp.set_on(True)
+        self.assertEqual(self.run_cli("stop")[0], 0)
+        self.assertFalse(self.bp.is_on())  # the next start is a real "on"
+
+
+class TestStartKeepsSinkVolume(unittest.TestCase):
+    """#36: `cinegain start` sets the sink to 100 % only the first time it creates it."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cli = SourceFileLoader("cinegain_cli_start", os.path.join(tr.BASE_DIR, "bin", "cinegain")).load_module()
+
+    def setUp(self):
+        for p in paths.USER_STATE_FILES:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(p)
+        cli = self.cli
+        self.volume_calls = []
+        outer = self
+
+        class FakePulse:
+            def set_sink_volume_100(self, name):
+                outer.volume_calls.append(name)
+
+        class FakeSinks:
+            def start(self, *a, **kw):
+                return 1
+
+        self.saved = (cli.get_cinegain_node_id, cli.wait_for_node, cli.PulseControl, cli.standard_sinks,
+                      cli.set_params_batch)
+        cli.get_cinegain_node_id = lambda: None  # sink does not exist yet: every start creates it
+        cli.wait_for_node = lambda name: 7
+        cli.PulseControl = FakePulse
+        cli.standard_sinks = FakeSinks
+        cli.set_params_batch = lambda *a, **kw: True
+
+    def tearDown(self):
+        cli = self.cli
+        (cli.get_cinegain_node_id, cli.wait_for_node, cli.PulseControl, cli.standard_sinks,
+         cli.set_params_batch) = self.saved
+
+    def start(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return self.cli.main(["start"])
+
+    def test_first_creation_sets_100_percent_later_starts_keep_the_users_volume(self):
+        self.assertEqual(self.start(), 0)
+        self.assertEqual(self.volume_calls, ["cinegain_sink"])  # first creation: set once
+        self.assertEqual(self.start(), 0)
+        self.assertEqual(self.start(), 0)
+        self.assertEqual(self.volume_calls, ["cinegain_sink"])  # restarts leave it alone
+
+    def test_a_reset_counts_as_a_new_first_creation(self):
+        self.start()
+        os.remove(paths.CONFIG_FILE)  # `cinegain reset` removes config.json
+        self.start()
+        self.assertEqual(self.volume_calls, ["cinegain_sink", "cinegain_sink"])
+
+
+class TestWatchCapsOnStart(unittest.TestCase):
+    """#30: `cinegain watch` caps saved values and pushes them even when the overdrive flag is already gone."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cli = SourceFileLoader("cinegain_cli_watch", os.path.join(tr.BASE_DIR, "bin", "cinegain")).load_module()
+
+    def setUp(self):
+        import cinegain_overdrive as od
+        for p in paths.USER_STATE_FILES:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(p)
+        outer = self
+        self.pushes = []
+
+        class FakeRouter:
+            def __init__(self):
+                self.registry = tr.AppRegistry()
+                self.guard = None
+
+            def push_program_params(self, key):
+                outer.pushes.append(("program", key))
+
+            def tick(self, active=True):
+                raise KeyboardInterrupt  # one pass is enough
+
+        class FreeLock:  # the real flock would stay held by this process between the tests
+            def __init__(self, owner):
+                pass
+
+            def acquire(self):
+                return True
+
+        self.saved = (self.cli.make_router, self.cli.get_cinegain_node_id, self.cli.set_params_batch,
+                      self.cli.RouterLock)
+        self.cli.RouterLock = FreeLock
+        self.cli.make_router = FakeRouter
+        self.cli.get_cinegain_node_id = lambda: 5
+        self.cli.set_params_batch = lambda node, params, **kw: self.pushes.append(("standard", node)) or True
+        od.set_on(True)
+        reg = tr.AppRegistry()
+        reg.observe("Firefox", "firefox")
+        self.addCleanup(od.set_on, False)
+        self.od = od
+        self.reg = reg
+
+    def tearDown(self):
+        (self.cli.make_router, self.cli.get_cinegain_node_id, self.cli.set_params_batch,
+         self.cli.RouterLock) = self.saved
+
+    def watch(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return self.cli.main(["watch"])
+
+    def test_values_above_the_normal_scale_are_pushed_although_the_flag_was_already_cleared(self):
+        self.reg.set_setting(tr.FIREFOX, "fixed", {"fixed": {"input_db": 28.0}})
+        modes.save_standard("fixed", {"fixed": {"input_db": 22.0}})
+        self.od.set_on(False)  # e.g. the GUI restarted before and already cleared the flag
+        self.assertEqual(self.watch(), 0)
+        self.assertEqual(sorted(self.pushes), [("program", tr.FIREFOX), ("standard", 5)])
+        self.assertEqual(modes.load_standard()["params"]["input_db"], 15.0)
+
+    def test_nothing_is_pushed_when_every_value_is_inside_the_scale(self):
+        self.reg.set_setting(tr.FIREFOX, "fixed", {"fixed": {"input_db": 10.0}})
+        modes.save_standard("fixed", {"fixed": {"input_db": 5.0}})
+        self.od.set_on(False)
+        self.assertEqual(self.watch(), 0)
+        self.assertEqual(self.pushes, [])
+
+
+class TestParameterRange(unittest.TestCase):
+    """#37: values are finite and inside the plugin's port ranges before they are saved or pushed."""
+
+    def setUp(self):
+        for p in paths.USER_STATE_FILES:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(p)
+        self.cli = TestCliModes.cli
+
+    @classmethod
+    def setUpClass(cls):
+        TestCliModes.setUpClass()
+
+    def run_cli(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = self.cli.main(list(argv))
+        return rc, out.getvalue(), err.getvalue()
+
+    @staticmethod
+    def c_port_limits():
+        """Control-port ranges parsed from port_names / port_hints in src/cinegain.c."""
+        import re
+        with open(os.path.join(tr.BASE_DIR, "src", "cinegain.c"), encoding="utf-8") as f:
+            src = f.read()
+        names = re.findall(r'"([^"]+)"', re.search(r"port_names\[P_COUNT\] = \{(.*?)\};", src, re.S).group(1))
+        block = re.search(r"port_hints\[P_COUNT\] = \{(.*?)\n\};", src, re.S).group(1)
+        entries = re.findall(r"\{\s*([A-Za-z_| 0-9]+?)\s*,\s*(-?[0-9.]+)f?\s*,\s*(-?[0-9.]+)f?\s*\}", block)
+        assert len(entries) == len(names), (len(entries), len(names))
+        return {n: (float(lo), float(hi)) for n, (_h, lo, hi) in zip(names, entries)
+                if n.islower() and not n.startswith("meter_") and " " not in n}
+
+    def test_python_limits_match_the_plugin_port_hints(self):
+        from cinegain_profiles import DEFAULT_PARAMS, PARAM_LIMITS
+        self.assertEqual(PARAM_LIMITS, self.c_port_limits())
+        self.assertEqual(set(PARAM_LIMITS), set(DEFAULT_PARAMS))
+        for key, value in DEFAULT_PARAMS.items():
+            low, high = PARAM_LIMITS[key]
+            self.assertTrue(low <= value <= high, key)
+
+    def test_normalize_clamps_to_range_and_keeps_inside_values(self):
+        from cinegain_profiles import normalize_params
+        got = normalize_params({"lim_ceiling_db": 6, "input_db": 99, "makeup_db": -99, "comp_ratio": 0.2,
+                                "bass_db": 4.5, "cinegain:dialog_hz": 2500})
+        self.assertEqual(got, {"lim_ceiling_db": 0.0, "input_db": 40.0, "makeup_db": -24.0, "comp_ratio": 1.0,
+                               "bass_db": 4.5, "dialog_hz": 2500.0})
+
+    def test_normalize_drops_non_finite_numbers(self):
+        from cinegain_profiles import normalize_params
+        self.assertEqual(normalize_params({"bass_db": float("nan"), "treble_db": float("inf"),
+                                           "mid_db": float("-inf"), "side_db": 2}), {"side_db": 2.0})
+        sets = modes.apply_values("dynamic", None, {"bass_db": float("nan"), "lim_ceiling_db": 6})
+        self.assertEqual((sets["dynamic"]["bass_db"], sets["dynamic"]["lim_ceiling_db"]), (0.0, 0.0))
+
+    def test_cli_set_refuses_non_finite_values_and_saves_nothing(self):
+        self.assertEqual(self.run_cli("set", "bass_db", "2")[0], 0)
+        before = paths.read_json(paths.STATE_FILE)
+        for bad in (["nan"], ["inf"], ["--", "-inf"]):
+            rc, _out, err = self.run_cli("set", "bass_db", *bad)
+            self.assertNotEqual(rc, 0, bad)
+            self.assertIn("finite", err)
+        self.assertEqual(paths.read_json(paths.STATE_FILE), before)
+
+    def test_cli_batch_refuses_non_finite_values_and_saves_nothing(self):
+        self.assertEqual(self.run_cli("batch", '{"bass_db": 2}')[0], 0)
+        before = paths.read_json(paths.STATE_FILE)
+        for bad in ('{"bass_db": NaN}', '{"bass_db": 1, "treble_db": Infinity}', '{"mid_db": -Infinity}'):
+            rc, _out, err = self.run_cli("batch", bad)
+            self.assertNotEqual(rc, 0, bad)
+            self.assertIn("finite", err)
+        self.assertEqual(paths.read_json(paths.STATE_FILE), before)
+
+    def test_cli_set_clamps_the_ceiling_in_dynamic_mode(self):
+        self.assertEqual(self.run_cli("mode", "dynamic")[0], 0)
+        rc, out, _err = self.run_cli("set", "lim_ceiling_db", "6")
+        self.assertEqual(rc, 0)
+        self.assertIn("limited", out)
+        self.assertEqual(modes.load_standard()["params"]["lim_ceiling_db"], 0.0)
+        self.assertEqual(self.run_cli("set", "lim_ceiling_db", "-3")[0], 0)  # inside the range: untouched
+        self.assertEqual(modes.load_standard()["params"]["lim_ceiling_db"], -3.0)
 
 
 class TestUserSlots(unittest.TestCase):

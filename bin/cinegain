@@ -9,6 +9,7 @@ apps.json, config.json).
 """
 import argparse
 import json
+import math
 import os
 import signal
 import subprocess
@@ -33,6 +34,7 @@ if os.path.exists(os.path.join(SCRIPT_DIR, "..", "ui", "cinegain_paths.py")):
 os.environ.setdefault("CINEGAIN_BASE_DIR", os.path.abspath(BASE_DIR))
 sys.path.insert(0, os.path.join(os.path.abspath(BASE_DIR), "ui"))
 
+import cinegain_bypass as bypass_state  # noqa: E402
 import cinegain_log  # noqa: E402
 from cinegain_lock import RouterLock  # noqa: E402
 import cinegain_modes as modes  # noqa: E402
@@ -46,7 +48,9 @@ from cinegain_profiles import (  # noqa: E402
     ProfileCatalog,
     SinkProcesses,
     cinegain_pipewire_pids,
+    clamp_param,
     find_node_id,
+    non_finite_keys,
     normalize_params,
     push_params,
     sink_name,
@@ -99,13 +103,16 @@ def get_cinegain_node_id():
 
 
 def set_params_batch(node_id, param_dict, preset=None, mode=None):
-    """Persists values of Standard's active mode and applies the effective set live if running."""
+    """
+    Persists values of Standard's active mode and applies the effective set live if running.
+    The filter keeps the state the user chose: while it is switched off (bypass flag)
+    the pushed set keeps bypass=1 instead of switching it on for a moment (#33).
+    """
     state = save_state(params=param_dict, preset=preset, mode=mode)
     if not node_id:
         return True
     live = dict(state["params"])
-    if "bypass" in normalize_params(param_dict):
-        live["bypass"] = normalize_params(param_dict)["bypass"]
+    live["bypass"] = 1.0 if bypass_state.is_on() else 0.0
     return push_params(node_id, live)
 
 
@@ -123,7 +130,9 @@ def get_params(node_id, dump=None):
 
 
 def make_router():
-    return Router()
+    router = Router()
+    router.bypass = bypass_state.is_on()  # sinks it starts or pushes to follow "filter off"
+    return router
 
 
 def standard_sinks():
@@ -131,6 +140,20 @@ def standard_sinks():
 
 
 # -- commands ----------------------------------------------------------------------
+
+def _init_sink_volume():
+    """
+    Sets the Standard sink to 100 % once, when Cinegain creates it for the first
+    time. Later starts keep what the user (or WirePlumber's restore) chose (#36).
+    """
+    if paths.config_get("sink_volume_initialized"):
+        return
+    PulseControl().set_sink_volume_100(STANDARD_SINK)
+    try:
+        paths.config_set(sink_volume_initialized=True)
+    except OSError as e:
+        log.warning("could not remember the sink volume init: %s", e)
+
 
 def cmd_start(args):
     node_id = get_cinegain_node_id()
@@ -140,13 +163,14 @@ def cmd_start(args):
         print(f"Cinegain is already running (Node ID: {node_id}).")
     else:
         print("Starting Cinegain PipeWire filter chain...")
-        standard_sinks().start(PROFILE_STANDARD, params=saved["params"],
+        start_params = dict(saved["params"], bypass=1.0 if bypass_state.is_on() else 0.0)
+        standard_sinks().start(PROFILE_STANDARD, params=start_params,
                                description=STANDARD_DESCRIPTION)
         node_id = wait_for_node(STANDARD_SINK)
         if not node_id:
             print("Failed to start Cinegain.", file=sys.stderr)
             return 1
-        PulseControl().set_sink_volume_100(STANDARD_SINK)
+        _init_sink_volume()
         set_params_batch(node_id, saved["params"], preset=saved.get("preset"))
         print(f"Cinegain started successfully (Node ID: {node_id}).")
     if getattr(args, "route", False):
@@ -173,6 +197,7 @@ def cmd_stop(args):
     if load_saved_state()["migrated"]:
         save_state()  # write the 0.4.0 format before the filter goes away
     make_router().release_all()
+    bypass_state.set_on(False)  # the next start is a real "on"
     standard_sinks().stop(PROFILE_STANDARD, "cinegain stop")
     _kill_legacy_processes()
     clean_wireplumber_targets(paths.WIREPLUMBER_STREAM_PROPS)
@@ -206,6 +231,7 @@ def cmd_status(args):
             "sets": saved["sets"],
             "params": params,
             "overdrive": overdrive.is_on(),
+            "bypass": bypass_state.is_on(),
             "profile_sinks": running_profiles,
             "version": __version__,
         }))
@@ -218,6 +244,7 @@ def cmd_status(args):
         print("\nSaved Parameters (will be applied on start):")
     print(f"  mode               = {saved['mode']}")
     print(f"  overdrive          = {'ON (up to +40 dB)' if overdrive.is_on() else 'off (up to +15 dB)'}")
+    print(f"  filter             = {'OFF (pass-through)' if bypass_state.is_on() else 'on'}")
     for k, v in sorted(params.items()):
         print(f"  {k:18} = {v}")
     if running_profiles:
@@ -232,14 +259,21 @@ def _set_and_report(updates, preset, mode=None):
 
 def cmd_set(args):
     short_p = args.param.replace("cinegain:", "")
+    if not math.isfinite(args.value):
+        print(f"Refusing to set {args.param} to {args.value}: the value must be a finite number.", file=sys.stderr)
+        return 1
+    if short_p == "bypass":  # explicit switch: 1 = filter off (pass-through)
+        return cmd_filter(argparse.Namespace(action="off" if args.value > 0.5 else "on"))
     updates = {short_p: args.value}
-    if short_p != "bypass":
-        updates["bypass"] = 0.0
     if short_p == "lev_max_boost_db":
         updates["leveler"] = 1.0 if float(args.value) > 0.05 else 0.0
     ok = _set_and_report(updates, "custom")
     if ok:
-        print(f"Set {args.param} = {args.value}")
+        clamped = clamp_param(short_p, args.value)
+        if clamped != args.value:
+            print(f"Set {args.param} = {clamped:g} (limited to the plugin range, requested {args.value:g})")
+        else:
+            print(f"Set {args.param} = {args.value}")
     else:
         print(f"Failed to set {args.param}", file=sys.stderr)
     return 0 if ok else 1
@@ -248,12 +282,40 @@ def cmd_set(args):
 def cmd_batch(args):
     try:
         raw = json.loads(args.json_params)
+        bad = non_finite_keys(raw)
+        if bad:
+            print(f"Refusing batch: not a finite number for {', '.join(bad)}.", file=sys.stderr)
+            return 1
         updates = normalize_params(raw)
     except (ValueError, AttributeError) as e:
         print(f"Invalid JSON for batch: {e}", file=sys.stderr)
         return 1
-    updates.setdefault("bypass", 0.0)
-    return 0 if _set_and_report(updates, args.preset_id or "custom", mode=args.mode) else 1
+    want_bypass = updates.pop("bypass", None)  # only an explicit value switches the filter
+    ok = _set_and_report(updates, args.preset_id or "custom", mode=args.mode)
+    if ok and want_bypass is not None:
+        ok = _switch_filter(want_bypass <= 0.5)
+    return 0 if ok else 1
+
+
+def _switch_filter(on):
+    """Filter on/off (bypass) for Standard and every program sink. True when it worked."""
+    if not get_cinegain_node_id():
+        print("Cinegain is not active. Start it first with 'cinegain start'.", file=sys.stderr)
+        return False
+    bypass_state.set_on(not on)
+    failed = make_router().set_bypass(not on)
+    if failed:
+        print(f"Not applied to: {', '.join(failed)}", file=sys.stderr)
+    return not failed
+
+
+def cmd_filter(args):
+    """Shows or switches the filter: off = pass-through, kept by set/batch/preset/start."""
+    if args.action in ("on", "off"):
+        if not _switch_filter(args.action == "on"):
+            return 1
+    print("Filter: " + ("OFF (pass-through)" if bypass_state.is_on() else "on"))
+    return 0
 
 
 def cmd_preset(args):
@@ -292,12 +354,14 @@ def cmd_watch(args):
         return 1
     from cinegain_volume import VolumeGuard
     router = make_router()
-    if overdrive.set_on(False):  # overdrive never survives a restart of the router owner
-        _cap_to_normal_scale(router)
+    overdrive.set_on(False)  # overdrive never survives a restart of the router owner
+    # Always cap and push: a filter that survived the last owner may still play above +15 dB (#30).
+    _cap_to_normal_scale(router)
     router.guard = VolumeGuard(auto=bool(paths.config_get("volume_auto_reset", True)))
     print("Watching audio streams (Ctrl+C to stop)...")
     try:
         while True:
+            router.bypass = bypass_state.is_on()  # `cinegain filter off` may have run meanwhile
             router.tick(active=bool(get_cinegain_node_id()))
             deadline = time.time() + args.interval
             while time.time() < deadline:
@@ -640,6 +704,9 @@ def main(argv=None):
     p_watch = sub.add_parser("watch", help="Keep applying application routing (no GUI needed)")
     p_watch.add_argument("--interval", type=float, default=1.5, help="Seconds between scans")
 
+    p_filter = sub.add_parser("filter", help="Show or switch the filter on/off (off = pass-through)")
+    p_filter.add_argument("action", nargs="?", choices=["on", "off", "status"], default="status")
+
     p_set = sub.add_parser("set", help="Live-adjust a parameter of the standard profile")
     p_set.add_argument("param", help="Parameter name (e.g. input_db, dialog_db)")
     p_set.add_argument("value", type=float, help="Value to set")
@@ -708,6 +775,7 @@ def main(argv=None):
         "status": cmd_status,
         "route": cmd_route,
         "watch": cmd_watch,
+        "filter": cmd_filter,
         "set": cmd_set,
         "batch": cmd_batch,
         "preset": cmd_preset,
