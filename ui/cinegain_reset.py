@@ -46,6 +46,33 @@ def backup_user_state(backup_root=None, clock=time.time):
     return target
 
 
+MOVE_CONFIRM_TIMEOUT_S = 3.0
+MOVE_SETTLE_S = 0.5
+
+
+def wait_for_moves(pulse, moved, target, timeout=MOVE_CONFIRM_TIMEOUT_S, settle=MOVE_SETTLE_S,
+                   clock=time.monotonic, sleep=time.sleep):
+    """
+    Waits until every moved stream reports the target sink (or is gone), then a short
+    settle time, so a sink is never stopped while a stream still hangs on it (#55).
+    Returns True when all moves were confirmed before the timeout.
+    """
+    pending = set(moved)
+    deadline = clock() + timeout
+    while pending:
+        sink_ids = pulse.list_sinks()
+        live = {st.index: sink_ids.get(st.sink, "") for st in pulse.list_streams()}
+        pending = {i for i in pending if i in live and live[i] != target}
+        if not pending:
+            break
+        if clock() >= deadline:
+            return False
+        sleep(0.1)
+    if moved:
+        sleep(settle)
+    return True
+
+
 def reset_everything(pulse=None, sinks=None, backup=True, keep_sink=None):
     """
     Runs the full reset. Returns a dict describing what was done.
@@ -65,18 +92,23 @@ def reset_everything(pulse=None, sinks=None, backup=True, keep_sink=None):
     sink_ids = pulse.list_sinks()
     keep_alive = keep_sink is not None and keep_sink in sink_ids.values()
     target = keep_sink if keep_alive else pulse.hardware_sink(sink_ids)
+    moved = []
     for st in pulse.list_streams():
         if st.is_own:
             continue
         name = sink_ids.get(st.sink, "")
         if is_cinegain_name(name) and not (keep_alive and name == keep_sink):
             pulse.move(st.index, target)
+            moved.append(st.index)
             report["streams_moved"] += 1
         if make_key(st.app_name or st.node_name, st.binary) in known and (
             st.volume_pct != 100 or st.muted
         ):
             pulse.set_volume_100(st.index)
             report["volumes_restored"] += 1
+
+    # stop the old sinks only once the streams have left them (#55)
+    report["moves_confirmed"] = wait_for_moves(pulse, moved, target)
 
     if sinks is not None:
         report["profiles_stopped"] = sinks.stop_all_profiles()
