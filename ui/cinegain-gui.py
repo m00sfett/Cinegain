@@ -29,6 +29,8 @@ os.environ.setdefault("CINEGAIN_BASE_DIR", BASE_DIR)
 import cinegain_log  # noqa: E402
 import cinegain_modes as modes  # noqa: E402
 import cinegain_overdrive as overdrive  # noqa: E402
+import cinegain_inproc  # noqa: E402
+import cinegain_pwdump  # noqa: E402
 from cinegain_volume import VolumeGuard  # noqa: E402
 from cinegain_lock import RouterLock, gui_socket_path  # noqa: E402
 import cinegain_paths as paths  # noqa: E402
@@ -576,19 +578,23 @@ def amp(text):
 
 
 def run_cinegain(*args):
-    cmd = [BIN_PATH] + list(args)
-    quiet = args[:1] == ("status",)  # polled every 1.5 s; only failures are logged
-    try:
-        res = subprocess.run(cmd, capture_output=True, text=True)
-    except OSError as e:
-        log.error("cinegain %s could not run: %s", " ".join(args), e)
-        return "", 1
-    if res.returncode not in (0, 1) or (res.returncode and not quiet):
-        log.warning("cinegain %s -> rc=%s %s", " ".join(args), res.returncode,
-                    (res.stderr or res.stdout or "").strip()[-500:])
+    quiet = args[:1] == ("status",)  # polled by the heartbeat; only failures are logged
+    # status and batch run inside this process (no 100-150 ms Python start each, #38)
+    done = cinegain_inproc.run(BIN_PATH, args)
+    if done is not None:
+        out, err, code = done
+    else:
+        try:
+            res = subprocess.run([BIN_PATH] + list(args), capture_output=True, text=True)
+        except OSError as e:
+            log.error("cinegain %s could not run: %s", " ".join(args), e)
+            return "", 1
+        out, err, code = res.stdout.strip(), res.stderr, res.returncode
+    if code not in (0, 1) or (code and not quiet):
+        log.warning("cinegain %s -> rc=%s %s", " ".join(args), code, (err or out or "").strip()[-500:])
     elif not quiet:
-        log.debug("cinegain %s -> rc=%s", " ".join(args), res.returncode)
-    return res.stdout.strip(), res.returncode
+        log.debug("cinegain %s -> rc=%s", " ".join(args), code)
+    return out, code
 
 
 def profile_for_sink(name):
@@ -599,6 +605,9 @@ def profile_for_sink(name):
         return name[len("cinegain_"):]
     return None
 
+
+HEARTBEAT_BUSY_MS = 1500   # window open and something playing
+HEARTBEAT_IDLE_MS = 3000   # in the tray, minimized or nothing playing (#38)
 
 TRAY_PRESETS = ("boost_6db", "boost_12db", "dialog_boost", "night_mode", "max_loudness", "clean_linear")
 
@@ -875,11 +884,11 @@ class CinegainMainWindow(QMainWindow):
         self.meter_timer = QTimer(self)
         self.meter_timer.setInterval(120)
         self.meter_timer.timeout.connect(self.update_meters)
-        self.meter_timer.start()
+        self._meter_paused = True   # starts with the first show, runs only while the window is open
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.on_heartbeat)
-        self.timer.start(1500)
+        self.timer.start(HEARTBEAT_BUSY_MS)
 
         # Smooth fade-ins of the hidden-volume guard (3 s, stepped every 100 ms).
         self.fade_timer = QTimer(self)
@@ -2186,6 +2195,48 @@ class CinegainMainWindow(QMainWindow):
             self.router.set_bypass(True)
 
     def on_heartbeat(self, sync_sliders=False):
+        # Status, guard scan and default sink share one pw-dump per tick (#38).
+        with cinegain_pwdump.tick_scope():
+            self._heartbeat(sync_sliders)
+        self._retime_heartbeat()
+
+    def _retime_heartbeat(self):
+        """Full speed while the window is open and something plays; relaxed in the tray or when idle."""
+        open_and_playing = self._window_open() and any(v.playing for v in self._views)
+        want = HEARTBEAT_BUSY_MS if open_and_playing else HEARTBEAT_IDLE_MS
+        if self.timer.interval() != want:
+            self.timer.setInterval(want)
+
+    def _window_open(self):
+        return self.isVisible() and not self.isMinimized()
+
+    def _sync_meter_timer(self):
+        """The meters only matter while the window is on screen: pause the 120 ms timer otherwise."""
+        if self._window_open():
+            if self._meter_paused:
+                self._meter_paused = False
+                self.meter_timer.start()
+                self.update_meters()
+        elif self.meter_timer.isActive():
+            self._meter_paused = True
+            self.meter_timer.stop()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._sync_meter_timer()
+        if self.timer.isActive() and self.timer.interval() != HEARTBEAT_BUSY_MS:
+            self.timer.start(HEARTBEAT_BUSY_MS)  # looking at it again: do not wait for a relaxed tick
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._sync_meter_timer()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == event.Type.WindowStateChange:
+            self._sync_meter_timer()
+
+    def _heartbeat(self, sync_sliders=False):
         out, code = run_cinegain("status", "--json")
         params = {}
         preset_id = None
@@ -2454,7 +2505,7 @@ class CinegainMainWindow(QMainWindow):
             report = {}
         if code != 0:
             QMessageBox.critical(self, t("reset_confirm_title"), t("reset_failed"))
-            self.timer.start(1500)
+            self.timer.start(HEARTBEAT_BUSY_MS)
             return
         QMessageBox.information(
             self, t("reset_done_title"), t("reset_done_text", backup=report.get("backup") or "—")

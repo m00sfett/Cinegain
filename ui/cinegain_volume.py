@@ -23,6 +23,7 @@ import time
 
 import cinegain_log
 import cinegain_paths as paths
+import cinegain_pwdump
 from cinegain_registry import make_key
 
 log = cinegain_log.get("volume")
@@ -140,9 +141,9 @@ def parse_nodes(dump, sinks=False):
 
 
 def scan_nodes():
-    """Streams and sinks, one `pw-dump` per tick (the guard splits them)."""
+    """Streams and sinks from one `pw-dump` (shared with the rest of a GUI tick, #38)."""
     try:
-        return parse_nodes(json.loads(subprocess.check_output(["pw-dump"], stderr=subprocess.DEVNULL)), sinks=True)
+        return parse_nodes(cinegain_pwdump.snapshot(), sinks=True)
     except (subprocess.CalledProcessError, ValueError, OSError) as e:
         log.warning("pw-dump for the volume guard failed: %s", e)
         return []

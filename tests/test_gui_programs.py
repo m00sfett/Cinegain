@@ -665,5 +665,143 @@ class TestProgramEditing(unittest.TestCase):
         self.assertFalse(paths.config_get("volume_auto_reset"))
 
 
+@unittest.skipUnless(HAVE_QT, "PyQt6 not installed")
+class TestHeartbeatCost(unittest.TestCase):
+    """
+    #38: what one idle heartbeat costs. Every process the GUI would start is counted; the
+    sound server is faked. Before: `cinegain status` (a Python process with two pw-dumps of
+    its own), three pactl calls and one pw-dump = 5 processes seen by the GUI, 7 in all.
+    """
+
+    SINK_INPUT = [{"index": 7, "sink": 53, "corked": False, "mute": False,
+                   "properties": {"application.name": "Spotify", "application.process.binary": "spotify",
+                                  "node.name": "Spotify", "object.id": "20"},
+                   "volume": {"front-left": {"value_percent": "100%"}}}]
+
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location("cinegain_gui_cost", os.path.join(BASE_DIR, "ui", "cinegain-gui.py"))
+        cls.gui = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.gui)
+        cls.app = cls.gui.QApplication.instance() or cls.gui.QApplication([])
+
+    def setUp(self):
+        import cinegain_inproc
+        import cinegain_pwdump
+        import test_modes_volume as tmv
+        from cinegain_pulse import PulseControl
+        from cinegain_volume import VolumeGuard
+        for p in paths.USER_STATE_FILES:
+            try:
+                os.remove(p)
+            except FileNotFoundError:
+                pass
+        paths.write_json_atomic(paths.CONFIG_FILE, {"lang": "en", "view_level": "advanced"})
+        self.spawned = []
+        self.sink_inputs = []
+        dump = json.dumps(tmv.fake_dump()).encode()
+
+        def fake_process(args, **kwargs):
+            self.spawned.append(os.path.basename(args[0]))
+            text = kwargs.get("text")
+            if args[0] == "pw-dump":
+                return dump
+            if args[:3] == ["pactl", "-f", "json"]:
+                out = json.dumps(self.sink_inputs)
+            elif args[:3] == ["pactl", "list", "sinks"]:
+                out = "53\thw_sink\tPipeWire\n54\tcinegain_sink\tPipeWire\n"
+            elif args[:2] == ["pactl", "get-default-sink"]:
+                out = "hw_sink\n"
+            else:
+                out = ""
+            return out if text else out.encode()
+
+        def fake_run(args, **kwargs):
+            out = fake_process(args, **kwargs)
+            return subprocess.CompletedProcess(args, 0, out, "")
+
+        cli = cinegain_inproc.load(self.gui.BIN_PATH)
+        self._saved = (subprocess.run, subprocess.check_output, cli.standard_sinks, cli.push_params)
+
+        class NoSinks:
+            def running(self):
+                return set()
+        cli.standard_sinks = NoSinks
+        cli.push_params = lambda node, params: True
+        subprocess.run, subprocess.check_output = fake_run, fake_process
+        self.cli = cli
+        self.clock = tr.Clock(1_000_000.0)
+        self.guard = VolumeGuard(clock=self.clock)
+        self.router = Router(registry=AppRegistry(clock=self.clock), sinks=tr.FakeSinks(tr.FakePulse()),
+                             pulse=PulseControl(), clock=self.clock, guard=self.guard)
+        self.win = self.gui.CinegainMainWindow(self.router)
+        self.win.timer.stop()
+        self.win.meter_timer.stop()
+        self.app.processEvents()
+        self.inproc, self.pwdump = cinegain_inproc, cinegain_pwdump
+
+    def tearDown(self):
+        subprocess.run, subprocess.check_output, self.cli.standard_sinks, self.cli.push_params = self._saved
+        self.win.hide()
+        self.win.tray.hide()
+        self.win.deleteLater()
+        self.app.processEvents()
+
+    def test_an_idle_heartbeat_starts_one_pw_dump_and_two_pactl_and_no_cinegain(self):
+        self.spawned.clear()
+        self.win.on_heartbeat()
+        self.assertEqual(sorted(self.spawned), ["pactl", "pactl", "pw-dump"])   # was 5 (7 with the CLI's own)
+        self.assertEqual(self.win.lbl_status.text(), self.gui.t("status_active"))   # status still arrives ...
+        self.assertTrue(self.win.is_active)
+        self.assertEqual(self.win.btn_power.isEnabled(), True)
+        self.assertEqual(self.win._std_mode, "fixed")                              # ... with its values
+
+    def test_status_failure_still_reads_as_unknown(self):
+        real = self.pwdump.fetch
+        self.pwdump.fetch = lambda: (_ for _ in ()).throw(subprocess.CalledProcessError(1, "pw-dump"))
+        try:
+            self.win.on_heartbeat()
+        finally:
+            self.pwdump.fetch = real
+        self.assertFalse(self.win.btn_power.isEnabled())
+        self.assertEqual(self.win.lbl_status.text(), self.gui.t("unknown_status"))
+
+    def test_tick_relaxes_in_the_tray_or_when_nothing_plays_and_speeds_up_when_playing(self):
+        busy, idle = self.gui.HEARTBEAT_BUSY_MS, self.gui.HEARTBEAT_IDLE_MS
+        self.assertGreaterEqual(idle, 3000)
+        self.win.show()
+        self.win.on_heartbeat()
+        self.assertEqual(self.win.timer.interval(), idle)         # window open, nothing plays
+        self.sink_inputs = self.SINK_INPUT
+        self.win.on_heartbeat()
+        self.assertEqual(self.win.timer.interval(), busy)         # open and playing
+        self.win.hide()
+        self.win.on_heartbeat()
+        self.assertEqual(self.win.timer.interval(), idle)         # same playback, but in the tray
+
+    def test_meter_timer_runs_only_while_the_window_is_open(self):
+        self.assertFalse(self.win.meter_timer.isActive())
+        self.win.show()
+        self.assertTrue(self.win.meter_timer.isActive())
+        self.win.hide()
+        self.assertFalse(self.win.meter_timer.isActive())
+        self.win.show()
+        self.assertTrue(self.win.meter_timer.isActive())          # and it comes back
+
+    def test_fades_keep_running_with_a_hidden_window(self):
+        """Ear protection: a raise that started must reach its target, whatever the window does."""
+        self.win.hide()
+        writes = []
+        self.guard.add_fade("probe", -30.0, 0.0, lambda db, final: writes.append((db, final)) or True,
+                            now=self.clock.t, what="probe")
+        self.assertTrue(self.win.fade_timer.isActive())
+        for _ in range(60):
+            self.clock.t += 0.1
+            self.win._step_fades()
+        self.assertEqual(writes[-1], (0.0, True))                 # landed on the target
+        self.assertEqual(self.guard.fades, {})
+        self.assertTrue(self.win.fade_timer.isActive())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

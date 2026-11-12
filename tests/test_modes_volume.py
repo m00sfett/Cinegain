@@ -6,6 +6,7 @@ nothing here touches the running sound server.
 """
 import contextlib
 import io
+import json
 import os
 import sys
 import tempfile
@@ -933,6 +934,191 @@ class TestSetHidden(unittest.TestCase):
         self.assertEqual(self.fake.nodes[5].volume, 1.0)
         self.assertLessEqual(rises([v for _, v in self.fake.sets], start), MAX_STEP_DB + 1e-6)
         del app
+
+
+def fake_dump(std_params=("cinegain:input_db", 6.0, "cinegain:bypass", False), std_id=12, default="hw_sink"):
+    """A small pw-dump: Standard's filter node, one playing stream, a sound card, the default metadata."""
+    props = [{"volume": 1.0, "channelVolumes": [1.0, 1.0]}]
+    if std_params is not None:
+        props.append({"params": list(std_params)})
+    dump = [
+        {"id": 20, "type": "PipeWire:Interface:Node", "info": {
+            "props": {"media.class": "Stream/Output/Audio", "application.name": "Spotify",
+                      "application.process.binary": "spotify", "node.name": "Spotify"},
+            "params": {"Props": [{"volume": 0.5, "mute": False, "channelVolumes": [1.0, 1.0]}]}}},
+        {"id": 30, "type": "PipeWire:Interface:Node", "info": {
+            "props": {"media.class": "Audio/Sink", "node.name": "hw_sink"},
+            "params": {"Props": [{"volume": 1.0, "mute": False, "channelVolumes": [1.0, 1.0]}]}}},
+        {"id": 39, "type": "PipeWire:Interface:Metadata", "props": {"metadata.name": "default"},
+         "metadata": [{"subject": 0, "key": "default.audio.sink", "type": "Spa:String:JSON",
+                       "value": {"name": default}}]},
+    ]
+    if std_id is not None:
+        dump.append({"id": std_id, "type": "PipeWire:Interface:Node", "info": {
+            "props": {"media.class": "Audio/Sink", "node.name": "cinegain_sink"},
+            "params": {"Props": props}}})
+    return dump
+
+
+def reference_params(dump, node_id):
+    """The parameter parsing of `cinegain status` before 0.5.2 (#38), kept to compare against."""
+    for obj in dump:
+        if obj.get("id") != node_id:
+            continue
+        for p in obj.get("info", {}).get("params", {}).get("Props", []):
+            if isinstance(p, dict) and isinstance(p.get("params"), list):
+                it = iter(p["params"])
+                found = {}
+                for k, v in zip(it, it):
+                    if isinstance(k, str) and k.startswith("cinegain:"):
+                        if isinstance(v, bool):
+                            v = 1.0 if v else 0.0
+                        if isinstance(v, (int, float)):
+                            found[k[len("cinegain:"):]] = round(float(v), 3)
+                if found:
+                    return found
+    return None
+
+
+class TestOneDumpPerTick(unittest.TestCase):
+    """#38: status, guard and default sink share one pw-dump; status and batch run without a new process."""
+
+    BIN = os.path.join(tr.BASE_DIR, "bin", "cinegain")
+
+    def setUp(self):
+        import cinegain_inproc
+        import cinegain_pwdump
+        import subprocess
+        self.inproc, self.pwdump, self.subprocess = cinegain_inproc, cinegain_pwdump, subprocess
+        for p in paths.USER_STATE_FILES:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(p)
+        self.cli = cinegain_inproc.load(self.BIN)
+        self.assertIsNotNone(self.cli)
+        self.dump = fake_dump()
+        self.fetches = 0
+        self.pushes = []
+        self.push_ok = True
+        self._saved = (cinegain_pwdump.fetch, self.cli.push_params, self.cli.find_node_id,
+                       self.cli.standard_sinks, subprocess.run, subprocess.check_output)
+
+        def fetch():
+            self.fetches += 1
+            if isinstance(self.dump, Exception):
+                raise self.dump
+            return self.dump
+
+        class NoSinks:
+            def running(self):
+                return set()
+
+        def no_process(*a, **k):
+            raise AssertionError(f"a process was started: {a}")
+
+        cinegain_pwdump.fetch = fetch
+        self.cli.push_params = lambda node, params: self.pushes.append((node, dict(params))) or self.push_ok
+        self.cli.find_node_id = lambda name, **k: next(
+            (o["id"] for o in self.dump if o.get("info", {}).get("props", {}).get("node.name") == name), None)
+        self.cli.standard_sinks = NoSinks
+        subprocess.run = subprocess.check_output = no_process
+        cinegain_inproc.node_hint = None
+
+    def tearDown(self):
+        (self.pwdump.fetch, self.cli.push_params, self.cli.find_node_id, self.cli.standard_sinks,
+         self.subprocess.run, self.subprocess.check_output) = self._saved
+        self.inproc.node_hint = None
+
+    def status(self):
+        out, err, code = self.inproc.run(self.BIN, ("status", "--json"))
+        return json.loads(out), code
+
+    def test_status_in_process_matches_the_old_parsing(self):
+        st, code = self.status()
+        self.assertEqual((code, st["active"], st["node_id"]), (0, True, 12))
+        self.assertEqual(st["params"], reference_params(self.dump, 12))
+        self.assertEqual(st["params"], {"input_db": 6.0, "bypass": 0.0})
+        self.assertEqual(set(st), {"active", "node_id", "preset", "mode", "sets", "params", "overdrive",
+                                   "profile_sinks", "version"})
+        saved = modes.load_standard()
+        self.dump = fake_dump(std_params=None)                  # running, but shows no cinegain:* parameters
+        st, code = self.status()
+        self.assertEqual((code, st["active"], st["params"]), (0, True, saved["params"]))
+        self.dump = fake_dump(std_id=None)                      # filter not running
+        st, code = self.status()
+        self.assertEqual((code, st["active"], st["node_id"], st["params"]), (1, False, None, saved["params"]))
+        self.dump = self.subprocess.CalledProcessError(1, "pw-dump")   # pw-dump failed: unknown, not "stopped"
+        st, code = self.status()
+        self.assertEqual((code, st["active"]), (2, None))
+
+    def test_one_dump_for_status_guard_and_default_sink_inside_a_tick(self):
+        import cinegain_pulse
+        with self.pwdump.tick_scope():
+            self.status()
+            guard = VolumeGuard()
+            guard.update()
+            self.assertEqual([n.id for n in guard.nodes], [20])      # the guard sees the same dump ...
+            self.assertEqual(cinegain_pulse.PulseControl().default_sink(), "hw_sink")   # ... and no pactl
+        self.assertEqual(self.fetches, 1)
+        self.status()                                               # outside a tick nothing is reused
+        self.status()
+        self.assertEqual(self.fetches, 3)
+
+    def test_default_sink_falls_back_to_pactl_without_metadata_or_scope(self):
+        import cinegain_pulse
+        asked = []
+        orig = cinegain_pulse._run
+        cinegain_pulse._run = lambda args: asked.append(args) or "pactl_sink\n"
+        try:
+            pulse = cinegain_pulse.PulseControl()
+            self.assertEqual(pulse.default_sink(), "pactl_sink")        # no tick: pactl, no pw-dump
+            self.assertEqual(self.fetches, 0)
+            self.dump = [o for o in self.dump if o["type"] != "PipeWire:Interface:Metadata"]
+            with self.pwdump.tick_scope():
+                self.assertEqual(pulse.default_sink(), "pactl_sink")   # metadata missing: pactl
+        finally:
+            cinegain_pulse._run = orig
+        self.assertEqual(len(asked), 2)
+
+    def test_batch_uses_the_known_node_and_repeats_once_with_a_fresh_lookup_when_stale(self):
+        self.status()                                               # learns node 12
+        out, err, code = self.inproc.run(self.BIN, ("batch", '{"bass_db": -4}', "--preset-id", "custom"))
+        self.assertEqual(code, 0)
+        self.assertEqual(self.pushes[-1][0], 12)
+        self.assertEqual(modes.load_standard()["sets"]["fixed"]["bass_db"], -4.0)
+        self.assertEqual(self.fetches, 1)                           # only the status dump: no lookup for the slider
+        # the filter was restarted: the old id fails, the fresh lookup finds the new one
+        self.dump = fake_dump(std_id=44)
+        calls = []
+        self.cli.push_params = lambda node, params: calls.append(node) or node == 44
+        out, err, code = self.inproc.run(self.BIN, ("batch", '{"bass_db": -5}'))
+        self.assertEqual((code, calls), (0, [12, 44]))
+        self.assertEqual(self.inproc.node_hint, None)
+        self.cli.push_params = lambda node, params: calls.append(node) or False
+        self.assertEqual(self.inproc.run(self.BIN, ("batch", '{"bass_db": -6}'))[2], 1)   # really failing: rc 1
+
+    def test_other_commands_and_odd_arguments_start_the_cli(self):
+        for args in (("start",), ("status",), ("batch",), ("batch", "{}", "--mode", "turbo"),
+                     ("batch", "{}", "--bogus", "1"), ("preset", "night_mode")):
+            self.assertIsNone(self.inproc.run(self.BIN, args), args)
+        self.assertIsNone(self.inproc.run("cinegain", ("status", "--json")))   # no script path: a process
+
+    def test_tick_scope_is_per_thread_and_does_not_leak(self):
+        import threading
+        seen = []
+        with self.pwdump.tick_scope():
+            self.pwdump.snapshot()
+            t = threading.Thread(target=lambda: seen.append(self.pwdump.scoped_snapshot()))
+            t.start()
+            t.join()
+        self.assertEqual(seen, [None])                              # another thread never gets the tick's dump
+        self.assertIsNone(self.pwdump.scoped_snapshot())            # closed scope: nothing shared
+        with self.assertRaises(RuntimeError):
+            with self.pwdump.tick_scope():
+                raise RuntimeError("boom")
+        before = self.fetches
+        self.assertEqual(self.pwdump.snapshot()[0]["id"], 20)       # and the failure left no scope behind:
+        self.assertEqual(self.pwdump.snapshot()[0]["id"], 20)       # outside a scope every call is fresh
+        self.assertEqual(self.fetches, before + 2)
 
 
 class TestAnalysisSliders(unittest.TestCase):

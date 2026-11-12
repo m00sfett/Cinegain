@@ -12,6 +12,7 @@ import subprocess
 
 import cinegain_log
 import cinegain_paths as paths
+import cinegain_pwdump
 
 log = cinegain_log.get("pulse")
 
@@ -176,6 +177,12 @@ class PulseControl:
             return {}
 
     def default_sink(self):
+        # Inside a GUI tick the default sink comes from the tick's pw-dump metadata, no extra
+        # process; elsewhere (and if the metadata has none) pactl answers (#38).
+        scope_dump = cinegain_pwdump.scoped_snapshot()
+        name = cinegain_pwdump.default_sink(scope_dump) if scope_dump is not None else ""
+        if name:
+            return name
         try:
             return _run(["pactl", "get-default-sink"]).strip()
         except (subprocess.CalledProcessError, OSError):
