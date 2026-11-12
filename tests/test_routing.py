@@ -622,6 +622,44 @@ class TestReset(Base):
         reset_everything(pulse=self.pulse, sinks=self.sinks, backup=False, keep_sink="cinegain_sink")
         self.assertEqual(self.sink_of(s), HW)
 
+    def test_wait_for_moves_holds_until_the_stream_is_on_the_target(self):
+        """#55: old sinks may only go once the moved streams have left them."""
+        import cinegain_reset
+        own = self.pulse.add_sink("cinegain_app_x_abc123")
+        s = self.stream(1, "Chrome", "chrome", sink=own)
+        t = [0.0]
+        sleeps = []
+
+        def sleep(d):
+            sleeps.append(d)
+            t[0] += d
+            if t[0] >= 0.3:  # PipeWire finishes the move after a few polls
+                s.sink = "53"
+
+        ok = cinegain_reset.wait_for_moves(self.pulse, ["1"], HW, clock=lambda: t[0], sleep=sleep)
+        self.assertTrue(ok)
+        self.assertEqual(sleeps[-1], cinegain_reset.MOVE_SETTLE_S)
+        self.assertGreaterEqual(len(sleeps), 4)
+
+    def test_wait_for_moves_gives_up_after_the_timeout(self):
+        import cinegain_reset
+        own = self.pulse.add_sink("cinegain_app_x_abc123")
+        self.stream(1, "Chrome", "chrome", sink=own)
+        t = [0.0]
+
+        def sleep(d):
+            t[0] += d
+
+        ok = cinegain_reset.wait_for_moves(self.pulse, ["1"], HW, timeout=1.0,
+                                           clock=lambda: t[0], sleep=sleep)
+        self.assertFalse(ok)
+
+    def test_wait_for_moves_without_moves_does_not_sleep(self):
+        import cinegain_reset
+        called = []
+        self.assertTrue(cinegain_reset.wait_for_moves(self.pulse, [], HW, sleep=called.append))
+        self.assertEqual(called, [])
+
     def test_backup_directories_are_private(self):
         """#48/#42: the backup root and the timestamped folder hold user state: 0700."""
         paths.write_json_atomic(paths.STATE_FILE, {"params": {"input_db": 25}})
