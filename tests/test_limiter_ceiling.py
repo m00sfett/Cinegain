@@ -6,6 +6,7 @@ Builds the LADSPA plugin into a temporary directory and drives it through
 ctypes with synthetic signals at +25 dB input gain. Needs gcc, but no
 PipeWire and no audio hardware.
 """
+import atexit
 import ctypes as C
 import math
 import os
@@ -17,6 +18,12 @@ import unittest
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SRC_PATH = os.path.join(BASE_DIR, "src", "cinegain.c")
+
+# No plugin instance of an offline test may touch the runtime dir of a running
+# Cinegain (#54): every meter file goes to a private temp dir for this module.
+_METER_TMP = tempfile.mkdtemp(prefix="cinegain-test-meter-")
+os.environ["CINEGAIN_METER_DIR"] = _METER_TMP
+atexit.register(shutil.rmtree, _METER_TMP, True)
 
 RATE = 48000
 BLOCK = 256
