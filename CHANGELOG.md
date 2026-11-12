@@ -15,15 +15,21 @@ Categories follow the standard Keep a Changelog taxonomy: `Added`, `Changed`, `D
 
 ---
 
-## [0.5.3] - Unreleased
+## [0.5.4] - 2026-11-12
+
+### Fixed
+- **Verwaiste Cinegain-Sinks im WirePlumber-Reset entfernt:** „Alles zurücksetzen“ und „Lautstärke voll zurücksetzen“ bereinigen neben den Zielen und Lautstärken auch verwaiste Cinegain-/Kinoton-Sink-Einträge in `stream-properties` (#26).
+
+### Changed
+- **Ereignisgesteuerte GUI-Aktualisierung (`pactl subscribe`):** Die GUI nutzt im Betrieb nun PipeWire-Ereignisse statt zyklischem 1,5-s-/3-s-Polling (~0,4 % CPU im Leerlauf), überwacht CLI-Änderungen an Konfigurationsdateien per `QFileSystemWatcher` und fällt nur bei Ausfall von `pactl` auf das Polling zurück (#38).
+
+## [0.5.3] - 2026-11-12
 
 ### Fixed
 - **Startauswahl bleibt auf Standard:** Beim Start der GUI (und nach einem Reset) wird nicht mehr automatisch ein einzelnes spielendes Programm selektiert, sodass keine versehentlichen `0,0 dB`-Einzel-Sinks entstehen (#60).
 - **Kein pauschales Ducking bei `0,0 dB`:** Ein Sink-Umzug senkt die Stream-Lautstärke nur noch dann auf −30,5 dB ab, wenn der Ziel-Sink tatsächlich über `0 dB` verstärkt (oder ein Hardware-Umzug aus einer Absenkung kommt); zudem bleiben eigene Programm-Sinks 10 Minuten statt 45 Sekunden im Leerlauf aktiv (#61).
 - **Keine pausierten Geister-Einträge:** Rein pausierte (`corked`) Nicht-Medien-Streams (z. B. Electron-Audio-Probes von ChatGPT/Chromium) werden nicht mehr automatisch in `apps.json` aufgenommen (#62).
 - **Analyse-Verlauf aufgeräumt:** Interne Knoten wie `::cinegain_output...` erscheinen mit lesbarem Namen statt als Roh-Key, und ein globaler Reset („Alles zurücksetzen“) setzt einen sauberen Schnitt im Verlauf (#63).
-- **Verwaiste Cinegain-Sinks im WirePlumber-Reset entfernt:** „Alles zurücksetzen“ und „Lautstärke voll zurücksetzen“ bereinigen neben den Zielen und Lautstärken auch verwaiste Cinegain-/Kinoton-Sink-Einträge in `stream-properties` (#26).
-- **Ereignisgesteuerte GUI-Aktualisierung (`pactl subscribe`):** Die GUI nutzt im Betrieb nun PipeWire-Ereignisse statt zyklischem 1,5-s-/3-s-Polling, überwacht CLI-Änderungen an Konfigurationsdateien per `QFileSystemWatcher` und fällt nur bei Ausfall von `pactl` auf das Polling zurück (#38).
 
 ## [0.5.2] - 2026-11-12
 
