@@ -608,6 +608,37 @@ class TestRouterVolume(tr.Base):
         self.assertLessEqual(max(y - x for x, y in zip(dbs, dbs[1:])), MAX_STEP_DB + 1e-6)
         self.assertGreaterEqual(len(series), 40)                  # ~4.2 s at 100 ms, from the quiet channel
 
+    def test_sidebar_restore_volume_fades_and_keeps_mute(self):
+        """#48: "restore volume" jumped to 100 % via set_volume_100 and unmuted. Now: fade, mute stays."""
+        from cinegain_volume import mixer_db
+        a = self.stream(1, "Spotify", "spotify", volume_pct=40, volume_min_pct=20)
+        b = self.stream(2, "Spotify", "spotify", volume_pct=50, muted=True)
+        other = self.stream(3, "Discord", "discord", volume_pct=30)
+        self.router.restore_volume(tr.make_key("Spotify", "spotify"))
+        self.assertEqual(self.pulse.volume_resets, [])                       # no jump, no unmute
+        self.assertEqual((a.volume_pct, other.volume_pct), (40, 30))         # nothing written at once
+        drain(self.router.guard, self.clock)
+        self.assertEqual((a.volume_pct, b.volume_pct, b.muted), (100, 100, True))   # target reached, mute stays
+        self.assertEqual(other.volume_pct, 30)                               # other programs untouched
+        series = [p for i, p in self.pulse.volume_sets if i == "1"]
+        dbs = [mixer_db(20)] + [mixer_db(p) for p in series]
+        self.assertLessEqual(max(y - x for x, y in zip(dbs, dbs[1:])), MAX_STEP_DB + 1e-6)
+        self.assertGreaterEqual(len(series), 40)
+
+    def test_sidebar_restore_volume_without_guard_runs_the_fade_to_the_end(self):
+        """One-shot use (no GUI timer): the fade runs inside the call and ends at 100 %."""
+        a = self.stream(1, "Spotify", "spotify", volume_pct=90)
+        self.router.guard = None
+        slept = []
+        import cinegain_volume
+        orig = cinegain_volume.time.sleep
+        cinegain_volume.time.sleep = lambda s: (slept.append(s), setattr(self.clock, "t", self.clock.t + s))
+        try:
+            self.router.restore_volume(tr.make_key("Spotify", "spotify"))
+        finally:
+            cinegain_volume.time.sleep = orig
+        self.assertEqual(a.volume_pct, 100)
+
     def test_full_reset_includes_cinegain_sinks_not_hardware_and_passes_running_sinks(self):
         import cinegain_volume
         seen = {}
@@ -1262,6 +1293,400 @@ class TestSetHidden(unittest.TestCase):
         self.assertEqual(self.fake.nodes[5].volume, 1.0)
         self.assertLessEqual(rises([v for _, v in self.fake.sets], start), MAX_STEP_DB + 1e-6)
         del app
+
+
+def fake_dump(std_params=("cinegain:input_db", 6.0, "cinegain:bypass", False), std_id=12, default="hw_sink"):
+    """A small pw-dump: Standard's filter node, one playing stream, a sound card, the default metadata."""
+    props = [{"volume": 1.0, "channelVolumes": [1.0, 1.0]}]
+    if std_params is not None:
+        props.append({"params": list(std_params)})
+    dump = [
+        {"id": 20, "type": "PipeWire:Interface:Node", "info": {
+            "props": {"media.class": "Stream/Output/Audio", "application.name": "Spotify",
+                      "application.process.binary": "spotify", "node.name": "Spotify"},
+            "params": {"Props": [{"volume": 0.5, "mute": False, "channelVolumes": [1.0, 1.0]}]}}},
+        {"id": 30, "type": "PipeWire:Interface:Node", "info": {
+            "props": {"media.class": "Audio/Sink", "node.name": "hw_sink"},
+            "params": {"Props": [{"volume": 1.0, "mute": False, "channelVolumes": [1.0, 1.0]}]}}},
+        {"id": 39, "type": "PipeWire:Interface:Metadata", "props": {"metadata.name": "default"},
+         "metadata": [{"subject": 0, "key": "default.audio.sink", "type": "Spa:String:JSON",
+                       "value": {"name": default}}]},
+    ]
+    if std_id is not None:
+        dump.append({"id": std_id, "type": "PipeWire:Interface:Node", "info": {
+            "props": {"media.class": "Audio/Sink", "node.name": "cinegain_sink"},
+            "params": {"Props": props}}})
+    return dump
+
+
+def reference_params(dump, node_id):
+    """The parameter parsing of `cinegain status` before 0.5.2 (#38), kept to compare against."""
+    for obj in dump:
+        if obj.get("id") != node_id:
+            continue
+        for p in obj.get("info", {}).get("params", {}).get("Props", []):
+            if isinstance(p, dict) and isinstance(p.get("params"), list):
+                it = iter(p["params"])
+                found = {}
+                for k, v in zip(it, it):
+                    if isinstance(k, str) and k.startswith("cinegain:"):
+                        if isinstance(v, bool):
+                            v = 1.0 if v else 0.0
+                        if isinstance(v, (int, float)):
+                            found[k[len("cinegain:"):]] = round(float(v), 3)
+                if found:
+                    return found
+    return None
+
+
+class TestOneDumpPerTick(unittest.TestCase):
+    """#38: status, guard and default sink share one pw-dump; status and batch run without a new process."""
+
+    BIN = os.path.join(tr.BASE_DIR, "bin", "cinegain")
+
+    def setUp(self):
+        import cinegain_inproc
+        import cinegain_pwdump
+        import subprocess
+        self.inproc, self.pwdump, self.subprocess = cinegain_inproc, cinegain_pwdump, subprocess
+        for p in paths.USER_STATE_FILES:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(p)
+        self.cli = cinegain_inproc.load(self.BIN)
+        self.assertIsNotNone(self.cli)
+        self.dump = fake_dump()
+        self.fetches = 0
+        self.pushes = []
+        self.push_ok = True
+        self._saved = (cinegain_pwdump.fetch, self.cli.push_params, self.cli.find_node_id,
+                       self.cli.standard_sinks, subprocess.run, subprocess.check_output)
+
+        def fetch():
+            self.fetches += 1
+            if isinstance(self.dump, Exception):
+                raise self.dump
+            return self.dump
+
+        class NoSinks:
+            def running(self):
+                return set()
+
+        def no_process(*a, **k):
+            raise AssertionError(f"a process was started: {a}")
+
+        cinegain_pwdump.fetch = fetch
+        self.cli.push_params = lambda node, params: self.pushes.append((node, dict(params))) or self.push_ok
+        self.cli.find_node_id = lambda name, **k: next(
+            (o["id"] for o in self.dump if o.get("info", {}).get("props", {}).get("node.name") == name), None)
+        self.cli.standard_sinks = NoSinks
+        subprocess.run = subprocess.check_output = no_process
+        cinegain_inproc.node_hint = None
+
+    def tearDown(self):
+        (self.pwdump.fetch, self.cli.push_params, self.cli.find_node_id, self.cli.standard_sinks,
+         self.subprocess.run, self.subprocess.check_output) = self._saved
+        self.inproc.node_hint = None
+
+    def status(self):
+        out, err, code = self.inproc.run(self.BIN, ("status", "--json"))
+        return json.loads(out), code
+
+    def test_status_in_process_matches_the_old_parsing(self):
+        st, code = self.status()
+        self.assertEqual((code, st["active"], st["node_id"]), (0, True, 12))
+        self.assertEqual(st["params"], reference_params(self.dump, 12))
+        self.assertEqual(st["params"], {"input_db": 6.0, "bypass": 0.0})
+        self.assertEqual(set(st), {"active", "node_id", "preset", "mode", "sets", "params", "overdrive",
+                                   "profile_sinks", "version", "bypass"})
+        saved = modes.load_standard()
+        self.dump = fake_dump(std_params=None)                  # running, but shows no cinegain:* parameters
+        st, code = self.status()
+        self.assertEqual((code, st["active"], st["params"]), (0, True, saved["params"]))
+        self.dump = fake_dump(std_id=None)                      # filter not running
+        st, code = self.status()
+        self.assertEqual((code, st["active"], st["node_id"], st["params"]), (1, False, None, saved["params"]))
+        self.dump = self.subprocess.CalledProcessError(1, "pw-dump")   # pw-dump failed: unknown, not "stopped"
+        st, code = self.status()
+        self.assertEqual((code, st["active"]), (2, None))
+
+    def test_one_dump_for_status_guard_and_default_sink_inside_a_tick(self):
+        import cinegain_pulse
+        with self.pwdump.tick_scope():
+            self.status()
+            guard = VolumeGuard()
+            guard.update()
+            self.assertEqual([n.id for n in guard.nodes], [20])      # the guard sees the same dump ...
+            self.assertEqual(cinegain_pulse.PulseControl().default_sink(), "hw_sink")   # ... and no pactl
+        self.assertEqual(self.fetches, 1)
+        self.status()                                               # outside a tick nothing is reused
+        self.status()
+        self.assertEqual(self.fetches, 3)
+
+    def test_default_sink_falls_back_to_pactl_without_metadata_or_scope(self):
+        import cinegain_pulse
+        asked = []
+        orig = cinegain_pulse._run
+        cinegain_pulse._run = lambda args: asked.append(args) or "pactl_sink\n"
+        try:
+            pulse = cinegain_pulse.PulseControl()
+            self.assertEqual(pulse.default_sink(), "pactl_sink")        # no tick: pactl, no pw-dump
+            self.assertEqual(self.fetches, 0)
+            self.dump = [o for o in self.dump if o["type"] != "PipeWire:Interface:Metadata"]
+            with self.pwdump.tick_scope():
+                self.assertEqual(pulse.default_sink(), "pactl_sink")   # metadata missing: pactl
+        finally:
+            cinegain_pulse._run = orig
+        self.assertEqual(len(asked), 2)
+
+    def test_batch_uses_the_known_node_and_repeats_once_with_a_fresh_lookup_when_stale(self):
+        self.status()                                               # learns node 12
+        out, err, code = self.inproc.run(self.BIN, ("batch", '{"bass_db": -4}', "--preset-id", "custom"))
+        self.assertEqual(code, 0)
+        self.assertEqual(self.pushes[-1][0], 12)
+        self.assertEqual(modes.load_standard()["sets"]["fixed"]["bass_db"], -4.0)
+        self.assertEqual(self.fetches, 1)                           # only the status dump: no lookup for the slider
+        # the filter was restarted: the old id fails, the fresh lookup finds the new one
+        self.dump = fake_dump(std_id=44)
+        calls = []
+        self.cli.push_params = lambda node, params: calls.append(node) or node == 44
+        out, err, code = self.inproc.run(self.BIN, ("batch", '{"bass_db": -5}'))
+        self.assertEqual((code, calls), (0, [12, 44]))
+        self.assertEqual(self.inproc.node_hint, None)
+        self.cli.push_params = lambda node, params: calls.append(node) or False
+        self.assertEqual(self.inproc.run(self.BIN, ("batch", '{"bass_db": -6}'))[2], 1)   # really failing: rc 1
+
+    def test_other_commands_and_odd_arguments_start_the_cli(self):
+        for args in (("start",), ("status",), ("batch",), ("batch", "{}", "--mode", "turbo"),
+                     ("batch", "{}", "--bogus", "1"), ("preset", "night_mode")):
+            self.assertIsNone(self.inproc.run(self.BIN, args), args)
+        self.assertIsNone(self.inproc.run("cinegain", ("status", "--json")))   # no script path: a process
+
+    def test_tick_scope_is_per_thread_and_does_not_leak(self):
+        import threading
+        seen = []
+        with self.pwdump.tick_scope():
+            self.pwdump.snapshot()
+            t = threading.Thread(target=lambda: seen.append(self.pwdump.scoped_snapshot()))
+            t.start()
+            t.join()
+        self.assertEqual(seen, [None])                              # another thread never gets the tick's dump
+        self.assertIsNone(self.pwdump.scoped_snapshot())            # closed scope: nothing shared
+        with self.assertRaises(RuntimeError):
+            with self.pwdump.tick_scope():
+                raise RuntimeError("boom")
+        before = self.fetches
+        self.assertEqual(self.pwdump.snapshot()[0]["id"], 20)       # and the failure left no scope behind:
+        self.assertEqual(self.pwdump.snapshot()[0]["id"], 20)       # outside a scope every call is fresh
+        self.assertEqual(self.fetches, before + 2)
+
+
+class TestAnalysisSliders(unittest.TestCase):
+    """#34: a click in the groove, the wheel and the keys only moved the slider; the refresh put it back."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+            from PyQt6.QtWidgets import QApplication
+            import analysis_panel
+        except ImportError as e:  # pragma: no cover - PyQt6 missing
+            raise unittest.SkipTest(f"PyQt6 not available: {e}")
+        cls.ap = analysis_panel
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        import cinegain_volume as vol
+        vol._live = None
+        self.sets = []
+        self.rows = [{"id": 5, "kind": "stream", "label": "Spotify", "key": "spotify::spotify",
+                      "node_name": "Spotify", "hidden": 0.5, "normal": 1.0, "mute": False,
+                      "editable": True, "stored": None}]
+        self.panel = self.ap.AnalysisPanel(scanner=lambda: self.rows, history=lambda key=None: [],
+                                           setter=lambda *a: self.sets.append(a) or True)
+        self.panel.refresh()
+        self.slider = self.panel.table.cellWidget(0, self.ap.COL_SET).findChild(self.ap.QSlider)
+
+    def settle(self):
+        """Lets the debounce time pass."""
+        self.assertTrue(self.panel.set_timer.isActive())
+        self.panel.set_timer.stop()
+        self.panel._apply_pending()
+
+    def test_groove_click_wheel_and_keys_set_the_value_debounced(self):
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtTest import QTest
+        from PyQt6.QtWidgets import QAbstractSlider
+        s = self.slider
+        self.assertEqual(s.value(), 50)
+        s.triggerAction(QAbstractSlider.SliderAction.SliderPageStepAdd)      # click in the groove
+        self.assertEqual(s.value(), 60)
+        self.panel.refresh()                                                 # the 0.5 s refresh must not undo it
+        self.assertEqual(s.value(), 60)
+        for _ in range(3):                                                   # mouse wheel notches
+            s.triggerAction(QAbstractSlider.SliderAction.SliderSingleStepAdd)
+        QTest.keyClick(s, Qt.Key.Key_Right)                                  # keyboard
+        self.assertEqual(s.value(), 64)
+        self.assertEqual(self.sets, [])                                      # nothing written per notch ...
+        self.settle()
+        self.assertEqual([(a[0], a[1]) for a in self.sets], [(5, 0.64)])     # ... one set for the burst
+
+    def test_slider_keeps_the_wanted_value_while_the_raise_fades(self):
+        import cinegain_volume as vol
+        s = self.slider
+        s.setValue(80)
+        guard = self.panel._own_guard
+        guard.fades[5] = vol.Fade(-6.0, -2.0, 0.0, lambda db, final: True)  # the raise runs, hidden still 0.5
+        self.settle()
+        self.panel.refresh()
+        self.assertEqual(s.value(), 80)
+        self.rows[0]["hidden"] = 0.8                                         # reached
+        guard.fades.clear()
+        self.panel.refresh()
+        self.assertEqual(s.value(), 80)
+        self.rows[0]["hidden"] = 0.3                                         # something external lowered it later
+        self.panel.refresh()
+        self.assertEqual(s.value(), 30)                                      # the view follows reality again
+
+    def test_drag_reports_once_and_everything_is_reachable_by_keyboard(self):
+        from PyQt6.QtCore import Qt
+        s = self.slider
+        s.setSliderDown(True)
+        for v in (55, 60, 70):
+            s.setSliderPosition(v)                                           # tracking off: silent while dragging
+        self.assertFalse(self.panel.set_timer.isActive())
+        s.setSliderDown(False)
+        self.settle()
+        self.assertEqual([(a[0], a[1]) for a in self.sets], [(5, 0.7)])
+        self.assertEqual(self.panel.table.focusPolicy(), Qt.FocusPolicy.StrongFocus)
+        self.assertEqual(self.panel.timeline.focusPolicy(), Qt.FocusPolicy.StrongFocus)
+        self.assertEqual(s.focusPolicy(), Qt.FocusPolicy.StrongFocus)
+
+
+class TestHistoryIncremental(unittest.TestCase):
+    """#39: history() and the log tail read only what is new, with the same result as reading everything."""
+
+    def setUp(self):
+        import time as _t
+        import cinegain_volume as vol
+        self.vol, self._t = vol, _t
+        self.now = _t.time()
+        self.dir = tempfile.mkdtemp(prefix="cinegain-hist-")
+        self.log = os.path.join(self.dir, "cinegain.log")
+        self.n = 0
+        self.parsed = 0
+        self._orig = vol._parse_chunk
+
+        def counting(data):
+            self.parsed += len(data)
+            return self._orig(data)
+        vol._parse_chunk = counting
+        vol._HISTORY_CACHE.clear()
+
+    def tearDown(self):
+        self.vol._parse_chunk = self._orig
+        self.vol._HISTORY_CACHE.clear()
+
+    def line(self, db=-6.0, node=3):
+        self.n += 1
+        stamp = self._t.strftime("%Y-%m-%d %H:%M:%S", self._t.localtime(self.now - 600 + self.n))
+        return (f"{stamp}.001 1 gui WARNING cinegain.volume: hidden volume of node {node} (chrome, Chrome) is "
+                f"0.5 = {db - self.n / 10:.1f} dB (was 0.0 dB) [external]\n")
+
+    def noise(self):
+        return "garbage that is no log line\n"
+
+    def write(self, path, lines, mode="a"):
+        with open(path, mode, encoding="utf-8") as f:
+            f.write("".join(lines))
+
+    def full(self, **kw):
+        """The reference: every file read completely, every call."""
+        vol = self.vol
+        events = []
+        base = self.log
+        for path in [f"{base}.{i}" for i in range(4, 0, -1)] + [base]:
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    lines = f.readlines()
+            except OSError:
+                continue
+            events += [e for e in map(vol._parse_log_line, lines) if e]
+        cutoff = self.now - 7 * 86400
+        key = kw.get("key")
+        events = [e for e in events if e["time"] >= cutoff and (key is None or e["key"] == key
+                                                                 or e["kind"] == "full_reset")]
+        events.sort(key=lambda e: e["time"], reverse=True)
+        return events[:500]
+
+    def inc(self, **kw):
+        return self.vol.history(self.log, now=self.now, journal=False, **kw)
+
+    def test_appended_lines_are_the_only_ones_parsed(self):
+        self.write(self.log, [self.line() for _ in range(50)] + [self.noise()])
+        self.assertEqual(self.inc(), self.full())
+        first = self.parsed
+        self.assertGreater(first, 0)
+        self.assertEqual(self.inc(), self.full())
+        self.assertEqual(self.parsed, first)                  # unchanged file: nothing parsed again
+        self.write(self.log, [self.line(), self.line(node=4)])
+        self.assertEqual(self.inc(), self.full())
+        self.assertEqual(self.inc(key="chrome"), self.full(key="chrome"))
+        self.assertLess(self.parsed - first, 600)             # only the two new lines, not 50 again
+
+    def test_half_written_last_line_is_seen_and_completed_later(self):
+        whole = self.line()
+        self.write(self.log, [self.line(), whole[:60]])
+        self.assertEqual(self.inc(), self.full())
+        self.write(self.log, [whole[60:], self.line()])
+        self.assertEqual(self.inc(), self.full())
+        self.assertEqual(len(self.inc()), 3)
+
+    def test_rotation_keeps_the_events_and_parses_the_old_file_once(self):
+        self.write(self.log, [self.line() for _ in range(30)])
+        self.inc()
+        self.write(self.log, [self.line()])                   # arrives before the rotation, not yet read
+        os.rename(self.log, self.log + ".1")
+        self.write(self.log, [self.line() for _ in range(3)], mode="w")
+        before = self.parsed
+        self.assertEqual(self.inc(), self.full())
+        self.assertEqual(len(self.inc()), 34)
+        self.assertLess(self.parsed - before, 1000)           # the one late line plus the three new ones
+        os.rename(self.log + ".1", self.log + ".2")           # a second rotation shifts it again
+        self.assertEqual(self.inc(), self.full())
+        os.unlink(self.log + ".2")                            # rotated out: its events are gone
+        self.assertEqual(self.inc(), self.full())
+        self.assertEqual(len(self.inc()), 3)
+
+    def test_truncated_or_replaced_log_is_read_again(self):
+        self.write(self.log, [self.line() for _ in range(20)])
+        self.inc()
+        self.write(self.log, [self.line()], mode="w")         # truncated in place
+        self.assertEqual(self.inc(), self.full())
+        self.assertEqual(len(self.inc()), 1)
+        os.unlink(self.log)
+        self.assertEqual(self.inc(), [])
+
+    def test_returned_events_are_copies(self):
+        self.write(self.log, [self.line()])
+        self.inc()[0]["key"] = "tampered"
+        self.assertEqual(self.inc()[0]["key"], "chrome")
+
+    def test_tail_equals_readlines_tail(self):
+        import cinegain_log
+        text = "".join(f"line {i} ä€ {'x' * (i % 7)}\n" for i in range(3000)) + "last without newline"
+        self.write(self.log, [text], mode="w")
+        for lines in (1, 5, 400, 2999, 3001, 5000):
+            for block in (64, 4096, 65536):
+                with open(self.log, "r", encoding="utf-8") as f:
+                    expected = f.readlines()[-lines:]
+                self.assertEqual(cinegain_log.tail(self.log, lines=lines, block=block), expected, (lines, block))
+        self.write(self.log, ["a\r\nb\rc\n", "d\n"], mode="w")
+        with open(self.log, "r", encoding="utf-8") as f:
+            expected = f.readlines()
+        self.assertEqual(cinegain_log.tail(self.log, lines=10, block=2), expected)
+        self.assertEqual(cinegain_log.tail(self.log + ".missing"), [])
+        self.write(self.log, [], mode="w")
+        self.assertEqual(cinegain_log.tail(self.log), [])
 
 
 if __name__ == "__main__":

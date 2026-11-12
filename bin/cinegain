@@ -40,6 +40,7 @@ from cinegain_lock import RouterLock  # noqa: E402
 import cinegain_modes as modes  # noqa: E402
 import cinegain_overdrive as overdrive  # noqa: E402
 import cinegain_paths as paths  # noqa: E402
+import cinegain_pwdump  # noqa: E402
 from cinegain_profiles import (  # noqa: E402
     DEFAULT_PARAMS,
     PROFILE_STANDARD,
@@ -115,25 +116,14 @@ def set_params_batch(node_id, param_dict, preset=None, mode=None):
     return push_params(node_id, live)
 
 
-def get_params(node_id):
+def get_params(node_id, dump=None):
     """Reads all cinegain:* parameters from PipeWire if running, otherwise from saved state."""
     if not node_id:
         return load_saved_state()["params"]
     try:
-        out = subprocess.check_output(["pw-dump", str(node_id)], stderr=subprocess.DEVNULL)
-        for obj in json.loads(out):
-            for p in obj.get("info", {}).get("params", {}).get("Props", []):
-                if isinstance(p, dict) and isinstance(p.get("params"), list):
-                    it = iter(p["params"])
-                    found = {}
-                    for k, v in zip(it, it):
-                        if isinstance(k, str) and k.startswith("cinegain:"):
-                            if isinstance(v, bool):
-                                v = 1.0 if v else 0.0
-                            if isinstance(v, (int, float)):
-                                found[k[len("cinegain:"):]] = round(float(v), 3)
-                    if found:
-                        return found
+        found = cinegain_pwdump.cinegain_params(dump if dump is not None else cinegain_pwdump.snapshot(), node_id)
+        if found:
+            return found
     except (subprocess.CalledProcessError, ValueError, OSError):
         pass
     return load_saved_state()["params"]
@@ -221,7 +211,8 @@ def cmd_stop(args):
 
 def cmd_status(args):
     try:
-        node_id = find_node_id(STANDARD_SINK, strict=True)
+        dump = cinegain_pwdump.snapshot()  # one pw-dump; the GUI shares it with its guard (#38)
+        node_id = cinegain_pwdump.node_id_of(dump, STANDARD_SINK)
     except (subprocess.CalledProcessError, ValueError, OSError):
         if getattr(args, "json", False):
             print(json.dumps({"active": None, "error": "pw-dump failed", "version": __version__}))
@@ -229,7 +220,7 @@ def cmd_status(args):
             print("Cinegain status: UNKNOWN (pw-dump failed)", file=sys.stderr)
         return 2
     saved = load_saved_state()
-    params = get_params(node_id) if node_id else saved["params"]
+    params = get_params(node_id, dump) if node_id else saved["params"]
     running_profiles = sorted(standard_sinks().running() - {PROFILE_STANDARD})
     if getattr(args, "json", False):
         print(json.dumps({

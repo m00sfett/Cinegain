@@ -29,12 +29,13 @@ def backup_user_state(backup_root=None, clock=time.time):
     if not existing:
         return None
     stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(clock()))
-    target = os.path.join(backup_root or paths.BACKUP_DIR, stamp)
+    root = paths.private_dir(backup_root or paths.BACKUP_DIR)  # backups hold user state: 0700 (#42, #48)
+    target = os.path.join(root, stamp)
     suffix = 1
     while os.path.exists(target):
         suffix += 1
-        target = os.path.join(backup_root or paths.BACKUP_DIR, f"{stamp}-{suffix}")
-    os.makedirs(target, mode=0o700)
+        target = os.path.join(root, f"{stamp}-{suffix}")
+    paths.private_dir(target)
     for src in existing:
         name = os.path.basename(src)
         if src == paths.WIREPLUMBER_STREAM_PROPS:
