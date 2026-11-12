@@ -545,6 +545,16 @@ class TestReset(Base):
         self.assertTrue(os.path.exists(os.path.join(backup, "apps.json")))
         self.assertTrue(os.path.exists(os.path.join(backup, "wireplumber-stream-properties")))
 
+    def test_backup_directories_are_private(self):
+        """#48/#42: the backup root and the timestamped folder hold user state: 0700."""
+        paths.write_json_atomic(paths.STATE_FILE, {"params": {"input_db": 25}})
+        root = os.path.join(_TMP, "fresh-backups")
+        import cinegain_reset
+        target = cinegain_reset.backup_user_state(backup_root=root)
+        self.assertEqual(os.stat(root).st_mode & 0o777, 0o700)
+        self.assertEqual(os.stat(target).st_mode & 0o777, 0o700)
+        self.assertTrue(os.path.exists(os.path.join(target, "state.json")))
+
     def test_reset_leaves_foreign_volume_alone(self):
         s = self.stream(1, "Discord", "discord", volume_pct=30)
         reset_everything(pulse=self.pulse, sinks=self.sinks, backup=False)

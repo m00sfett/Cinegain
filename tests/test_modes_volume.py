@@ -607,6 +607,37 @@ class TestRouterVolume(tr.Base):
         self.assertLessEqual(max(y - x for x, y in zip(dbs, dbs[1:])), MAX_STEP_DB + 1e-6)
         self.assertGreaterEqual(len(series), 40)                  # ~4.2 s at 100 ms, from the quiet channel
 
+    def test_sidebar_restore_volume_fades_and_keeps_mute(self):
+        """#48: "restore volume" jumped to 100 % via set_volume_100 and unmuted. Now: fade, mute stays."""
+        from cinegain_volume import mixer_db
+        a = self.stream(1, "Spotify", "spotify", volume_pct=40, volume_min_pct=20)
+        b = self.stream(2, "Spotify", "spotify", volume_pct=50, muted=True)
+        other = self.stream(3, "Discord", "discord", volume_pct=30)
+        self.router.restore_volume(tr.make_key("Spotify", "spotify"))
+        self.assertEqual(self.pulse.volume_resets, [])                       # no jump, no unmute
+        self.assertEqual((a.volume_pct, other.volume_pct), (40, 30))         # nothing written at once
+        drain(self.router.guard, self.clock)
+        self.assertEqual((a.volume_pct, b.volume_pct, b.muted), (100, 100, True))   # target reached, mute stays
+        self.assertEqual(other.volume_pct, 30)                               # other programs untouched
+        series = [p for i, p in self.pulse.volume_sets if i == "1"]
+        dbs = [mixer_db(20)] + [mixer_db(p) for p in series]
+        self.assertLessEqual(max(y - x for x, y in zip(dbs, dbs[1:])), MAX_STEP_DB + 1e-6)
+        self.assertGreaterEqual(len(series), 40)
+
+    def test_sidebar_restore_volume_without_guard_runs_the_fade_to_the_end(self):
+        """One-shot use (no GUI timer): the fade runs inside the call and ends at 100 %."""
+        a = self.stream(1, "Spotify", "spotify", volume_pct=90)
+        self.router.guard = None
+        slept = []
+        import cinegain_volume
+        orig = cinegain_volume.time.sleep
+        cinegain_volume.time.sleep = lambda s: (slept.append(s), setattr(self.clock, "t", self.clock.t + s))
+        try:
+            self.router.restore_volume(tr.make_key("Spotify", "spotify"))
+        finally:
+            cinegain_volume.time.sleep = orig
+        self.assertEqual(a.volume_pct, 100)
+
     def test_full_reset_includes_cinegain_sinks_not_hardware_and_passes_running_sinks(self):
         import cinegain_volume
         seen = {}

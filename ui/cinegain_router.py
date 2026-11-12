@@ -230,10 +230,25 @@ class Router:
         self.registry.flush(force=True)
 
     def restore_volume(self, key):
-        """Sets every live stream of a program back to 100 % and unmutes it."""
+        """
+        Brings every live stream of a program's mixer volume back to 100 % (#48). Same
+        policy as the full reset: it fades in from the quietest channel at <= 10 dB/s
+        (never a jump) and mute is left as it is. The fade runs on the guard a GUI or
+        `cinegain watch` keeps stepping; without one (one-shot use) it runs here.
+        """
+        from cinegain_volume import VolumeGuard
+
+        guard = self.guard or VolumeGuard(scanner=lambda: [])
+        now = self.clock()
         for st in self.pulse.list_streams():
-            if not st.is_own and make_key(st.app_name or st.node_name, st.binary) == key:
-                self.pulse.set_volume_100(st.index)
+            if st.is_own or make_key(st.app_name or st.node_name, st.binary) != key:
+                continue
+            if st.muted:
+                log.info("restore volume: stream #%s (%s) stays muted", st.index, st.display_name)
+            if st.volume_min_pct < 100:
+                self._fade_mixer(guard, st, now)
+        if self.guard is None:
+            guard.run_fades()
 
     # -- soft off ------------------------------------------------------------
     def _sink_params(self, params):
@@ -468,5 +483,5 @@ class Router:
         key = ("mixer", st.node_id if st.node_id is not None else f"#{st.index}")
         fade = guard.add_fade(key, mixer_db(st.volume_min_pct), 0.0, apply, now,
                               what=f"mixer of stream #{st.index}")
-        log.info("full reset: fading mixer of stream #%s (%s) from %d %% to 100 %% over %.1f s",
+        log.info("fading mixer of stream #%s (%s) from %d %% to 100 %% over %.1f s",
                  st.index, st.display_name, st.volume_min_pct, fade.duration)
