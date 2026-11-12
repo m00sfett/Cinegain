@@ -30,6 +30,26 @@ STANDARD_SINK = "cinegain_sink"
 STANDARD_OUTPUT = "cinegain_output"
 USER_SLOTS = tuple(f"user_{i}" for i in range(1, 7))  # 6 slots since 0.4.0 (8 before)
 
+
+def default_slot_name(slot_id):
+    """Name a user slot carries until its owner renames it; stored as is, shown translated."""
+    return f"User {slot_id.rsplit('_', 1)[-1]}"
+
+
+def slot_display_name(slot_id, name):
+    """
+    Name to show for a user slot. Only the stored default ("User 3") is translated
+    into the UI language; a name the user typed is returned unchanged.
+    """
+    if slot_id in USER_SLOTS and name == default_slot_name(slot_id):
+        try:
+            from i18n import t
+        except ImportError:
+            return name
+        return t("slot_default_name", n=slot_id.rsplit("_", 1)[-1])
+    return name
+
+
 # Factory default = the "Neutral (0 dB)" preset: Standard leaves audio untouched
 # until the user changes it (presets.json clean_linear must stay in sync).
 DEFAULT_PARAMS = {
@@ -160,7 +180,7 @@ class ProfileCatalog:
     def user_slots(self):
         raw = paths.read_json(self.user_presets_path, default={}) or {}
         slots = {}
-        for i, sid in enumerate(USER_SLOTS, start=1):
+        for sid in USER_SLOTS:
             entry = raw.get(sid) if isinstance(raw, dict) else None
             entry = entry if isinstance(entry, dict) else {}
             params = normalize_params(entry.get("params")) if isinstance(entry.get("params"), dict) else {}
@@ -170,7 +190,7 @@ class ProfileCatalog:
                 p = full_params(params)
                 mode = "dynamic" if (p["leveler"] > 0.5 or p["lev_max_boost_db"] > 0.05
                                      or p["comp_ratio"] > 1.01) else "fixed"
-            slots[sid] = {"name": entry.get("name") or f"User {i}", "params": params or None,
+            slots[sid] = {"name": entry.get("name") or default_slot_name(sid), "params": params or None,
                           "mode": mode if params else None}
         return slots
 
