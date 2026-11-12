@@ -871,7 +871,6 @@ class CinegainMainWindow(QMainWindow):
         self._std_mode = None  # Standard's mode (sidebar beta marker)
         self._last_status = None  # last status line written to the debug log
         self._program_dirty = None  # program key whose own values wait for the debounced flush
-        self._initial_selection_done = False
         level = paths.config_get("view_level", VIEW_SIMPLE)
         self.view_level = level if level in VIEW_LEVELS else VIEW_SIMPLE  # no migration: new default
         self._overdrive_on = overdrive.is_on()
@@ -2366,12 +2365,6 @@ class CinegainMainWindow(QMainWindow):
         self._views = views
         self.sidebar.update_views(views, self.processing, self._std_mode)
         self.refresh_hidden_bar()
-        if not self._initial_selection_done:
-            # Open on the program that is playing right now, if it is the only one.
-            self._initial_selection_done = True
-            playing = [v for v in views if v.playing]
-            if len(playing) == 1:
-                self.sidebar.select(playing[0].key)
         self.update_edit_header()
 
     # -- editing target ---------------------------------------------------------

@@ -426,6 +426,14 @@ class TestProgramEditing(unittest.TestCase):
         self.assertEqual(self.slider().value(), before)
         self.assertIsNone(AppRegistry().get(SPOTIFY)["params"])
 
+    def test_startup_keeps_standard_selected_even_when_one_program_plays(self):
+        # #60: auto-selecting a lone playing program caused accidental own 0 dB sinks.
+        self.win.refresh_apps()
+        self.assertIs(self.win.selected_key, self.gui.STANDARD)
+        self.win.apply_factory_preset("clean_linear")
+        self.assertIsNone(AppRegistry().get(SPOTIFY)["params"])
+        self.assertIsNone(AppRegistry().get(CHROME)["params"])
+
     def test_failed_pw_dump_does_not_start_filter_or_enable_power(self):
         from pathlib import Path
         from unittest.mock import patch
