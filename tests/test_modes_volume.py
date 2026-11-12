@@ -6,6 +6,7 @@ nothing here touches the running sound server.
 """
 import contextlib
 import io
+import json
 import os
 import sys
 import tempfile
@@ -248,6 +249,140 @@ class TestCliModes(unittest.TestCase):
         rc, out = self.run_cli("mode", "dynamic")
         self.assertEqual((rc, out.strip()), (0, "Standard: dynamic"))
         self.assertEqual(modes.load_standard()["params"]["comp_ratio"], 6.0)
+
+
+class TestFilterStateInCli(unittest.TestCase):
+    """#33: set/batch/preset/start keep the filter in the state the user chose (on or off)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cli = SourceFileLoader("cinegain_cli_filter", os.path.join(tr.BASE_DIR, "bin", "cinegain")).load_module()
+
+    def setUp(self):
+        import cinegain_bypass as bp
+        for p in paths.USER_STATE_FILES:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(p)
+        self.bp = bp
+        bp.set_on(False)
+        self.addCleanup(bp.set_on, False)
+        cli = self.cli
+        self.pushed = []
+        self.started = []
+        self.node = [7]  # node id of the running filter, or None
+        outer = self
+
+        class FakeSinks:
+            def start(self, profile, params, description=""):
+                outer.started.append(dict(params))
+                outer.node[0] = 7
+                return 1
+
+            def stop(self, *a, **kw):
+                outer.node[0] = None
+
+            def running(self):
+                return set()
+
+        class FakeRouter:
+            bypass = False
+
+            def release_all(self):
+                pass
+
+            def set_bypass(self, on):
+                outer.pushed.append(("router.set_bypass", on))
+                return []
+
+        class FakePulse:
+            def set_sink_volume_100(self, name):
+                pass
+
+        self.saved = {n: getattr(cli, n) for n in ("get_cinegain_node_id", "push_params", "wait_for_node",
+                                                     "standard_sinks", "make_router", "PulseControl",
+                                                     "_kill_legacy_processes", "clean_wireplumber_targets")}
+        cli.get_cinegain_node_id = lambda: outer.node[0]
+        cli.push_params = lambda node, params: outer.pushed.append(dict(params)) or True
+        cli.wait_for_node = lambda name: outer.node[0]
+        cli.standard_sinks = FakeSinks
+        cli.make_router = FakeRouter
+        cli.PulseControl = FakePulse
+        cli._kill_legacy_processes = lambda: None
+        cli.clean_wireplumber_targets = lambda path: False
+
+    def tearDown(self):
+        for n, v in self.saved.items():
+            setattr(self.cli, n, v)
+
+    def run_cli(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = self.cli.main(list(argv))
+        return rc, out.getvalue(), err.getvalue()
+
+    def live_bypass(self):
+        """bypass of the last parameter set pushed to the filter."""
+        sets = [p for p in self.pushed if isinstance(p, dict)]
+        return sets[-1]["bypass"]
+
+    COMMANDS = (("set", "input_db", "6"), ("set", "bass_db", "-2"), ("batch", '{"input_db": 4}'),
+                ("preset", "boost_6db"), ("preset", "night_mode"), ("start",))
+
+    def test_commands_leave_a_switched_off_filter_off(self):
+        self.bp.set_on(True)
+        for argv in self.COMMANDS:
+            with self.subTest(argv=argv):
+                self.pushed.clear()
+                self.assertEqual(self.run_cli(*argv)[0], 0)
+                self.assertEqual(self.live_bypass(), 1.0)  # never a blip of processing
+                self.assertTrue(self.bp.is_on())
+                self.assertEqual({p["bypass"] for p in self.pushed if isinstance(p, dict)}, {1.0})
+
+    def test_commands_leave_a_switched_on_filter_on(self):
+        for argv in self.COMMANDS:
+            with self.subTest(argv=argv):
+                self.pushed.clear()
+                self.assertEqual(self.run_cli(*argv)[0], 0)
+                self.assertEqual(self.live_bypass(), 0.0)  # and never switch it off on their own
+                self.assertFalse(self.bp.is_on())
+
+    def test_a_fresh_start_creates_the_sink_in_the_remembered_state(self):
+        for off in (True, False):
+            with self.subTest(filter_off=off):
+                self.bp.set_on(off)
+                self.node[0] = None
+                self.started.clear()
+                self.assertEqual(self.run_cli("start")[0], 0)
+                self.assertEqual(self.started[0]["bypass"], 1.0 if off else 0.0)
+
+    def test_filter_command_switches_on_purpose_and_reports(self):
+        rc, out, _ = self.run_cli("filter", "off")
+        self.assertEqual((rc, self.bp.is_on()), (0, True))
+        self.assertIn("OFF", out)
+        self.assertIn(("router.set_bypass", True), self.pushed)
+        self.assertIn("OFF", self.run_cli("filter")[1])
+        self.assertTrue(json.loads(self.run_cli("status", "--json")[1])["bypass"])
+        rc, out, _ = self.run_cli("filter", "on")
+        self.assertEqual((rc, self.bp.is_on()), (0, False))
+        self.assertIn(("router.set_bypass", False), self.pushed)
+
+    def test_explicit_bypass_values_in_set_and_batch_still_switch(self):
+        self.assertEqual(self.run_cli("set", "bypass", "1")[0], 0)
+        self.assertTrue(self.bp.is_on())
+        self.assertEqual(self.run_cli("batch", '{"bypass": 0, "bass_db": 1}')[0], 0)
+        self.assertFalse(self.bp.is_on())
+        self.assertEqual(modes.load_standard()["sets"]["fixed"]["bass_db"], 1.0)
+
+    def test_filter_needs_a_running_filter_and_stop_clears_the_state(self):
+        self.node[0] = None
+        rc, _out, err = self.run_cli("filter", "off")
+        self.assertEqual(rc, 1)
+        self.assertIn("not active", err)
+        self.assertFalse(self.bp.is_on())
+        self.node[0] = 7
+        self.bp.set_on(True)
+        self.assertEqual(self.run_cli("stop")[0], 0)
+        self.assertFalse(self.bp.is_on())  # the next start is a real "on"
 
 
 class TestStartKeepsSinkVolume(unittest.TestCase):

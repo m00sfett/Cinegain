@@ -31,6 +31,7 @@ import cinegain_modes as modes  # noqa: E402
 import cinegain_overdrive as overdrive  # noqa: E402
 from cinegain_volume import VolumeGuard  # noqa: E402
 from cinegain_lock import RouterLock, gui_socket_path  # noqa: E402
+import cinegain_bypass as bypass_state  # noqa: E402
 import cinegain_paths as paths  # noqa: E402
 from cinegain_profiles import (  # noqa: E402
     DEFAULT_PARAMS, PROFILE_STANDARD, STANDARD_OUTPUT, STANDARD_SINK, ProfileCatalog, SinkProcesses, full_params,
@@ -1697,7 +1698,6 @@ class CinegainMainWindow(QMainWindow):
             changed = modes.clamp_stored(self.router.registry, overdrive_on=False)
         if "standard" in changed:
             run_cinegain("batch", "{}")
-            self._reassert_bypass()
         for key in changed:
             if key != "standard":
                 self.router.push_program_params(key)
@@ -1836,7 +1836,6 @@ class CinegainMainWindow(QMainWindow):
         self.flush_pending_params()
         if self.selected_key is STANDARD:
             run_cinegain("batch", "{}", "--mode", mode)
-            self._reassert_bypass()
         else:
             key = self.selected_key
             entry = self.router.registry.get(key)
@@ -2048,7 +2047,6 @@ class CinegainMainWindow(QMainWindow):
         self.pending_params.clear()
         log.debug("Standard values: %s", to_send)
         run_cinegain("batch", json.dumps(to_send), "--preset-id", "custom")
-        self._reassert_bypass()
 
     def _set_sliders_silently(self, params_dict):
         for k, v in params_dict.items():
@@ -2079,7 +2077,6 @@ class CinegainMainWindow(QMainWindow):
         log.info("load preset %s into Standard", preset_name)
         self.pending_params.clear()
         run_cinegain("preset", preset_name)
-        self._reassert_bypass()
         if self.selected_key is STANDARD:
             self.refresh_editor()
         self.refresh_apps()
@@ -2108,7 +2105,6 @@ class CinegainMainWindow(QMainWindow):
         if self.selected_key is STANDARD:
             self.pending_params.clear()
             run_cinegain("batch", json.dumps(values), "--preset-id", slot_id, "--mode", mode)
-            self._reassert_bypass()
             self.refresh_editor()
         else:
             self._load_into_program(self.selected_key, mode, values)
@@ -2179,16 +2175,14 @@ class CinegainMainWindow(QMainWindow):
         if not self.is_active:
             log.info("power: filter chain not running, starting it")
             self.router.bypass = False
+            bypass_state.set_on(False)
             run_cinegain("start")
         else:
             self.flush_pending_params()
-            self.router.set_bypass(not self.router.bypass)
+            off = not self.router.bypass
+            bypass_state.set_on(off)  # the CLI keeps the filter in this state (#33)
+            self.router.set_bypass(off)
         self.on_heartbeat(sync_sliders=True)
-
-    def _reassert_bypass(self):
-        """Loading Standard values pushes bypass=0; keep pass-through while switched off."""
-        if self.is_active and self.router.bypass:
-            self.router.set_bypass(True)
 
     def on_heartbeat(self, sync_sliders=False):
         out, code = run_cinegain("status", "--json")
@@ -2204,6 +2198,9 @@ class CinegainMainWindow(QMainWindow):
             self._std_mode = st.get("mode") or self._std_mode
             if not self.is_active and self.router.bypass:
                 self.router.bypass = False  # stopped from outside: the next start is a real "on"
+                bypass_state.set_on(False)
+            elif self.is_active:
+                self.router.bypass = bypass_state.is_on()  # `cinegain filter off/on` from a terminal
             params = st.get("params", {})
             preset_id = st.get("preset")
         except (ValueError, TypeError):
@@ -2524,7 +2521,6 @@ class CinegainMainWindow(QMainWindow):
 
     def _save_standard_and_push(self, mode, sets):
         run_cinegain("batch", json.dumps(sets[mode]), "--mode", mode)
-        self._reassert_bypass()
 
     def _standard_output_key(self):
         """Node key of Standard's own output stream (what Router.full_volume_reset(only=...) matches)."""
@@ -2652,6 +2648,7 @@ def open_main_window(router):
     values to filters that kept running through a GUI restart (#30): without the push
     the window shows +15 dB while a surviving filter still plays +30 dB.
     """
+    router.bypass = bypass_state.is_on()  # filters that outlived the last GUI may still be switched off
     capped = modes.clamp_stored(router.registry, overdrive_on=False)
     if capped:
         log.info("start: capped saved values to +15 dB: %s", ", ".join(capped))

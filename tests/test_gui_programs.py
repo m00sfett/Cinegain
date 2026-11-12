@@ -26,6 +26,7 @@ try:
 except ImportError:
     HAVE_QT = False
 
+import cinegain_bypass as bypass_state  # noqa: E402
 import cinegain_paths as paths  # noqa: E402
 from cinegain_registry import AppRegistry, make_key, profile_id_for  # noqa: E402
 from cinegain_router import Router  # noqa: E402
@@ -55,6 +56,8 @@ class TestProgramEditing(unittest.TestCase):
         paths.write_json_atomic(paths.STATE_FILE, {
             "preset": "custom", "mode": "fixed", "params": {"input_db": 8.0},
             "sets": {"fixed": {"input_db": 8.0}, "dynamic": {"input_db": 8.0}}})
+        bypass_state.set_on(False)
+        self.addCleanup(bypass_state.set_on, False)
         self.calls = []
 
         def fake_run(*args):
@@ -253,12 +256,17 @@ class TestProgramEditing(unittest.TestCase):
             self.assertEqual(self.sinks.stopped, [])
             self.assertEqual(self.pulse.moves, moves)
             self.assertIn({"bypass": 1.0}, pushed)
-            # Loading a Standard preset while off must not switch processing back on.
+            self.assertTrue(bypass_state.is_on())  # the CLI reads the same state (#33)
+            # Loading a Standard preset while off must not switch processing back on: the CLI
+            # keeps the flag (tested in test_modes_volume), the GUI does not push bypass itself.
             pushed.clear()
             self.win.apply_standard_preset("boost_12db")
-            self.assertEqual(pushed[-1], {"bypass": 1.0})
+            self.assertNotIn({"bypass": 0.0}, pushed)
+            self.assertTrue(self.router.bypass)
+            self.assertTrue(bypass_state.is_on())
             self.win.toggle_power()
             self.assertFalse(self.router.bypass)
+            self.assertFalse(bypass_state.is_on())
             self.assertEqual(pushed[-1], {"bypass": 0.0})
             self.assertEqual(self.win.btn_power.text(), self.gui.t("btn_power_off"))
         finally:
@@ -568,6 +576,19 @@ class TestProgramEditing(unittest.TestCase):
         self.win.set_mode("dynamic")
         self.win.set_view_level("simple")
         self.assertIn(self.gui.t("simple_dynamic_hint"), self.win.lbl_edit_state.text())
+
+    def test_heartbeat_follows_the_filter_state_of_the_cli(self):
+        """#33: `cinegain filter off` in a terminal shows up in the GUI; a stopped filter clears the flag."""
+        self.win.on_heartbeat()
+        self.assertFalse(self.router.bypass)
+        bypass_state.set_on(True)
+        self.win.on_heartbeat()
+        self.assertTrue(self.router.bypass)
+        self.assertFalse(self.win.processing)
+        bypass_state.set_on(False)
+        self.win.on_heartbeat()
+        self.assertFalse(self.router.bypass)
+        self.assertTrue(self.win.processing)
 
     def test_header_reset_button_never_means_everything(self):
         """#32: with Standard selected only=None used to run the global full reset."""
