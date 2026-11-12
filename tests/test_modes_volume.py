@@ -924,6 +924,81 @@ class TestStartKeepsSinkVolume(unittest.TestCase):
         self.assertEqual(self.volume_calls, ["cinegain_sink", "cinegain_sink"])
 
 
+class TestResetKeepsFilterRunning(unittest.TestCase):
+    """#55: a reset pushes factory values to the running standard filter instead of restarting it."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cli = SourceFileLoader("cinegain_cli_reset", os.path.join(tr.BASE_DIR, "bin", "cinegain")).load_module()
+
+    def setUp(self):
+        cli = self.cli
+        self.calls = []
+        outer = self
+
+        class FakePulse:
+            def set_sink_volume_100(self, name):
+                outer.calls.append(("volume", name))
+
+        class FakeSinks:
+            def start(self, *a, **kw):
+                outer.calls.append(("start",) + a)
+                return 1
+
+            def stop(self, *a, **kw):
+                outer.calls.append(("stop",) + a)
+
+        def fake_reset(**kw):
+            outer.calls.append(("reset", kw.get("keep_sink")))
+            for p in paths.USER_STATE_FILES:
+                with contextlib.suppress(FileNotFoundError):
+                    os.remove(p)
+            return {"backup": None, "streams_moved": 0, "volumes_restored": 0}
+
+        def fake_push(node_id, params, preset=None, mode=None):
+            outer.calls.append(("push", node_id, params.get("input_db")))
+            return True
+
+        self.saved = (cli.get_cinegain_node_id, cli.PulseControl, cli.standard_sinks,
+                      cli.set_params_batch, cli.reset_everything)
+        self.node = 7
+        cli.get_cinegain_node_id = lambda: self.node
+        cli.PulseControl = FakePulse
+        cli.standard_sinks = FakeSinks
+        cli.set_params_batch = fake_push
+        cli.reset_everything = fake_reset
+        paths.write_json_atomic(paths.STATE_FILE, {"params": {"input_db": 12}})
+
+    def tearDown(self):
+        cli = self.cli
+        (cli.get_cinegain_node_id, cli.PulseControl, cli.standard_sinks,
+         cli.set_params_batch, cli.reset_everything) = self.saved
+        self.cli.bypass_state.set_on(False)
+
+    def reset(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return self.cli.main(["reset", "--yes", "--json"])
+
+    def test_running_filter_is_kept_and_gets_factory_values(self):
+        self.cli.bypass_state.set_on(True)
+        self.assertEqual(self.reset(), 0)
+        kinds = [c[0] for c in self.calls]
+        self.assertNotIn("stop", kinds)
+        self.assertNotIn("start", kinds)
+        self.assertEqual(self.calls[0], ("reset", "cinegain_sink"))
+        pushes = [c for c in self.calls if c[0] == "push"]
+        self.assertEqual(len(pushes), 1)
+        self.assertEqual(pushes[0][1], 7)
+        self.assertNotEqual(pushes[0][2], 12)  # the old value is gone
+        self.assertIn(("volume", "cinegain_sink"), self.calls)
+        self.assertFalse(self.cli.bypass_state.is_on())  # factory state: filter on
+
+    def test_stopped_filter_stays_stopped(self):
+        self.node = None
+        self.assertEqual(self.reset(), 0)
+        self.assertEqual(self.calls, [("reset", None)])
+
+
 class TestWatchCapsOnStart(unittest.TestCase):
     """#30: `cinegain watch` caps saved values and pushes them even when the overdrive flag is already gone."""
 

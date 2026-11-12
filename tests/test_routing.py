@@ -590,6 +590,38 @@ class TestReset(Base):
         self.assertTrue(os.path.exists(os.path.join(backup, "apps.json")))
         self.assertTrue(os.path.exists(os.path.join(backup, "wireplumber-stream-properties")))
 
+    def test_reset_keeping_standard_moves_streams_straight_to_it(self):
+        """#55: with the standard sink kept running nothing bounces through hardware."""
+        if "cinegain_sink" not in self.pulse.sinks.values():
+            self.sinks.start("standard", {"input_db": 0.0})
+        self.sinks.start("app_x_abc123", {"input_db": 1.0})
+        sid_std = next(k for k, v in self.pulse.sinks.items() if v == "cinegain_sink")
+        sid_own = next(k for k, v in self.pulse.sinks.items() if v == sink_name("app_x_abc123"))
+        on_own = self.stream(1, "Chrome", "chrome", sink=sid_own)
+        on_std = self.stream(2, "Firefox", "firefox", sink=sid_std)
+        with open(paths.WIREPLUMBER_STREAM_PROPS, "w") as f:
+            f.write('a={"target":"cinegain_sink", "mute":false}\n'
+                    'b={"mute":false, "target":"cinegain_app_x_abc123"}\n')
+        report = reset_everything(pulse=self.pulse, sinks=self.sinks, backup=False,
+                                  keep_sink="cinegain_sink")
+        self.assertEqual(self.pulse.moves, [("1", "cinegain_sink")])
+        self.assertEqual(self.sink_of(on_own), "cinegain_sink")
+        self.assertEqual(self.sink_of(on_std), "cinegain_sink")
+        self.assertEqual(report["streams_moved"], 1)
+        self.assertNotIn("app_x_abc123", self.sinks.running())
+        with open(paths.WIREPLUMBER_STREAM_PROPS) as f:
+            content = f.read()
+        self.assertIn('"cinegain_sink"', content)
+        self.assertNotIn("cinegain_app_x", content)
+
+    def test_reset_keep_sink_that_is_gone_falls_back_to_hardware(self):
+        self.pulse.remove_sink("cinegain_sink")
+        self.sinks.start("app_x_abc123", {"input_db": 1.0})
+        sid_own = next(k for k, v in self.pulse.sinks.items() if v == sink_name("app_x_abc123"))
+        s = self.stream(1, "Chrome", "chrome", sink=sid_own)
+        reset_everything(pulse=self.pulse, sinks=self.sinks, backup=False, keep_sink="cinegain_sink")
+        self.assertEqual(self.sink_of(s), HW)
+
     def test_backup_directories_are_private(self):
         """#48/#42: the backup root and the timestamped folder hold user state: 0700."""
         paths.write_json_atomic(paths.STATE_FILE, {"params": {"input_db": 25}})
