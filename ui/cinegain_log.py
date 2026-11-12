@@ -11,9 +11,11 @@ The level comes from $CINEGAIN_LOG_LEVEL or config.json ("log_level"); the
 default is DEBUG. Events are logged when something *changes*, so steady state
 writes almost nothing.
 """
+import copy
 import logging
 import logging.handlers
 import os
+import re
 import sys
 import threading
 
@@ -31,6 +33,29 @@ logging.getLogger(ROOT).addHandler(logging.NullHandler())
 _component = "?"
 _configured = False
 _lock = threading.Lock()
+
+
+# Control characters and Unicode line breaks inside one message (e.g. a program name
+# with a newline) would start a fake log line that history() parses (#42).
+_UNSAFE = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+
+
+def sanitize(text):
+    """Escapes control characters so one message always stays one log line."""
+    def esc(m):
+        c = ord(m.group(0))
+        return f"\\x{c:02x}" if c < 0x100 else f"\\u{c:04x}"
+    return _UNSAFE.sub(esc, str(text))
+
+
+class SafeFormatter(logging.Formatter):
+    """Formats the message with escaped control characters; tracebacks stay multi-line."""
+
+    def format(self, record):
+        safe = copy.copy(record)
+        safe.msg = sanitize(record.getMessage())
+        safe.args = None
+        return super().format(safe)
 
 
 class _ComponentFilter(logging.Filter):
@@ -65,7 +90,7 @@ def setup(component, level=None):
             )
         except OSError:
             handler = logging.NullHandler()
-        handler.setFormatter(logging.Formatter(FORMAT, DATEFMT))
+        handler.setFormatter(SafeFormatter(FORMAT, DATEFMT))
         handler.addFilter(_ComponentFilter())
         root.addHandler(handler)
         _configured = True
