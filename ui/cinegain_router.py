@@ -18,6 +18,7 @@ import cinegain_overdrive as overdrive
 from cinegain_profiles import (
     PROFILE_STANDARD,
     STANDARD_SINK,
+    ProfileCatalog,
     SinkProcesses,
     find_node_id,
     full_params,
@@ -26,10 +27,10 @@ from cinegain_profiles import (
     sink_name,
 )
 from cinegain_pulse import PulseControl, is_cinegain_name
-from cinegain_registry import AppRegistry, make_key, profile_id_for
+from cinegain_registry import AppRegistry, is_media_app, make_key, profile_id_for
 
 # A per-program sink with no stream assigned is stopped after this many seconds.
-PROFILE_IDLE_STOP_S = 45.0
+PROFILE_IDLE_STOP_S = 600.0
 # Minimum delay between two start attempts of the same sink.
 START_RETRY_S = 5.0
 # While audio flows, each filter's meters are written to the debug log this often.
@@ -109,7 +110,12 @@ class Router:
 
         by_key = {}
         for st in streams:
-            key = self.registry.observe(st.app_name or st.node_name, st.binary)
+            app_name = st.app_name or st.node_name
+            key = make_key(app_name, st.binary)
+            if st.corked and self.registry.get(key) is None and not is_media_app(app_name, st.binary):
+                # #62: ignore paused non-media streams (e.g. Electron audio probes).
+                continue
+            key = self.registry.observe(app_name, st.binary)
             by_key.setdefault(key, []).append(st)
 
         views = {e["key"]: AppView(e) for e in self.registry.entries()}
@@ -136,7 +142,8 @@ class Router:
                         if is_cinegain_name(current):
                             why = "Cinegain off" if not active else "program switched off"
                             log.info("move stream #%s (%s) %s -> %s: %s", s.index, key, current, hw, why)
-                            self._duck(s, now)
+                            if self._source_is_attenuated(current, entry):
+                                self._duck(s, now)
                             self.pulse.move(s.index, hw)
                             current = hw
                     elif target_id is None:
@@ -159,7 +166,8 @@ class Router:
                     elif s.sink != target_id:
                         why = "own setting" if profile != PROFILE_STANDARD else "follows Standard"
                         log.info("move stream #%s (%s) %s -> %s: %s", s.index, key, current, target, why)
-                        self._duck(s, now)
+                        if self._target_can_boost(profile, entry):
+                            self._duck(s, now)
                         self.pulse.move(s.index, target)
                         current = target
                 view.sink = current
@@ -178,6 +186,38 @@ class Router:
         self._watch_processes(now)
         self.registry.flush()
         return sorted(views.values(), key=lambda v: (not v.playing, not v.streams, -v.last_seen, v.label.lower()))
+
+    @staticmethod
+    def _sink_can_boost(params):
+        """True if a filter sink can amplify audio above 0 dB."""
+        if not params:
+            return False
+        p = full_params(params)
+        if float(p.get("bypass", 0.0)) >= 0.5:
+            return False
+        if any(float(p.get(k, 0.0)) > 0.05
+               for k in ("input_db", "bass_db", "dialog_db", "treble_db", "mid_db", "side_db")):
+            return True
+        return float(p.get("leveler", 0.0)) >= 0.5 and float(p.get("lev_max_boost_db", 0.0)) > 0.05
+
+    def _target_can_boost(self, profile, entry):
+        if self.bypass:
+            return False
+        params = ProfileCatalog().standard_params() if profile == PROFILE_STANDARD else entry.get("params")
+        return self._sink_can_boost(params)
+
+    def _source_is_attenuated(self, current_sink, entry):
+        """True when leaving a Cinegain sink that attenuated audio below 0 dB toward 0 dB hardware."""
+        if self.bypass:
+            return False
+        if current_sink == STANDARD_SINK:
+            params = ProfileCatalog().standard_params()
+        else:
+            params = entry.get("params")
+        if not params:
+            return False
+        p = full_params(params)
+        return float(p.get("input_db", 0.0)) < -0.05
 
     def _duck(self, stream, now):
         """#40: the target sink may already be boosted; the stream fades in there instead of jumping."""

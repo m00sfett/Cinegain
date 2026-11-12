@@ -392,7 +392,7 @@ class AnalysisPanel(QWidget):
         labels = {r["key"]: r["label"] for r in self.rows}
         for i, ev in enumerate(events):
             when = time.strftime("%d.%m. %H:%M:%S", time.localtime(ev["time"]))
-            name = labels.get(ev["key"], ev["key"]) or "—"
+            name = _timeline_name(ev["key"], labels)
             was = _fmt_db(ev["was_db"]) if ev["was_db"] is not None else "?"
             if ev["kind"] == "lowered":
                 text = t("analysis_ev_lowered", db=_fmt_db(ev["db"]), was=was)
@@ -417,6 +417,21 @@ class AnalysisPanel(QWidget):
                 item = QTableWidgetItem(value)
                 item.setForeground(QColor(WAITING if ev["kind"] == "lowered" else INK))
                 self.timeline.setItem(i, c, item)
+
+
+def _timeline_name(key, labels):
+    """Readable label for an event key, translating internal Cinegain node keys (#63)."""
+    if key in labels:
+        return labels[key]
+    if key in ("::cinegain_output", "cinegain_output"):
+        return t("analysis_kind_cinegain_output")
+    if key.startswith("::cinegain_output_app_") or key.startswith("cinegain_output_app_"):
+        slug = key.split("_app_", 1)[1].rsplit("_", 1)[0].replace("_", " ").strip()
+        base = t("analysis_kind_cinegain_output")
+        return f"{base} ({slug.title()})" if slug else base
+    if key.startswith("::cinegain_sink") or key.startswith("cinegain_sink"):
+        return t("analysis_kind_cinegain_sink")
+    return key or "—"
 
 
 def _fmt_db(v):

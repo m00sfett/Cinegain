@@ -1,5 +1,5 @@
 Name:           cinegain
-Version:        0.5.2
+Version:        0.5.3
 Release:        1%{?dist}
 Summary:        Realtime volume booster, dialogue clarity optimizer & film audio processor for PipeWire
 
@@ -54,6 +54,9 @@ install -Dm644 assets/icons/cinegain.png %{buildroot}%{_datadir}/icons/hicolor/2
 %{_datadir}/icons/hicolor/256x256/apps/cinegain.png
 
 %changelog
+* Thu Nov 12 2026 Tobias Moos <tobias@roteson.de> - 0.5.3-1
+- Routing, startup selection, idle timeout, and timeline fixes (#60-#63)
+
 * Thu Nov 12 2026 Tobias Moos <tobias@roteson.de> - 0.5.2-1
 - Ear safety, hidden-volume reset that holds, full volume log, lower CPU load, UX polish
 

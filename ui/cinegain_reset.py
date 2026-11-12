@@ -15,6 +15,7 @@ The standard sink itself is handled by the caller (CLI): a running one keeps
 running and gets the default parameters pushed live, because restarting it
 pauses browser players (#55).
 """
+import logging
 import os
 import shutil
 import time
@@ -143,4 +144,5 @@ def reset_everything(pulse=None, sinks=None, backup=True, keep_sink=None):
 
     keep = {keep_sink} if keep_alive else ()
     report["wireplumber_cleaned"], report["wireplumber"] = clean_wireplumber_live(keep)
+    logging.getLogger("cinegain.volume").info("global reset done")
     return report
