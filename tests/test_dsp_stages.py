@@ -244,7 +244,8 @@ class StageTests(unittest.TestCase):
         # 10-20 ms after switching back on: about the dry level, not +20 dB (rms of -45 dBpk = -48)
         self.assertLess(rms_db(back[RATE // 100: RATE // 50]) + 48.0, 2.0)
         # and it still glides up afterwards: the leveler is not switched off for good
-        self.assertGreater(rms_db(back[-RATE // 20:]) + 48.0, 3.0)
+        # (since #46 it climbs at <= 10 dB/s: about 2.7 dB after 0.3 s)
+        self.assertGreater(rms_db(back[-RATE // 20:]) + 48.0, 2.0)
 
     def test_bypass_return_crossfades_without_a_gap(self):
         """#28: the dry signal hands over to the delayed processed one without a dropout."""
@@ -323,6 +324,60 @@ class StageTests(unittest.TestCase):
         before = self._levels(settled)[-1][1]
         self.assertAlmostEqual(before, -40.0, delta=1.0)
         self._assert_rises_at_most_10db_per_s(before, self._levels(after), -10.0, tol=1.5)
+
+    def test_higher_leveler_boost_cap_raises_the_level_slowly(self):
+        """#46 (a): lev_max_boost_db up lets the leveler climb at <= 10 dB/s, even at lev_speed 0.2."""
+        x = self._sine(1000, -40, 4.0)
+        base = dict(leveler=1, lev_target_db=-10, lev_max_boost_db=5, lev_max_cut_db=36,
+                    lev_speed_s=0.2, lev_gate_db=-80)
+        settled, after = self._run_steps([(4.0, {}, x), (4.0, {"lev_max_boost_db": 25}, x)], base=base)
+        before = self._levels(settled)[-1][1]
+        self.assertAlmostEqual(before, -43.0 + 5.0, delta=1.0)
+        self._assert_rises_at_most_10db_per_s(before, self._levels(after), -43.0 + 25.0, tol=1.5)
+
+    def test_lower_leveler_boost_cap_applies_at_once(self):
+        """#46 (a): the cap going down is not held back: the leveler cuts at its fast cut speed."""
+        x = self._sine(1000, -40, 4.0)
+        base = dict(leveler=1, lev_target_db=-10, lev_max_boost_db=25, lev_max_cut_db=36,
+                    lev_speed_s=0.2, lev_gate_db=-80)
+        _, after = self._run_steps([(4.0, {}, x), (0.5, {"lev_max_boost_db": 5}, x[:RATE // 2])], base=base)
+        self.assertLess(rms_db(after[-RATE // 10:]), -43.0 + 5.0 + 1.5)  # 0.4 s later: at the new cap
+
+    def test_leveler_off_returns_from_a_cut_at_most_10db_per_s(self):
+        """#46 (b): switching the leveler off glides back from a cut at <= 10 dB/s."""
+        x = self._sine(1000, -10, 4.0)  # -13 dB rms, pulled down to the -30 dB target
+        base = dict(leveler=1, lev_target_db=-30, lev_max_boost_db=0, lev_max_cut_db=30,
+                    lev_speed_s=0.2, lev_gate_db=-80)
+        settled, after = self._run_steps([(4.0, {}, x), (4.0, {"leveler": 0}, x)], base=base)
+        before = self._levels(settled)[-1][1]
+        self.assertAlmostEqual(before, -30.0, delta=1.5)
+        self._assert_rises_at_most_10db_per_s(before, self._levels(after), -13.0, tol=1.5)
+
+    def test_leveler_off_from_a_boost_falls_at_once(self):
+        """#46 (b): the other direction: leaving a boost is not slowed down."""
+        x = self._sine(1000, -40, 4.0)
+        base = dict(leveler=1, lev_target_db=-10, lev_max_boost_db=20, lev_max_cut_db=10,
+                    lev_speed_s=0.5, lev_gate_db=-80)
+        settled, after = self._run_steps([(6.0, {}, self._sine(1000, -40, 6.0)),
+                                          (4.0, {"leveler": 0}, x)], base=base)
+        self.assertGreater(rms_db(settled[-RATE // 10:]) + 43.0, 15.0)
+        self.assertLess(rms_db(after[-RATE // 10:]) + 43.0, 0.5)  # gone after 4 s at lev_speed 0.5
+
+    def test_leveler_after_bypass_climbs_at_most_10db_per_s(self):
+        """#46 (c): after 'filter on' the leveler climbs at <= 10 dB/s, not 20 dB/s, and still arrives."""
+        quiet = self._sine(1000, -45, 6.0)
+        base = dict(leveler=1, lev_target_db=-14, lev_max_boost_db=20, lev_max_cut_db=10,
+                    lev_speed_s=0.2, lev_gate_db=-60)
+        _, _, back = self._run_steps([(6.0, {}, quiet), (0.1, {"bypass": 1}, quiet[:RATE // 10]),
+                                      (4.0, {"bypass": 0}, self._sine(1000, -45, 4.0))], base=base)
+        dry = -48.0  # rms of a -45 dBpk sine
+        self._assert_rises_at_most_10db_per_s(dry, self._levels(back), dry + 20.0, tol=1.5)
+
+    def test_leveler_on_a_fresh_instance_is_not_rate_limited(self):
+        """#46: normal operation is unchanged: a fast leveler still climbs faster than 10 dB/s."""
+        out = self._run(self._sine(1000, -45, 2.0), leveler=1, lev_target_db=-14, lev_max_boost_db=20,
+                        lev_max_cut_db=10, lev_speed_s=0.2, lev_gate_db=-60)
+        self.assertGreater(rms_db(out[int(0.8 * RATE):int(1.0 * RATE)]) + 48.0, 15.0)
 
     def test_meter_reports_the_remaining_ramp(self):
         with tempfile.TemporaryDirectory() as d:

@@ -165,6 +165,8 @@ static const LADSPA_PortRangeHint port_hints[P_COUNT] = {
 /* A switched-off leveler this close to 0 dB is snapped to 0 dB and skipped (#41);
  * 1e-4 dB is a gain error of about 1e-5, far below anything audible. */
 #define LEV_IDLE_DB 1e-4
+/* "reached" tolerance for the leveler gain after a rate-limited start (#46) */
+#define LEV_REACHED_DB 0.05
 
 /* Building with -DCINEGAIN_REFERENCE keeps the plain O(n) limiter scan and runs
  * every stage on every sample. Only the tests use it, as the oracle for the
@@ -244,16 +246,17 @@ typedef struct {
 /* Gains only rise this fast; a lower value applies at once (user decision 2026-11-11):
  * 0 -> +25 dB takes 2.5 s, so there is time to react, while turning down is instant. */
 #define RAMP_DB_PER_S 10.0
-/* The limiter ceiling and the leveler target raise the level just like a gain (#40). */
+/* The limiter ceiling, the leveler target and the leveler's boost cap raise the level
+ * just like a gain (#40, #46). */
 enum {
 	RG_INPUT, RG_BASS, RG_DIALOG, RG_TREBLE, RG_MID, RG_SIDE, RG_MAKEUP,
-	RG_CEILING, RG_LEV_TARGET, RG_N
+	RG_CEILING, RG_LEV_TARGET, RG_LEV_BOOST, RG_N
 };
 static const int ramp_port[RG_N] = {
 	P_INPUT_DB, P_BASS_DB, P_DIALOG_DB, P_TREBLE_DB, P_MID_DB, P_SIDE_DB, P_MAKEUP_DB,
-	P_LIM_CEILING_DB, P_LEV_TARGET_DB,
+	P_LIM_CEILING_DB, P_LEV_TARGET_DB, P_LEV_MAX_BOOST_DB,
 };
-static const float ramp_fallback[RG_N] = { 0, 0, 0, 0, 0, 0, 0, -1, -20 };
+static const float ramp_fallback[RG_N] = { 0, 0, 0, 0, 0, 0, 0, -1, -20, 12 };
 
 typedef struct {
 	LADSPA_Data *port[P_COUNT];
@@ -273,6 +276,9 @@ typedef struct {
 	/* leveler */
 	double lev_power;    /* mean-square power estimate */
 	double lev_gain_db;  /* current applied leveler gain */
+	/* While set, lev_gain_db rises at most RAMP_DB_PER_S (#46): after the filter comes
+	 * back from bypass, until the leveler has reached its target for the first time. */
+	int lev_limit;
 
 	/* compressor */
 	double comp_env_db;  /* detector level in dB */
@@ -391,6 +397,7 @@ static void activate(LADSPA_Handle h)
 	k->lim_gain = 1.0;
 	k->lev_power = 0.0;
 	k->lev_gain_db = 0.0;
+	k->lev_limit = 0;
 	k->lev_peak = 0.0;
 	k->comp_env_db = -120.0;
 	k->comp_hold_db = 0.0;
@@ -414,6 +421,7 @@ static void resume_after_bypass(Cinegain *k)
 	k->la_pos = 0;
 	k->lim_gain = 1.0;
 	if (k->lev_gain_db > 0.0) k->lev_gain_db = 0.0;
+	k->lev_limit = 1; /* #46: from a cut the leveler may not climb faster than 10 dB/s either */
 	k->was_bypassed = 0;
 	k->xf_on = 1;
 	k->xf_pos = 0;
@@ -442,7 +450,9 @@ static double update_ramps(Cinegain *k, unsigned long n)
 	double left = 0.0;
 	for (int g = 0; g < RG_N; g++) {
 		double want = ctl(k, ramp_port[g], ramp_fallback[g]);
-		if (!k->ramp_valid) k->ramp[g] = want < 0.0 ? want : 0.0;
+		/* The boost cap needs no fade-in on a fresh instance: the leveler gain itself
+		 * starts at 0 dB. Only a later rise of the cap is rate limited (#46). */
+		if (!k->ramp_valid) k->ramp[g] = (want < 0.0 || g == RG_LEV_BOOST) ? want : 0.0;
 		if (want <= k->ramp[g]) k->ramp[g] = want;
 		else if (want - k->ramp[g] <= step) k->ramp[g] = want;
 		else k->ramp[g] += step;
@@ -527,7 +537,7 @@ static void run(LADSPA_Handle h, unsigned long n)
 	const int lev_idle = !lev_on && k->lev_gain_db == 0.0;
 #endif
 	const double lev_target = k->ramp[RG_LEV_TARGET];
-	const double lev_boost = ctl(k, P_LEV_MAX_BOOST_DB, 12);
+	const double lev_boost = k->ramp[RG_LEV_BOOST];
 	const double lev_cut = ctl(k, P_LEV_MAX_CUT_DB, 6);
 	const double lev_speed = ctl(k, P_LEV_SPEED_S, 4);
 	const double lev_gate = ctl(k, P_LEV_GATE_DB, -55);
@@ -536,6 +546,7 @@ static void run(LADSPA_Handle h, unsigned long n)
 	const double lev_gc = coef_ms(lev_speed * 1000.0, rate);
 	/* Cuts follow loud material about 8x faster than boosts follow quiet material. */
 	const double lev_gc_cut = coef_ms(lev_speed * 125.0, rate);
+	const double lev_step = RAMP_DB_PER_S / rate; /* largest rise per sample while limited */
 	const double peak_rel = coef_ms(150.0, rate);
 	const double peak_room_db = 9.0; /* allowed peak-over-target before the fast cut engages */
 
@@ -621,9 +632,17 @@ static void run(LADSPA_Handle h, unsigned long n)
 			if (want > lev_boost) want = lev_boost;
 			if (want < -lev_cut) want = -lev_cut;
 			double gc = want < k->lev_gain_db ? lev_gc_cut : lev_gc;
-			k->lev_gain_db = gc * k->lev_gain_db + (1.0 - gc) * want;
+			double ng = gc * k->lev_gain_db + (1.0 - gc) * want;
+			if (k->lev_limit) {
+				if (ng > k->lev_gain_db + lev_step) ng = k->lev_gain_db + lev_step;
+				if (ng >= want - LEV_REACHED_DB) k->lev_limit = 0; /* target reached */
+			}
+			k->lev_gain_db = ng;
 		} else {
-			k->lev_gain_db *= lev_gc; /* glide back to 0 dB */
+			/* glide back to 0 dB; out of a cut the rise is limited like every gain (#46) */
+			double ng = k->lev_gain_db * lev_gc;
+			if (ng > k->lev_gain_db + lev_step) ng = k->lev_gain_db + lev_step;
+			k->lev_gain_db = ng;
 		}
 		if (!lev_idle) {
 			double lg = db2lin(k->lev_gain_db);
