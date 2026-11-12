@@ -35,7 +35,7 @@ import cinegain_bypass as bypass_state  # noqa: E402
 import cinegain_paths as paths  # noqa: E402
 from cinegain_profiles import (  # noqa: E402
     DEFAULT_PARAMS, PROFILE_STANDARD, STANDARD_OUTPUT, STANDARD_SINK, ProfileCatalog, SinkProcesses, full_params,
-    read_meter, read_ramp,
+    read_meter, read_ramp, slot_display_name,
 )
 from cinegain_registry import make_key, profile_id_for  # noqa: E402
 from cinegain_router import Router  # noqa: E402
@@ -106,8 +106,8 @@ try:
         QStyle,
         QStyleOptionSlider,
     )
-    from PyQt6.QtGui import QIcon, QAction, QKeyEvent, QPainter, QColor, QPixmap, QDesktopServices
-    from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QByteArray, QPoint, QUrl, QtMsgType, qInstallMessageHandler
+    from PyQt6.QtGui import QIcon, QAction, QKeyEvent, QPainter, QColor, QPixmap, QDesktopServices, QPen
+    from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QByteArray, QPoint, QPointF, QRectF, QUrl, QtMsgType, qInstallMessageHandler
     from PyQt6.QtSvg import QSvgRenderer
 except ImportError:
     print("Error: PyQt6 is required to run the Cinegain desktop interface.")
@@ -454,7 +454,7 @@ QSlider#hero_slider::groove:horizontal {
 }
 
 QSlider#hero_slider::sub-page:horizontal {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #D01822, stop:0.35 #E0B83A, stop:1 #FFD21F);
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #8A6A12, stop:0.35 #E0B83A, stop:1 #FFD21F);
     border: 1px solid #FFE15A;
     border-radius: 7px;
 }
@@ -605,16 +605,31 @@ TRAY_PRESETS = ("boost_6db", "boost_12db", "dialog_boost", "night_mode", "max_lo
 
 
 class MeterStrip(QWidget):
-    """Four small live bars: input peak, leveler gain, compressor and limiter reduction."""
+    """
+    Live bars in their own panel: input peak, leveler gain, compressor and limiter
+    reduction. Fixed mode shows only IN and LIMIT: the leveler and the compressor
+    never move there.
+    """
 
-    # label, low, high (dB); bars with a negative range grow from the right (reduction)
+    # label, low, high (dB); reduction bars (COMP, LIMIT) grow with their magnitude
     BARS = (("IN", -60.0, 0.0), ("LEVELER", -12.0, 24.0), ("COMP", -24.0, 0.0), ("LIMIT", -12.0, 0.0))
+    FIXED_BARS = ("IN", "LIMIT")
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(44)
+        self.setFixedHeight(60)
         self.values = None  # (level, leveler, gr, limit) or None when idle
         self.source = ""  # which filter is measured, e.g. "Measuring: Google Chrome"
+        self.fixed = False  # fixed mode: only the bars that can move there
+
+    def shown_bars(self):
+        """(index into the values, label, low, high) of the bars drawn in the current mode."""
+        return [(i, *b) for i, b in enumerate(self.BARS) if not self.fixed or b[0] in self.FIXED_BARS]
+
+    def set_fixed(self, fixed):
+        if bool(fixed) != self.fixed:
+            self.fixed = bool(fixed)
+            self.update()
 
     def set_values(self, values, source=""):
         if values != self.values or source != self.source:
@@ -624,18 +639,32 @@ class MeterStrip(QWidget):
 
     def paintEvent(self, event):
         p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
-        gap = 10
-        top = 14
-        p.setPen(QColor("#A79B8C"))
-        p.drawText(0, 0, w, 12, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+        p.setPen(QPen(QColor("#6E1516"), 1))
+        p.setBrush(QColor("#14100D"))
+        p.drawRoundedRect(QRectF(0.5, 0.5, w - 1, h - 1), 8, 8)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        pad, gap = 12, 14
+        # header: status dot (ring = no signal, filled = measuring) and the measured filter
+        measuring = self.values is not None
+        p.setPen(QPen(QColor("#6FBF8B" if measuring else "#A2968A"), 1.5))
+        p.setBrush(QColor("#6FBF8B") if measuring else Qt.BrushStyle.NoBrush)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.drawEllipse(QPointF(pad + 4, 15), 3.5, 3.5)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        p.setPen(QColor("#A2968A"))
+        p.drawText(pad + 14, 8, w - 2 * pad - 14, 14, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                    self.source or t("meter_none"))
-        bw = (w - gap * (len(self.BARS) - 1)) / len(self.BARS)
-        for i, (name, lo, hi) in enumerate(self.BARS):
-            x = i * (bw + gap)
-            p.fillRect(int(x), top + 14, int(bw), 8, QColor("#14100D"))
-            p.setPen(QColor("#A79B8C"))
-            p.drawText(int(x), top, int(bw), 12, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, name)
+        bars = self.shown_bars()
+        inner = w - 2 * pad
+        bw = (inner - gap * (len(bars) - 1)) / len(bars)
+        label_y, bar_y = 26, 43
+        for pos, (i, name, lo, hi) in enumerate(bars):
+            x = pad + pos * (bw + gap)
+            p.fillRect(int(x), bar_y, int(bw), 8, QColor("#080604"))
+            p.setPen(QColor("#A2968A"))
+            p.drawText(int(x), label_y, int(bw), 14, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, name)
             if self.values is None:
                 continue
             v = self.values[i]
@@ -647,9 +676,9 @@ class MeterStrip(QWidget):
                 color = QColor("#6FBF8B") if v < -3 else QColor("#B11218")
             else:
                 color = QColor("#FFD21F")
-            p.fillRect(int(x), top + 14, int(bw * frac), 8, color)
+            p.fillRect(int(x), bar_y, int(bw * frac), 8, color)
             p.setPen(QColor("#EDE6DC"))
-            p.drawText(int(x), top, int(bw), 12, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+            p.drawText(int(x), label_y, int(bw), 14, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                        f"{v:+.0f} dB" if name == "LEVELER" else f"{max(v, -99):.0f} dB")
         p.end()
 
@@ -992,6 +1021,7 @@ class CinegainMainWindow(QMainWindow):
     def retranslate_ui(self):
         self.setWindowTitle(t("app_title"))
         self.lbl_subtitle.setText(self._subtitle())
+        self.lbl_kbd_help.setToolTip(t("kbd_help_tip"))
         self.btn_lang.setText(f" {get_current_language().upper()}")
         self.btn_quit.setText(t("btn_quit"))
         self.btn_quit.setToolTip(t("btn_quit_tip"))
@@ -1076,10 +1106,24 @@ class CinegainMainWindow(QMainWindow):
             "font-weight: 800; letter-spacing: 1.5px; color: #FFD21F;"
         )
         self.lbl_subtitle = QLabel(self._subtitle())
-        self.lbl_subtitle.setWordWrap(True)
         self.lbl_subtitle.setStyleSheet("font-size: 12px; font-weight: 600; color: #FFF1D6;")
+        self.lbl_kbd_help = QLabel("?")
+        self.lbl_kbd_help.setObjectName("kbd_help")
+        self.lbl_kbd_help.setFixedSize(18, 18)
+        self.lbl_kbd_help.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_kbd_help.setCursor(Qt.CursorShape.WhatsThisCursor)
+        self.lbl_kbd_help.setStyleSheet(
+            "QLabel#kbd_help { color: #FFD21F; background-color: #8E0E13; border: 1px solid #FFD21F; "
+            "border-radius: 9px; font-size: 11px; font-weight: 800; }"
+        )
+        self.lbl_kbd_help.setToolTip(t("kbd_help_tip"))
+        sub_row = QHBoxLayout()
+        sub_row.setSpacing(8)
+        sub_row.addWidget(self.lbl_subtitle)
+        sub_row.addWidget(self.lbl_kbd_help)
+        sub_row.addStretch(1)
         title_box.addWidget(self.lbl_title)
-        title_box.addWidget(self.lbl_subtitle)
+        title_box.addLayout(sub_row)
 
         self.lbl_status = QLabel(t("status_checking"))
         self.lbl_status.setStyleSheet(
@@ -1808,6 +1852,8 @@ class CinegainMainWindow(QMainWindow):
     def apply_mode_layout(self, mode):
         """Fixed mode hides the dynamic-only sliders; the simple view shows only the volume."""
         self._mode = mode
+        if hasattr(self, "meter_strip"):
+            self.meter_strip.set_fixed(mode == modes.MODE_FIXED)
         for key, info in self.sliders.items():
             info["row_frame"].setVisible(self._slider_visible(key))
         if hasattr(self, "btn_mode_fixed"):
@@ -1901,7 +1947,7 @@ class CinegainMainWindow(QMainWindow):
     def _refresh_user_preset_buttons_text(self):
         for sid, btn in self.user_preset_buttons.items():
             slot = self.user_presets.get(sid, {})
-            name = slot.get("name", sid)
+            name = slot_display_name(sid, slot.get("name", sid))
             params = slot.get("params")
             if params:
                 in_db = params.get("input_db", 0.0)
@@ -2139,7 +2185,7 @@ class CinegainMainWindow(QMainWindow):
         self.update_preset_highlights()
 
     def _rename_user_slot(self, slot_id):
-        old_name = self.user_presets[slot_id].get("name", slot_id)
+        old_name = slot_display_name(slot_id, self.user_presets[slot_id].get("name", slot_id))
         new_name, ok = QInputDialog.getText(
             self,
             t("rename_title"),
@@ -2279,7 +2325,7 @@ class CinegainMainWindow(QMainWindow):
 
     # -- editing target ---------------------------------------------------------
     def _subtitle(self):
-        return f"{t('app_subtitle')} · {t('kbd_program')}"
+        return t("app_subtitle")
 
     def _build_edit_header(self):
         frame = QFrame()

@@ -741,6 +741,58 @@ class TestProgramEditing(unittest.TestCase):
         self.assertFalse(self.router.guard.auto)
         self.assertFalse(paths.config_get("volume_auto_reset"))
 
+    def test_meter_strip_hides_leveler_and_comp_in_fixed_mode(self):
+        """#43 U1: fixed mode shows only IN and LIMIT; dynamic shows all four."""
+        strip = self.win.meter_strip
+        names = lambda: [name for _i, name, _lo, _hi in strip.shown_bars()]  # noqa: E731
+        self.assertEqual(names(), ["IN", "LIMIT"])
+        self.assertEqual([i for i, *_ in strip.shown_bars()], [0, 3])  # values keep their index
+        self.win.set_mode("dynamic")
+        self.assertEqual(names(), ["IN", "LEVELER", "COMP", "LIMIT"])
+        self.win.set_mode("fixed")
+        self.assertEqual(names(), ["IN", "LIMIT"])
+        strip.set_values((-12.0, 6.0, -3.0, -1.0), "x")
+        self.assertFalse(strip.grab().isNull())  # paints with and without values
+
+    def test_subtitle_is_one_line_and_keyboard_help_sits_in_a_tooltip(self):
+        """#43 U2."""
+        for lang in ("en", "de"):
+            self.win.change_language(lang)
+            sub = self.win.lbl_subtitle.text()
+            self.assertEqual(sub, self.gui.t("app_subtitle"))
+            self.assertNotIn("↑", sub)
+            self.assertFalse(self.win.lbl_subtitle.wordWrap())
+            self.assertIn("↑↓", self.win.lbl_kbd_help.toolTip())
+            self.assertIn(self.gui.t("kbd_program"), self.win.lbl_kbd_help.toolTip())
+        self.win.change_language("en")
+
+    def test_hero_gradient_has_no_red_at_the_quiet_end(self):
+        """#43 U3: red means alarm/off; the hero fill starts in dark gold."""
+        rule = self.gui.CI_STYLESHEET.split("QSlider#hero_slider::sub-page:horizontal", 1)[1].split("}", 1)[0]
+        self.assertIn("qlineargradient", rule)
+        gradient = rule.split("border:")[0]
+        for red in ("#D01822", "#B11218", "#FF5546", "#6E1516"):
+            self.assertNotIn(red, gradient)
+
+    def test_empty_slots_get_translated_default_names_saved_names_stay(self):
+        """#43 U4: only the stored default "User N" is translated; typed names are kept."""
+        stored = {"user_1": {"name": "Music", "params": {"input_db": 1.0}},
+                  "user_3": {"name": "User 3", "params": None},
+                  "user_4": {"name": "User 2", "params": None},   # typed by the user, not slot 4's default
+                  "user_5": {"name": "Kino", "params": None}}
+        paths.write_json_atomic(paths.USER_PRESETS_FILE, stored)
+        self.win.user_presets = self.win._load_user_presets()
+        self.win.change_language("de")
+        text = {sid: b.text().replace("&&", "&") for sid, b in self.win.user_preset_buttons.items()}
+        self.assertIn("Music", text["user_1"])
+        self.assertEqual(text["user_2"], "Platz 2 (frei)")      # no entry at all
+        self.assertEqual(text["user_3"], "Platz 3 (frei)")      # stored default
+        self.assertEqual(text["user_4"], "User 2 (frei)")       # a name the user chose stays
+        self.assertEqual(text["user_5"], "Kino (frei)")
+        self.assertEqual(paths.read_json(paths.USER_PRESETS_FILE), stored)  # nothing rewritten
+        self.win.change_language("en")
+        self.assertEqual(self.win.user_preset_buttons["user_3"].text(), "User 3 (empty)")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
