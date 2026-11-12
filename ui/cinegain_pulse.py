@@ -224,6 +224,49 @@ _TARGET_PATTERNS = (
 )
 
 
+STANDARD_SINK_MEDIA_NAME = "Cinegain (Filmton Dialog & Dynamik)"
+
+
+def sink_media_name(line):
+    """Returns the unescaped media.name if line is an Audio/Sink or Output/Audio entry for Cinegain/Kinoton."""
+    key = line.split("=", 1)[0]
+    for prefix in ("Audio/Sink:media.name:", "Output/Audio:media.name:"):
+        if key.startswith(prefix):
+            name = key[len(prefix):].replace("\\s", " ")
+            low = name.lower()
+            if "cinegain" in low or "kinoton" in low:
+                return name
+    return None
+
+
+def is_dead_cinegain_sink_entry(line, live_media_names):
+    """True when line stores properties for a Cinegain/Kinoton sink not in live_media_names."""
+    if live_media_names is None:
+        return False
+    name = sink_media_name(line)
+    return name is not None and name not in live_media_names
+
+
+def live_sink_media_names(existing_sinks):
+    """Maps active Cinegain sink node names to their WirePlumber media.name values."""
+    if existing_sinks is None:
+        return None
+    names = set()
+    if "cinegain_sink" in existing_sinks:
+        names.add(STANDARD_SINK_MEDIA_NAME)
+    try:
+        import cinegain_pwdump
+        for obj in cinegain_pwdump.load():
+            props = (obj.get("info") or {}).get("props") or {}
+            if props.get("node.name") in existing_sinks:
+                mname = props.get("media.name")
+                if mname:
+                    names.add(mname)
+    except Exception:
+        pass
+    return names
+
+
 def strip_cinegain_targets(text, keep=()):
     """Drops saved `"target":"cinegain..."` entries, except targets named in keep."""
     for rx, repl in _TARGET_PATTERNS:
@@ -231,20 +274,29 @@ def strip_cinegain_targets(text, keep=()):
     return text
 
 
-def clean_wireplumber_targets(path, keep=()):
+def clean_wireplumber_targets(path, keep=(), live_media_names=None):
     """
-    Removes sticky Cinegain targets from WirePlumber's stream-properties so that
-    streams are not trapped on a sink that no longer exists. `keep` = sink names
-    that still exist and may stay. Returns True if the file changed.
+    Removes sticky Cinegain targets and dead Cinegain sink entries from WirePlumber's
+    stream-properties so that streams are not trapped on a sink that no longer exists.
+    `keep` = sink names that still exist and may stay. Returns True if the file changed.
     """
     try:
         with open(path, "r", encoding="utf-8") as f:
             content = f.read()
     except OSError:
         return False
-    if "cinegain" not in content and "kinoton" not in content:
+    low = content.lower()
+    if "cinegain" not in low and "kinoton" not in low:
         return False
-    cleaned = strip_cinegain_targets(content, keep)
+    if live_media_names is None:
+        live_media_names = {STANDARD_SINK_MEDIA_NAME} if "cinegain_sink" in keep else set()
+    lines = content.splitlines(keepends=True)
+    kept_lines = [
+        strip_cinegain_targets(line, keep)
+        for line in lines
+        if not is_dead_cinegain_sink_entry(line, live_media_names)
+    ]
+    cleaned = "".join(kept_lines)
     if cleaned == content:
         return False
     try:

@@ -465,19 +465,19 @@ def _is_cinegain_sink_entry(line):
     return key.startswith("audio/sink:") and ("cinegain" in key or "kinoton" in key)
 
 
-def clean_stream_properties(path=None, backup_dir=None, stamp=None, existing_sinks=None):
+def clean_stream_properties(path=None, backup_dir=None, stamp=None, existing_sinks=None, live_media_names=None):
     """
     Resets saved playback volumes in WirePlumber's stream-properties (volume and
     channel volumes to 1.0, mute off): every Output/Audio entry and the Audio/Sink
     entries of Cinegain's own sinks, whose saved lowering came back with every
     restart of a program sink (#26). With existing_sinks (sink names), saved
-    targets on Cinegain sinks that no longer exist are dropped too. Hardware
-    sinks and inputs stay untouched.
+    targets on Cinegain sinks that no longer exist are dropped and dead Cinegain
+    sink entries are removed. Hardware sinks and inputs stay untouched.
     Returns (number of changed entries, backup path or None).
     Note: the running WirePlumber keeps its own copy in memory and writes it back;
     reset_saved_volumes() makes it load the cleaned file.
     """
-    from cinegain_pulse import strip_cinegain_targets
+    from cinegain_pulse import STANDARD_SINK_MEDIA_NAME, is_dead_cinegain_sink_entry, strip_cinegain_targets
 
     path = path or paths.WIREPLUMBER_STREAM_PROPS
     try:
@@ -485,9 +485,14 @@ def clean_stream_properties(path=None, backup_dir=None, stamp=None, existing_sin
             lines = f.read().splitlines(keepends=True)
     except OSError:
         return 0, None
+    if existing_sinks is not None and live_media_names is None:
+        live_media_names = {STANDARD_SINK_MEDIA_NAME} if "cinegain_sink" in existing_sinks else set()
     changed = 0
     out = []
     for line in lines:
+        if is_dead_cinegain_sink_entry(line, live_media_names):
+            changed += 1
+            continue
         new = line
         if line.startswith("Output/Audio:") or _is_cinegain_sink_entry(line):
             new = re.sub(r'"volume":\s*[0-9.eE+-]+', '"volume":1.000000', new)
@@ -591,7 +596,9 @@ def reset_saved_volumes(existing_sinks=None, runner=subprocess.run, sleep=time.s
     path = paths.WIREPLUMBER_STREAM_PROPS
 
     def clean():
-        return clean_stream_properties(path, existing_sinks=existing_sinks)
+        from cinegain_pulse import live_sink_media_names
+        live_names = live_sink_media_names(existing_sinks) if existing_sinks is not None else None
+        return clean_stream_properties(path, existing_sinks=existing_sinks, live_media_names=live_names)
 
     if os.path.abspath(path) != os.path.abspath(paths.DEFAULT_WP_STREAM_PROPS):
         (n, backup), state = clean(), "skipped"
