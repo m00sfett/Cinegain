@@ -8,7 +8,8 @@ What it does, in order:
    and unmutes the streams of all applications Cinegain has ever seen.
 3. Stops all profile sinks.
 4. Deletes state.json, user_presets.json, config.json and apps.json.
-5. Removes sticky Cinegain targets from WirePlumber's stream-properties.
+5. Removes sticky Cinegain targets from WirePlumber's stream-properties and
+   makes the running WirePlumber load the cleaned file (#26).
 
 The standard sink itself is handled by the caller (CLI): a running one keeps
 running and gets the default parameters pushed live, because restarting it
@@ -73,6 +74,26 @@ def wait_for_moves(pulse, moved, target, timeout=MOVE_CONFIRM_TIMEOUT_S, settle=
     return True
 
 
+def clean_wireplumber_live(keep=(), runner=None, sleep=None):
+    """
+    Removes sticky Cinegain targets from stream-properties. For the real file the
+    running WirePlumber reloads the cleaned file; otherwise it writes its old copy
+    back about a second later and the stale targets return (#26).
+    Returns (cleaned, "reloaded" | "failed" | "skipped").
+    """
+    path = paths.WIREPLUMBER_STREAM_PROPS
+
+    def clean():
+        return clean_wireplumber_targets(path, keep=keep)
+
+    if os.path.abspath(path) != os.path.abspath(paths.DEFAULT_WP_STREAM_PROPS):
+        return clean(), "skipped"  # tests: never touch the live WirePlumber
+    import cinegain_volume
+    kw = {k: v for k, v in (("runner", runner), ("sleep", sleep)) if v is not None}
+    cleaned, ok = cinegain_volume.reload_wireplumber_state(clean, **kw)
+    return cleaned, "reloaded" if ok else "failed"
+
+
 def reset_everything(pulse=None, sinks=None, backup=True, keep_sink=None):
     """
     Runs the full reset. Returns a dict describing what was done.
@@ -121,5 +142,5 @@ def reset_everything(pulse=None, sinks=None, backup=True, keep_sink=None):
             pass
 
     keep = {keep_sink} if keep_alive else ()
-    report["wireplumber_cleaned"] = clean_wireplumber_targets(paths.WIREPLUMBER_STREAM_PROPS, keep=keep)
+    report["wireplumber_cleaned"], report["wireplumber"] = clean_wireplumber_live(keep)
     return report

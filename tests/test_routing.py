@@ -660,6 +660,46 @@ class TestReset(Base):
         self.assertTrue(cinegain_reset.wait_for_moves(self.pulse, [], HW, sleep=called.append))
         self.assertEqual(called, [])
 
+    def test_reset_cleanup_makes_wireplumber_reload_the_file(self):
+        """#26: a cleaned file alone is overwritten by WirePlumber's copy; the reset reloads it."""
+        import cinegain_reset
+        with open(paths.WIREPLUMBER_STREAM_PROPS, "w") as f:
+            f.write('a={"mute":false, "target":"cinegain_app_x_abc123"}\n')
+        values = {"node.stream.restore-props": True, "node.stream.restore-target": True}
+        seen = []
+
+        class Res:
+            def __init__(self, rc=0, out=""):
+                self.returncode, self.stdout, self.stderr = rc, out, ""
+
+        def run(cmd, **kw):
+            key = cmd[2]
+            if len(cmd) == 3:
+                return Res(0, f"Value: {'true' if values[key] else 'false'}\n")
+            values[key] = cmd[3] == "true"
+            seen.append((key, values[key]))
+            return Res()
+
+        saved = paths.DEFAULT_WP_STREAM_PROPS
+        paths.DEFAULT_WP_STREAM_PROPS = paths.WIREPLUMBER_STREAM_PROPS  # pretend it is the real file
+        try:
+            cleaned, state = cinegain_reset.clean_wireplumber_live(runner=run, sleep=lambda s: None)
+        finally:
+            paths.DEFAULT_WP_STREAM_PROPS = saved
+        self.assertTrue(cleaned)
+        self.assertEqual(state, "reloaded")
+        self.assertEqual([v for _, v in seen], [False, False, True, True])
+        self.assertTrue(all(values.values()))
+        with open(paths.WIREPLUMBER_STREAM_PROPS) as f:
+            self.assertNotIn("cinegain", f.read())
+
+    def test_reset_cleanup_never_touches_wireplumber_for_a_test_file(self):
+        import cinegain_reset
+        with open(paths.WIREPLUMBER_STREAM_PROPS, "w") as f:
+            f.write('a={"target":"cinegain_app_x"}\n')
+        _, state = cinegain_reset.clean_wireplumber_live(runner=lambda *a, **k: self.fail("wpctl called"))
+        self.assertEqual(state, "skipped")
+
     def test_backup_directories_are_private(self):
         """#48/#42: the backup root and the timestamped folder hold user state: 0700."""
         paths.write_json_atomic(paths.STATE_FILE, {"params": {"input_db": 25}})
