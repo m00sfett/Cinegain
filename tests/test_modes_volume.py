@@ -366,10 +366,9 @@ class TestSavedVolumes(unittest.TestCase):
         n, backup = clean_stream_properties(self.path, backup_dir=os.path.join(self.tmp, "bk"), stamp="t",
                                             existing_sinks={"cinegain_sink", "alsa_output.hdmi"})
         e = self.entries()
-        sink = "Audio/Sink:media.name:Cinegain\\s\u00b7\\sGoogle\\sChrome"
-        self.assertIn('"volume":1.000000', e[sink])
-        self.assertIn('"channelVolumes":[1.000000, 1.000000]', e[sink])
-        self.assertIn('"volume":1.000000', e["Output/Audio:media.name:Cinegain\\s\u00b7\\sGoogle\\sChrome"])
+        # dead Cinegain sinks are pruned completely instead of lingering in stream-properties (#26)
+        self.assertNotIn("Audio/Sink:media.name:Cinegain\\s\u00b7\\sGoogle\\sChrome", e)
+        self.assertNotIn("Output/Audio:media.name:Cinegain\\s\u00b7\\sGoogle\\sChrome", e)
         self.assertIn('"volume":1.000000', e["Output/Audio:application.name:Chromium"])
         # the target on a sink that is gone is dropped; one on a running sink and foreign ones stay
         self.assertNotIn("target", e["Output/Audio:application.name:Google\\sChrome"])
@@ -380,6 +379,19 @@ class TestSavedVolumes(unittest.TestCase):
         self.assertEqual(e["Input/Audio:application.name:Mic"], '{"volume":0.4}')
         self.assertEqual(n, 4)
         self.assertEqual(open(backup, encoding="utf-8").read(), SAMPLE_STREAM_PROPERTIES)
+
+    def test_cleanup_keeps_live_cinegain_sink_entries_and_resets_their_volume(self):
+        n, _ = clean_stream_properties(
+            self.path, backup_dir=False,
+            existing_sinks={"cinegain_sink", "cinegain_app_chrome_google_chrome_eb8b16"},
+            live_media_names={"Cinegain (Filmton Dialog & Dynamik)", "Cinegain \u00b7 Google Chrome"},
+        )
+        e = self.entries()
+        sink = "Audio/Sink:media.name:Cinegain\\s\u00b7\\sGoogle\\sChrome"
+        self.assertIn('"volume":1.000000', e[sink])
+        self.assertIn('"channelVolumes":[1.000000, 1.000000]', e[sink])
+        self.assertIn('"volume":1.000000', e["Output/Audio:media.name:Cinegain\\s\u00b7\\sGoogle\\sChrome"])
+        self.assertEqual(n, 3)
 
     def _runner(self, values, fail_set=False):
         calls = []

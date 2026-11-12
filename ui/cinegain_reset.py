@@ -77,19 +77,31 @@ def wait_for_moves(pulse, moved, target, timeout=MOVE_CONFIRM_TIMEOUT_S, settle=
 
 def clean_wireplumber_live(keep=(), runner=None, sleep=None):
     """
-    Removes sticky Cinegain targets from stream-properties. For the real file the
-    running WirePlumber reloads the cleaned file; otherwise it writes its old copy
-    back about a second later and the stale targets return (#26).
+    Removes sticky Cinegain targets, dead Cinegain sink entries and saved lowerings
+    from stream-properties. For the real file the running WirePlumber reloads the
+    cleaned file; otherwise it writes its old copy back about a second later and
+    the stale entries return (#26).
     Returns (cleaned, "reloaded" | "failed" | "skipped").
     """
+    import cinegain_volume
+    from cinegain_pulse import STANDARD_SINK_MEDIA_NAME, live_sink_media_names
+
     path = paths.WIREPLUMBER_STREAM_PROPS
+    is_live = os.path.abspath(path) == os.path.abspath(paths.DEFAULT_WP_STREAM_PROPS)
 
     def clean():
-        return clean_wireplumber_targets(path, keep=keep)
+        live_names = (
+            live_sink_media_names(keep)
+            if is_live
+            else ({STANDARD_SINK_MEDIA_NAME} if "cinegain_sink" in keep else set())
+        )
+        changed, _ = cinegain_volume.clean_stream_properties(
+            path, backup_dir=False, existing_sinks=keep, live_media_names=live_names,
+        )
+        return changed > 0
 
-    if os.path.abspath(path) != os.path.abspath(paths.DEFAULT_WP_STREAM_PROPS):
+    if not is_live:
         return clean(), "skipped"  # tests: never touch the live WirePlumber
-    import cinegain_volume
     kw = {k: v for k, v in (("runner", runner), ("sleep", sleep)) if v is not None}
     cleaned, ok = cinegain_volume.reload_wireplumber_state(clean, **kw)
     return cleaned, "reloaded" if ok else "failed"
