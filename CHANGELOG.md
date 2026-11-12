@@ -15,6 +15,41 @@ Categories follow the standard Keep a Changelog taxonomy: `Added`, `Changed`, `D
 
 ---
 
+## [0.5.2] - 2026-11-12
+
+Patch-Version: Ohrenschutz, ein Voll-Reset, der halten soll, ein lückenloses Lautstärke-Protokoll, weniger CPU-Last und UX-Feinschliff. Umsetzung der Review-Issues #26–#48. Als Patch freigegeben mit dem Umsetzungsplan vom 2026-11-11; die neuen Befehle `cinegain filter` und `volume reset --restart-wireplumber` sind Werkzeuge zu den Fixes.
+
+### Fixed
+- **Ohrenschutz nach „Filter ausschalten“:** Beim Wiedereinschalten spielt der Filter kein altes Audio aus dem 5-ms-Puffer mehr und startet den Leveler bei höchstens 0 dB. Das trockene Signal wird über 5 ms übergeblendet (#28).
+- **Ohrenschutz bei Parameteränderungen:** Ein höheres Limiter-Ceiling, ein höheres Leveler-Ziel und eine lockerere Kompressor-Einstellung (kleinere Ratio, höhere Schwelle, auch Dynamisch → Fest) heben die Lautstärke höchstens mit 10 dB/s an. Absenken wirkt weiter sofort (#40).
+- **Ohrenschutz beim Leveler:** Nach einer höheren Obergrenze, nach „Leveler aus“ (aus einer Absenkung) und nach „Filter an“ steigt der Pegel höchstens mit 10 dB/s; der Normalbetrieb bleibt unverändert (#46).
+- **Ohrenschutz beim Anheben versteckter Lautstärken:** Analyse-Tab, `cinegain volume set` und „Lautstärke wiederherstellen“ in der Seitenleiste blenden Erhöhungen mit höchstens 10 dB/s ein, Absenken wirkt sofort. Stummschaltungen werden nicht mehr stillschweigend aufgehoben (#27, #48).
+- **Fades ohne Zippern:** Rückblenden steigen höchstens mit 10 dB/s in Schritten von höchstens 1 dB, mindestens über 3 s. Bisher waren es bei −84 dB 28 dB/s in 2,8-dB-Stufen (#40).
+- **Stream auf eine schon laufende Sink:** Vor dem Verschieben wird der Stream kurz auf −30 dB gesenkt und dort eingeblendet, statt auf den Boost zu springen (#40).
+- **Voll-Reset:** Der Rest über der −30-dB-Kappung wird eingeblendet. Kompensiert wird nur, was wirklich durch den Filter läuft. Mixer-Lautstärken werden eingeblendet, Stummschaltungen bleiben stehen (#29).
+- **Voll-Reset soll halten:** WirePlumber lädt die bereinigten Werte ohne Neustart neu (Wiederherstellung kurz aus, Datei bereinigen, wieder an). Bereinigt werden auch die Einträge der Cinegain-Sinks und veraltete Targets. Neu: `cinegain volume reset --restart-wireplumber` als bestätigungspflichtiger Fallback (#26, Live-Prüfung steht aus).
+- **„Zurücksetzen“ im Bearbeitungskopf** setzt bei Standard nur Standard zurück, nicht mehr alle Programme (#32).
+- **Overdrive nach Neustart:** Die auf +15 dB gekappten Werte wirken sofort auf laufende Filter, auch bei `cinegain watch` (#30).
+- **„Filter aus“ bleibt aus:** `cinegain set/batch/preset/start` schalten einen ausgeschalteten Filter nicht mehr ein. Neu: `cinegain filter on|off|status` (#33).
+- **`cinegain start`** überschreibt eine gewählte Lautstärke von `cinegain_sink` nicht mehr; nur die erste Anlage setzt 100 % (#36).
+- **Programmnamen mit Backslash oder Anführungszeichen** legen das Routing nicht mehr lahm; ein Programm, dessen Sink nicht startet, stört die übrigen nicht mehr (#31).
+- **Ungültige Parameter:** CLI und Plugin klemmen Werte auf die Port-Grenzen, NaN/Inf werden abgelehnt bzw. durch den Standardwert ersetzt (#37).
+- **Meteranzeige nach Graph-Reset:** Das Aufräumen einer alten Plugin-Instanz löscht die Meterdatei der neuen nicht mehr (#35).
+- **Analyse-Tab:** Klick in die Reglerbahn, Mausrad und Tastatur setzen die versteckte Lautstärke (entprellt, Anheben per Fade); Tabelle und Regler sind per Tastatur erreichbar (#34).
+
+### Added
+- **Lückenloses Lautstärke-Protokoll:** Jede Änderung von versteckter Lautstärke, Mixer und Stumm bei Streams und Sinks wird protokolliert, in beide Richtungen, mit Quelle und entprellt. Die Zeitleiste zeigt Anhebungen, Mixer- und Stumm-Änderungen sowie WirePlumber-Verbindungsfehler (#44).
+
+### Changed
+- **Weniger CPU im Plugin:** Das Limiter-Fenster arbeitet in O(1), im Modus Fest laufen Leveler und Kompressor nicht mehr unnötig mit. Die Ausgabe bleibt bitgleich. Fest 0,61 → 0,19 %, Dynamisch 1,08 → 0,64 % eines Kerns (#41).
+- **Weniger CPU in der GUI:** Status und Standard-Regler laufen im GUI-Prozess statt über je einen CLI-Prozess, pro Takt nur ein `pw-dump`. Im Tray oder ohne Wiedergabe tickt sie alle 3 s, die Meteranzeige pausiert bei verstecktem Fenster. Tick-Last etwa 11 % → 3 % (offen, mit Wiedergabe) bzw. 1,5 % (Tray/Leerlauf) eines Kerns. Neue Programme werden im Leerlauf bis zu 3 s später geroutet (#38).
+- **Log-Lesen:** Analyse-Zeitleiste und Log-Tab lesen das Log inkrementell statt jedes Mal komplett (#39).
+- **Oberfläche:** Meterleiste in eigenem Panel, im Modus Fest nur Eingang und Limiter; Banner-Untertitel einzeilig mit Tastaturhilfe hinter `?`; Hero-Verlauf ohne Rot am leisen Ende; leere Speicherplätze tragen ihren Standardnamen in der Sprache der Oberfläche (#43).
+- **Doku:** `docs/SPEC.md` auf Stand 0.5.2 (Reset-, Fade- und CLI-Verhalten) (#43).
+
+### Security
+- Privater Laufzeitordner ohne `XDG_RUNTIME_DIR`, Steuerzeichen im Log entschärft, atomares Schreiben der WirePlumber-Datei, Backup-Verzeichnisse 0700 (#42, #48).
+
 ## [0.5.1] - 2026-11-11
 
 Patch-Version: nur Packaging und Release-Ablauf, das Programm selbst ist unverändert.
