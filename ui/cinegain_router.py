@@ -27,7 +27,7 @@ from cinegain_profiles import (
     sink_name,
 )
 from cinegain_pulse import PulseControl, is_cinegain_name
-from cinegain_registry import AppRegistry, make_key, profile_id_for
+from cinegain_registry import AppRegistry, is_media_app, make_key, profile_id_for
 
 # A per-program sink with no stream assigned is stopped after this many seconds.
 PROFILE_IDLE_STOP_S = 600.0
@@ -110,7 +110,12 @@ class Router:
 
         by_key = {}
         for st in streams:
-            key = self.registry.observe(st.app_name or st.node_name, st.binary)
+            app_name = st.app_name or st.node_name
+            key = make_key(app_name, st.binary)
+            if st.corked and self.registry.get(key) is None and not is_media_app(app_name, st.binary):
+                # #62: ignore paused non-media streams (e.g. Electron audio probes).
+                continue
+            key = self.registry.observe(app_name, st.binary)
             by_key.setdefault(key, []).append(st)
 
         views = {e["key"]: AppView(e) for e in self.registry.entries()}

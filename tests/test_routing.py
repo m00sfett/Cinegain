@@ -194,6 +194,13 @@ class TestRegistry(Base):
         self.assertEqual((self.registry.get(FIREFOX)["enabled"], self.registry.get(FIREFOX)["params"]), (True, None))
         self.assertFalse(self.registry.get(make_key("Claude", "claude-desktop"))["enabled"])
 
+    def test_paused_non_media_stream_is_not_registered(self):
+        # #62: paused non-media probes (e.g. Electron apps) must not clutter apps.json.
+        self.stream(1, "Chromium", "ChatGPT", corked=True)
+        views = self.router.tick(active=True)
+        self.assertIsNone(self.registry.get(make_key("Chromium", "ChatGPT")))
+        self.assertEqual(views, [])
+
     def test_electron_apps_are_kept_apart(self):
         self.assertNotEqual(make_key("Chromium", "ChatGPT"), make_key("Chromium", "chromium"))
         self.assertEqual(default_label("Chromium", "ChatGPT"), "ChatGPT")
