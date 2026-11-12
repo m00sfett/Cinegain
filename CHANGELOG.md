@@ -15,6 +15,14 @@ Categories follow the standard Keep a Changelog taxonomy: `Added`, `Changed`, `D
 
 ---
 
+## [0.5.3] - Unreleased
+
+### Fixed
+- **Startauswahl bleibt auf Standard:** Beim Start der GUI (und nach einem Reset) wird nicht mehr automatisch ein einzelnes spielendes Programm selektiert, sodass keine versehentlichen `0,0 dB`-Einzel-Sinks entstehen (#60).
+- **Kein pauschales Ducking bei `0,0 dB`:** Ein Sink-Umzug senkt die Stream-Lautstärke nur noch dann auf −30,5 dB ab, wenn der Ziel-Sink tatsächlich über `0 dB` verstärkt (oder ein Hardware-Umzug aus einer Absenkung kommt); zudem bleiben eigene Programm-Sinks 10 Minuten statt 45 Sekunden im Leerlauf aktiv (#61).
+- **Keine pausierten Geister-Einträge:** Rein pausierte (`corked`) Nicht-Medien-Streams (z. B. Electron-Audio-Probes von ChatGPT/Chromium) werden nicht mehr automatisch in `apps.json` aufgenommen (#62).
+- **Analyse-Verlauf aufgeräumt:** Interne Knoten wie `::cinegain_output...` erscheinen mit lesbarem Namen statt als Roh-Key, und ein globaler Reset („Alles zurücksetzen“) setzt einen sauberen Schnitt im Verlauf (#63).
+
 ## [0.5.2] - 2026-11-12
 
 Patch-Version: Ohrenschutz, ein Voll-Reset, der halten soll, ein lückenloses Lautstärke-Protokoll, weniger CPU-Last und UX-Feinschliff. Umsetzung der Review-Issues #26–#48. Als Patch freigegeben mit dem Umsetzungsplan vom 2026-11-11; die neuen Befehle `cinegain filter` und `volume reset --restart-wireplumber` sind Werkzeuge zu den Fixes.
