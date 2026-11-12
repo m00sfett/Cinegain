@@ -590,6 +590,46 @@ class TestProgramEditing(unittest.TestCase):
         self.assertEqual(s.value(), 150)
         self.assertEqual(AppRegistry().get(CHROME)["params"]["input_db"], 15.0)
 
+    def _start_after_overdrive_session(self, chrome_db, standard_db):
+        """Stored values of a session that ran with overdrive; the GUI then restarts (flag cleared)."""
+        import cinegain_modes as modes
+        import cinegain_overdrive as od
+        import cinegain_router
+        reg = AppRegistry()
+        od.set_on(True)
+        reg.set_setting(CHROME, "fixed", {"fixed": {"input_db": chrome_db}})
+        modes.save_standard("fixed", {"fixed": {"input_db": standard_db}})
+        od.set_on(False)
+        self.sinks.live.update({"standard", profile_id_for(CHROME)})
+        pushed = []
+        orig = (cinegain_router.push_params, cinegain_router.find_node_id)
+        cinegain_router.push_params = lambda node, params: pushed.append(dict(params)) or True
+        cinegain_router.find_node_id = lambda name: 1
+        self.calls.clear()
+        try:
+            win = self.gui.open_main_window(Router(registry=AppRegistry(), sinks=self.sinks, pulse=self.pulse))
+        finally:
+            cinegain_router.push_params, cinegain_router.find_node_id = orig
+        win.timer.stop()
+        win.meter_timer.stop()
+        win.tray.hide()
+        win.deleteLater()
+        self.app.processEvents()
+        return pushed
+
+    def test_start_pushes_the_capped_values_to_filters_that_kept_running(self):
+        """#30: after a GUI restart the saved values are capped; surviving filters must follow at once."""
+        pushed = self._start_after_overdrive_session(chrome_db=28.0, standard_db=30.0)
+        self.assertEqual(AppRegistry().get(CHROME)["params"]["input_db"], 15.0)
+        self.assertEqual(paths.read_json(paths.STATE_FILE)["params"]["input_db"], 15.0)
+        self.assertIn(("batch", "{}"), [c[:2] for c in self.calls])  # Standard filter gets the capped state
+        self.assertEqual([p["input_db"] for p in pushed], [15.0])  # the program's own sink, capped
+
+    def test_start_pushes_nothing_when_no_value_was_capped(self):
+        pushed = self._start_after_overdrive_session(chrome_db=12.0, standard_db=9.0)
+        self.assertEqual(pushed, [])
+        self.assertFalse([c for c in self.calls if c[0] == "batch"])
+
     def test_overdrive_needs_the_confirmed_dialog(self):
         import cinegain_overdrive as od
         Dlg = self.gui.OverdriveDialog

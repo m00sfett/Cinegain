@@ -1687,9 +1687,14 @@ class CinegainMainWindow(QMainWindow):
         self.retranslate_view_controls()
         self.refresh_editor()
 
-    def cap_to_normal_scale(self):
-        """Caps saved values to +15 dB and pushes them (overdrive off, or a fresh start)."""
-        changed = modes.clamp_stored(self.router.registry, overdrive_on=False)
+    def cap_to_normal_scale(self, changed=None):
+        """
+        Caps saved values to +15 dB and pushes them (overdrive off, or a fresh start).
+        `changed`: keys clamp_stored() already capped (the start does that before the
+        window exists); the running filters still need the pushes (#30).
+        """
+        if changed is None:
+            changed = modes.clamp_stored(self.router.registry, overdrive_on=False)
         if "standard" in changed:
             run_cinegain("batch", "{}")
             self._reassert_bypass()
@@ -2625,6 +2630,21 @@ def start_raise_server(win, path=None):
     return server
 
 
+def open_main_window(router):
+    """
+    Caps the saved values to the normal scale, builds the window and pushes the capped
+    values to filters that kept running through a GUI restart (#30): without the push
+    the window shows +15 dB while a surviving filter still plays +30 dB.
+    """
+    capped = modes.clamp_stored(router.registry, overdrive_on=False)
+    if capped:
+        log.info("start: capped saved values to +15 dB: %s", ", ".join(capped))
+    win = CinegainMainWindow(router)
+    if capped:
+        win.cap_to_normal_scale(capped)
+    return win
+
+
 def main():
     cinegain_log.setup("gui")
     log.info("Cinegain GUI %s starting (python %s, pid %s)", APP_VERSION, sys.version.split()[0], os.getpid())
@@ -2650,10 +2670,7 @@ def main():
     # Overdrive never survives a restart (Q2a): switch it off before anything is pushed.
     overdrive.set_on(False)
     router = Router(guard=VolumeGuard(auto=bool(paths.config_get("volume_auto_reset", True))))
-    capped = modes.clamp_stored(router.registry, overdrive_on=False)
-    if capped:
-        log.info("start: capped saved values to +15 dB: %s", ", ".join(capped))
-    win = CinegainMainWindow(router)
+    win = open_main_window(router)
     win.router_lock = lock
     win.raise_server = start_raise_server(win)
     win.show()

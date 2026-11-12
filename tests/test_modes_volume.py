@@ -285,6 +285,76 @@ class TestStartKeepsSinkVolume(unittest.TestCase):
         self.assertEqual(self.volume_calls, ["cinegain_sink", "cinegain_sink"])
 
 
+class TestWatchCapsOnStart(unittest.TestCase):
+    """#30: `cinegain watch` caps saved values and pushes them even when the overdrive flag is already gone."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cli = SourceFileLoader("cinegain_cli_watch", os.path.join(tr.BASE_DIR, "bin", "cinegain")).load_module()
+
+    def setUp(self):
+        import cinegain_overdrive as od
+        for p in paths.USER_STATE_FILES:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(p)
+        outer = self
+        self.pushes = []
+
+        class FakeRouter:
+            def __init__(self):
+                self.registry = tr.AppRegistry()
+                self.guard = None
+
+            def push_program_params(self, key):
+                outer.pushes.append(("program", key))
+
+            def tick(self, active=True):
+                raise KeyboardInterrupt  # one pass is enough
+
+        class FreeLock:  # the real flock would stay held by this process between the tests
+            def __init__(self, owner):
+                pass
+
+            def acquire(self):
+                return True
+
+        self.saved = (self.cli.make_router, self.cli.get_cinegain_node_id, self.cli.set_params_batch,
+                      self.cli.RouterLock)
+        self.cli.RouterLock = FreeLock
+        self.cli.make_router = FakeRouter
+        self.cli.get_cinegain_node_id = lambda: 5
+        self.cli.set_params_batch = lambda node, params, **kw: self.pushes.append(("standard", node)) or True
+        od.set_on(True)
+        reg = tr.AppRegistry()
+        reg.observe("Firefox", "firefox")
+        self.addCleanup(od.set_on, False)
+        self.od = od
+        self.reg = reg
+
+    def tearDown(self):
+        (self.cli.make_router, self.cli.get_cinegain_node_id, self.cli.set_params_batch,
+         self.cli.RouterLock) = self.saved
+
+    def watch(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return self.cli.main(["watch"])
+
+    def test_values_above_the_normal_scale_are_pushed_although_the_flag_was_already_cleared(self):
+        self.reg.set_setting(tr.FIREFOX, "fixed", {"fixed": {"input_db": 28.0}})
+        modes.save_standard("fixed", {"fixed": {"input_db": 22.0}})
+        self.od.set_on(False)  # e.g. the GUI restarted before and already cleared the flag
+        self.assertEqual(self.watch(), 0)
+        self.assertEqual(sorted(self.pushes), [("program", tr.FIREFOX), ("standard", 5)])
+        self.assertEqual(modes.load_standard()["params"]["input_db"], 15.0)
+
+    def test_nothing_is_pushed_when_every_value_is_inside_the_scale(self):
+        self.reg.set_setting(tr.FIREFOX, "fixed", {"fixed": {"input_db": 10.0}})
+        modes.save_standard("fixed", {"fixed": {"input_db": 5.0}})
+        self.od.set_on(False)
+        self.assertEqual(self.watch(), 0)
+        self.assertEqual(self.pushes, [])
+
+
 class TestParameterRange(unittest.TestCase):
     """#37: values are finite and inside the plugin's port ranges before they are saved or pushed."""
 

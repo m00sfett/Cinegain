@@ -329,8 +329,9 @@ def cmd_watch(args):
         return 1
     from cinegain_volume import VolumeGuard
     router = make_router()
-    if overdrive.set_on(False):  # overdrive never survives a restart of the router owner
-        _cap_to_normal_scale(router)
+    overdrive.set_on(False)  # overdrive never survives a restart of the router owner
+    # Always cap and push: a filter that survived the last owner may still play above +15 dB (#30).
+    _cap_to_normal_scale(router)
     router.guard = VolumeGuard(auto=bool(paths.config_get("volume_auto_reset", True)))
     print("Watching audio streams (Ctrl+C to stop)...")
     try:
