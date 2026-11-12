@@ -255,6 +255,11 @@ cinegain overdrive                     # show
 cinegain overdrive on --confirm        # without --confirm it prints the warning
 cinegain overdrive off                 # values above +15 dB drop at once
 
+# Filter on/off (off = pass-through; set, batch, preset and start keep this state):
+cinegain filter                        # show
+cinegain filter off
+cinegain filter on
+
 # Reset everything to factory settings (state is backed up first):
 cinegain reset
 
