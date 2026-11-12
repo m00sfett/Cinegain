@@ -50,7 +50,10 @@ def load(bin_path):
 def _call(func, namespace):
     out, err = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-        code = func(namespace)
+        try:
+            code = func(namespace)
+        except SystemExit as e:  # a CLI helper that exits must not end the GUI
+            code = e.code if isinstance(e.code, int) else 1
     return out.getvalue().strip(), err.getvalue().strip(), int(code or 0)
 
 
