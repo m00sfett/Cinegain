@@ -23,6 +23,7 @@ Categories follow the standard Keep a Changelog taxonomy: `Added`, `Changed`, `D
 - **Keine pausierten Geister-Einträge:** Rein pausierte (`corked`) Nicht-Medien-Streams (z. B. Electron-Audio-Probes von ChatGPT/Chromium) werden nicht mehr automatisch in `apps.json` aufgenommen (#62).
 - **Analyse-Verlauf aufgeräumt:** Interne Knoten wie `::cinegain_output...` erscheinen mit lesbarem Namen statt als Roh-Key, und ein globaler Reset („Alles zurücksetzen“) setzt einen sauberen Schnitt im Verlauf (#63).
 - **Verwaiste Cinegain-Sinks im WirePlumber-Reset entfernt:** „Alles zurücksetzen“ und „Lautstärke voll zurücksetzen“ bereinigen neben den Zielen und Lautstärken auch verwaiste Cinegain-/Kinoton-Sink-Einträge in `stream-properties` (#26).
+- **Ereignisgesteuerte GUI-Aktualisierung (`pactl subscribe`):** Die GUI nutzt im Betrieb nun PipeWire-Ereignisse statt zyklischem 1,5-s-/3-s-Polling, überwacht CLI-Änderungen an Konfigurationsdateien per `QFileSystemWatcher` und fällt nur bei Ausfall von `pactl` auf das Polling zurück (#38).
 
 ## [0.5.2] - 2026-11-12
 

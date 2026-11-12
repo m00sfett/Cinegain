@@ -27,6 +27,7 @@ APP_VERSION = "0.5.3"
 
 os.environ.setdefault("CINEGAIN_BASE_DIR", BASE_DIR)
 import cinegain_log  # noqa: E402
+import cinegain_events  # noqa: E402
 import cinegain_modes as modes  # noqa: E402
 import cinegain_overdrive as overdrive  # noqa: E402
 import cinegain_inproc  # noqa: E402
@@ -859,7 +860,7 @@ class OverdriveDialog(QDialog):
 
 
 class CinegainMainWindow(QMainWindow):
-    def __init__(self, router):
+    def __init__(self, router, use_events=True):
         super().__init__()
         self.router = router
         self.is_active = False
@@ -918,6 +919,16 @@ class CinegainMainWindow(QMainWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.on_heartbeat)
         self.timer.start(HEARTBEAT_BUSY_MS)
+
+        self.event_source = None
+        if use_events:
+            self.event_source = cinegain_events.make_qt_source(
+                self, on_change=self.on_event_change, on_state=self.on_event_state
+            )
+            self.event_source.watch_dir(paths.CONFIG_DIR)
+            for p in (paths.STATE_FILE, paths.CONFIG_FILE, paths.APPS_FILE):
+                self.event_source.watch_file(p)
+            self.event_source.start()
 
         # Smooth fade-ins of the hidden-volume guard (3 s, stepped every 100 ms).
         self.fade_timer = QTimer(self)
@@ -2238,16 +2249,37 @@ class CinegainMainWindow(QMainWindow):
             self.router.set_bypass(off)
         self.on_heartbeat(sync_sliders=True)
 
+    def _events_running(self):
+        return bool(self.event_source and self.event_source.running)
+
+    def on_event_change(self):
+        self.on_heartbeat()
+
+    def on_event_state(self, _running):
+        self._retime_heartbeat()
+
+    def _stop_events(self):
+        if self.event_source is not None:
+            self.event_source.stop()
+
     def on_heartbeat(self, sync_sliders=False):
         # Status, guard scan and default sink share one pw-dump per tick (#38).
+        if self.event_source is not None:
+            self.event_source.ticked()
         with cinegain_pwdump.tick_scope():
             self._heartbeat(sync_sliders)
         self._retime_heartbeat()
 
     def _retime_heartbeat(self):
-        """Full speed while the window is open and something plays; relaxed in the tray or when idle."""
-        open_and_playing = self._window_open() and any(v.playing for v in self._views)
-        want = HEARTBEAT_BUSY_MS if open_and_playing else HEARTBEAT_IDLE_MS
+        """
+        With `pactl subscribe` running, only a slow safety tick runs every 15 s.
+        Without it, full speed while open and playing; relaxed in the tray or idle.
+        """
+        if self._events_running():
+            want = cinegain_events.SAFETY_TICK_MS
+        else:
+            open_and_playing = self._window_open() and any(v.playing for v in self._views)
+            want = HEARTBEAT_BUSY_MS if open_and_playing else HEARTBEAT_IDLE_MS
         if self.timer.interval() != want:
             self.timer.setInterval(want)
 
@@ -2268,7 +2300,9 @@ class CinegainMainWindow(QMainWindow):
     def showEvent(self, event):
         super().showEvent(event)
         self._sync_meter_timer()
-        if self.timer.isActive() and self.timer.interval() != HEARTBEAT_BUSY_MS:
+        if self._events_running():
+            self.event_source.notify()
+        elif self.timer.isActive() and self.timer.interval() != HEARTBEAT_BUSY_MS:
             self.timer.start(HEARTBEAT_BUSY_MS)  # looking at it again: do not wait for a relaxed tick
 
     def hideEvent(self, event):
@@ -2552,6 +2586,7 @@ class CinegainMainWindow(QMainWindow):
             self, t("reset_done_title"), t("reset_done_text", backup=report.get("backup") or "—")
         )
         # Start over with a fresh process so every widget, language and preset is pristine.
+        self._stop_events()
         if hasattr(self, "tray"):
             self.tray.hide()
         os.execv(sys.executable, [sys.executable] + sys.argv)
@@ -2674,10 +2709,12 @@ class CinegainMainWindow(QMainWindow):
             self.hide()
             event.ignore()
         else:
+            self._stop_events()
             event.accept()
 
     def quit_app(self):
         log.info("quit")
+        self._stop_events()
         self.pending_params.clear()
         self.router.release_all()
         run_cinegain("stop")

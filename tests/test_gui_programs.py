@@ -82,7 +82,7 @@ class TestProgramEditing(unittest.TestCase):
         self.spotify = tr.Stream(2, "53", "Spotify", "spotify", "Spotify")
         self.pulse.streams += [self.chrome, self.spotify]
         self.router = Router(registry=AppRegistry(), sinks=self.sinks, pulse=self.pulse)
-        self.win = self.gui.CinegainMainWindow(self.router)
+        self.win = self.gui.CinegainMainWindow(self.router, use_events=False)
         self.win.timer.stop()
         self.win.meter_timer.stop()
         self.app.processEvents()
@@ -446,7 +446,7 @@ class TestProgramEditing(unittest.TestCase):
             result = subprocess.run([self.gui.BIN_PATH, "status", "--json"], env=env,
                                     text=True, capture_output=True, check=False)
         with patch.object(self.gui, "run_cinegain", return_value=(result.stdout, result.returncode)) as run:
-            window = self.gui.CinegainMainWindow(self.router)
+            window = self.gui.CinegainMainWindow(self.router, use_events=False)
             try:
                 self.assertNotIn(("start", "--route"), [call.args for call in run.call_args_list])
                 self.assertFalse(window.btn_power.isEnabled())
@@ -871,7 +871,7 @@ class TestHeartbeatCost(unittest.TestCase):
         self.guard = VolumeGuard(clock=self.clock)
         self.router = Router(registry=AppRegistry(clock=self.clock), sinks=tr.FakeSinks(tr.FakePulse()),
                              pulse=PulseControl(), clock=self.clock, guard=self.guard)
-        self.win = self.gui.CinegainMainWindow(self.router)
+        self.win = self.gui.CinegainMainWindow(self.router, use_events=False)
         self.win.timer.stop()
         self.win.meter_timer.stop()
         self.app.processEvents()
@@ -938,6 +938,46 @@ class TestHeartbeatCost(unittest.TestCase):
         self.assertEqual(writes[-1], (0.0, True))                 # landed on the target
         self.assertEqual(self.guard.fades, {})
         self.assertTrue(self.win.fade_timer.isActive())
+
+    def test_event_source_relaxes_safety_tick_and_falls_back_when_stopped(self):
+        import cinegain_events
+
+        class FakeEvents:
+            running = True
+            ticked_calls = 0
+            notify_calls = 0
+
+            def ticked(self):
+                self.ticked_calls += 1
+
+            def notify(self):
+                self.notify_calls += 1
+
+            def stop(self):
+                self.running = False
+
+        ev = FakeEvents()
+        self.win.event_source = ev
+        self.win.show()
+        self.sink_inputs = self.SINK_INPUT
+        self.win.on_event_change()
+        self.assertEqual(ev.ticked_calls, 1)
+        self.assertEqual(self.win.timer.interval(), cinegain_events.SAFETY_TICK_MS)
+        ev.running = False
+        self.win.on_event_state(False)
+        self.assertEqual(self.win.timer.interval(), self.gui.HEARTBEAT_BUSY_MS)
+
+    def test_cinegain_events_parsing_and_throttle(self):
+        import cinegain_events
+
+        self.assertTrue(cinegain_events.is_relevant("Event 'change' on sink-input #12"))
+        self.assertTrue(cinegain_events.is_relevant("Event 'new' on sink #3"))
+        self.assertFalse(cinegain_events.is_relevant("Event 'change' on client #9"))
+        th = cinegain_events.Throttle(delay=150, spacing=500)
+        self.assertEqual(th.event(1000), 1150)
+        self.assertEqual(th.event(1050), 1150)  # burst keeps first due time
+        th.ticked(1150)
+        self.assertEqual(th.event(1200), 1650)  # respects min spacing
 
 
 if __name__ == "__main__":
