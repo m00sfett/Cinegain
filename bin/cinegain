@@ -636,14 +636,13 @@ def cmd_reset(args):
             print("Aborted.")
             return 1
     was_running = bool(get_cinegain_node_id())
-    report = reset_everything(sinks=standard_sinks(), backup=not args.no_backup)
+    report = reset_everything(sinks=standard_sinks(), backup=not args.no_backup,
+                              keep_sink=STANDARD_SINK if was_running else None)
     if was_running:
-        cmd_stop(argparse.Namespace())
-        # cmd_stop saved the live parameters again; drop them before restarting.
-        try:
-            os.remove(paths.STATE_FILE)
-        except FileNotFoundError:
-            pass
+        # Keep the standard filter running and push the factory values live: a
+        # restart pauses browser players (#55). Factory state is "filter on".
+        bypass_state.set_on(False)
+        _init_sink_volume()
         cmd_start(argparse.Namespace(route=False))
     if args.json:
         print(json.dumps(report))

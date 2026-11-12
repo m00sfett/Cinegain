@@ -3,14 +3,16 @@ Factory reset: puts Cinegain back into the state of a fresh installation.
 
 What it does, in order:
 1. Copies the complete user state into a timestamped backup directory.
-2. Moves every stream off Cinegain, restores 100 % volume and unmutes the
-   streams of all applications Cinegain has ever seen.
+2. Moves every stream off Cinegain (or, when the caller keeps the standard
+   sink running, from per-program sinks straight to it), restores 100 % volume
+   and unmutes the streams of all applications Cinegain has ever seen.
 3. Stops all profile sinks.
 4. Deletes state.json, user_presets.json, config.json and apps.json.
 5. Removes sticky Cinegain targets from WirePlumber's stream-properties.
 
-The standard sink itself is handled by the caller (CLI), which knows whether
-it was running and restarts it with the default parameters.
+The standard sink itself is handled by the caller (CLI): a running one keeps
+running and gets the default parameters pushed live, because restarting it
+pauses browser players (#55).
 """
 import os
 import shutil
@@ -44,8 +46,14 @@ def backup_user_state(backup_root=None, clock=time.time):
     return target
 
 
-def reset_everything(pulse=None, sinks=None, backup=True):
-    """Runs the full reset. Returns a dict describing what was done."""
+def reset_everything(pulse=None, sinks=None, backup=True, keep_sink=None):
+    """
+    Runs the full reset. Returns a dict describing what was done.
+
+    keep_sink names a Cinegain sink that stays running (the standard sink): streams
+    on it stay, streams on other Cinegain sinks move straight to it instead of
+    bouncing through the hardware sink (#55).
+    """
     pulse = pulse or PulseControl()
     report = {"backup": None, "streams_moved": 0, "volumes_restored": 0,
               "files_removed": [], "profiles_stopped": [], "wireplumber_cleaned": False}
@@ -55,12 +63,14 @@ def reset_everything(pulse=None, sinks=None, backup=True):
 
     known = {k for k in AppRegistry().apps}
     sink_ids = pulse.list_sinks()
-    hw = pulse.hardware_sink(sink_ids)
+    keep_alive = keep_sink is not None and keep_sink in sink_ids.values()
+    target = keep_sink if keep_alive else pulse.hardware_sink(sink_ids)
     for st in pulse.list_streams():
         if st.is_own:
             continue
-        if is_cinegain_name(sink_ids.get(st.sink, "")):
-            pulse.move(st.index, hw)
+        name = sink_ids.get(st.sink, "")
+        if is_cinegain_name(name) and not (keep_alive and name == keep_sink):
+            pulse.move(st.index, target)
             report["streams_moved"] += 1
         if make_key(st.app_name or st.node_name, st.binary) in known and (
             st.volume_pct != 100 or st.muted
@@ -78,5 +88,6 @@ def reset_everything(pulse=None, sinks=None, backup=True):
         except FileNotFoundError:
             pass
 
-    report["wireplumber_cleaned"] = clean_wireplumber_targets(paths.WIREPLUMBER_STREAM_PROPS)
+    keep = {keep_sink} if keep_alive else ()
+    report["wireplumber_cleaned"] = clean_wireplumber_targets(paths.WIREPLUMBER_STREAM_PROPS, keep=keep)
     return report
