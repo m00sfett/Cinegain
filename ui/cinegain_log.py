@@ -126,11 +126,32 @@ def pipewire_log_path(profile_id):
     return os.path.join(paths.LOG_DIR, f"pipewire-{profile_id}.log")
 
 
-def tail(path=None, lines=200):
-    """Last lines of the log (for `cinegain log`)."""
+def tail(path=None, lines=200, block=65536):
+    """
+    Last lines of the log (for `cinegain log` and the log tab). Reads blocks from the
+    end of the file instead of the whole file (#39); the result equals
+    readlines()[-lines:] in text mode.
+    """
     path = path or paths.LOG_FILE
+    if lines <= 0:
+        return []
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            return f.readlines()[-lines:]
+        with open(path, "rb") as f:
+            end = f.seek(0, os.SEEK_END)
+            pos, data = end, b""
+            while pos > 0:
+                step = min(block, pos)
+                pos -= step
+                f.seek(pos)
+                data = f.read(step) + data
+                newlines = data.count(b"\n") + data.count(b"\r") - data.count(b"\r\n")
+                if newlines > lines:      # one more than needed: the first line is complete
+                    break
     except OSError:
         return []
+    text = data.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+    parts = text.split("\n")
+    out = [p + "\n" for p in parts[:-1]] + ([parts[-1]] if parts[-1] else [])
+    if pos > 0:
+        out = out[1:]                     # started mid-line
+    return out[-lines:]

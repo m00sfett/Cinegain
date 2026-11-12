@@ -436,6 +436,9 @@ class LogPanel(QWidget):
         except Exception:
             lines = []
         text = "".join(lines) if lines and not isinstance(lines, str) else (lines or "")
+        if text == getattr(self, "_shown", None):
+            return  # nothing new: keep the scroll position and skip the re-layout (#39)
+        self._shown = text
         bar = self.text.verticalScrollBar()
         at_end = bar.value() >= bar.maximum() - 4
         self.text.setPlainText(text)

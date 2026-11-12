@@ -770,6 +770,77 @@ def wireplumber_events(since, runner=subprocess.run):
     return events
 
 
+def _parse_log_line(line):
+    """One log line -> event dict (unfiltered by time and key) or None."""
+    m = _LOG_LINE.match(line.rstrip("\n"))
+    if not m or m.group(2) not in ("cinegain.volume", "cinegain.router"):
+        return None
+    try:
+        ts = time.mktime(time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"))
+    except ValueError:
+        return None
+    msg = m.group(3)
+    for kind, rx in _HIST_PATTERNS:
+        hit = rx.match(msg)  # anchored: names inside a message never count (#42)
+        if not hit:
+            continue
+        ev = {"time": ts, "kind": kind, "key": "", "db": None, "was_db": None, "who": ""}
+        if kind == "lowered":
+            ev.update(key=hit.group(2), db=_f(hit.group(4)), was_db=_f(hit.group(5)),
+                      who="external" if hit.group(6) else "")
+            if ev["was_db"] is not None and ev["db"] is not None and ev["db"] > ev["was_db"]:
+                ev["kind"] = "raised"
+        elif kind == "mixer":
+            ev.update(key=hit.group(2), db=_f(hit.group(4)), was_db=_f(hit.group(5)),
+                      who="external" if hit.group(6) else "")
+        elif kind == "mute":
+            ev.update(kind="muted" if hit.group(4) == "on" else "unmuted", key=hit.group(2),
+                      who="external" if hit.group(5) else "")
+        elif kind == "auto":
+            ev.update(key=hit.group(2), db=0.0, was_db=_f(hit.group(3)), who="auto")
+        elif kind == "set":
+            ev.update(key=hit.group(2), db=_f(hit.group(3)), who=hit.group(4))
+        else:
+            ev.update(who="user")
+        return ev
+    return None
+
+
+def _parse_chunk(data):
+    return [ev for ev in map(_parse_log_line, data.decode("utf-8", errors="replace").splitlines()) if ev]
+
+
+# Parsed events per log file, found again by (device, inode), so a rotated file (the
+# old log under a new name) keeps its cache and only its new tail is read (#39).
+# {base path: {(dev, ino): [parsed offset, events]}}
+_HISTORY_CACHE = {}
+
+
+def _file_events(cache, path):
+    """All events of one log file: the cached ones plus whatever was appended since."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return [], None
+    ident = (st.st_dev, st.st_ino)
+    entry = cache.get(ident)
+    if entry is None or st.st_size < entry[0]:
+        entry = cache[ident] = [0, []]   # new file, or truncated / replaced in place
+    tail = []
+    if st.st_size > entry[0]:
+        try:
+            with open(path, "rb") as f:
+                f.seek(entry[0])
+                data = f.read(st.st_size - entry[0])
+        except OSError:
+            return list(entry[1]), ident
+        done = data.rfind(b"\n") + 1      # a half-written last line is parsed again next time
+        entry[1].extend(_parse_chunk(data[:done]))
+        entry[0] += done
+        tail = _parse_chunk(data[done:])
+    return entry[1] + tail if tail else entry[1], ident
+
+
 def history(log_path=None, days=7, limit=500, key=None, now=None, journal=None):
     """
     Volume events from the debug log (and its rotated files), newest first: dicts
@@ -777,6 +848,8 @@ def history(log_path=None, days=7, limit=500, key=None, now=None, journal=None):
     plus link_failed from WirePlumber's journal), key, db, was_db, who (auto, user,
     cli, external, wireplumber or "" for old lines). The journal is read for the
     real log only (journal=None) or when asked.
+    The files are read incrementally (#39): each call parses only what was appended
+    since the last one; the result equals reading everything again.
     """
     base = log_path or paths.LOG_FILE
     files = [f"{base}.{i}" for i in range(4, 0, -1)] + [base]
@@ -784,48 +857,17 @@ def history(log_path=None, days=7, limit=500, key=None, now=None, journal=None):
     events = []
     if journal if journal is not None else log_path is None:
         events.extend(wireplumber_events(cutoff))
+    cache = _HISTORY_CACHE.setdefault(base, {})
+    seen = set()
     for path in files:
-        try:
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                lines = f.readlines()
-        except OSError:
-            continue
-        for line in lines:
-            m = _LOG_LINE.match(line.rstrip("\n"))
-            if not m:
-                continue
-            try:
-                ts = time.mktime(time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"))
-            except ValueError:
-                continue
-            if ts < cutoff or m.group(2) not in ("cinegain.volume", "cinegain.router"):
-                continue
-            msg = m.group(3)
-            for kind, rx in _HIST_PATTERNS:
-                hit = rx.match(msg)  # anchored: names inside a message never count (#42)
-                if not hit:
-                    continue
-                ev = {"time": ts, "kind": kind, "key": "", "db": None, "was_db": None, "who": ""}
-                if kind == "lowered":
-                    ev.update(key=hit.group(2), db=_f(hit.group(4)), was_db=_f(hit.group(5)),
-                              who="external" if hit.group(6) else "")
-                    if ev["was_db"] is not None and ev["db"] is not None and ev["db"] > ev["was_db"]:
-                        ev["kind"] = "raised"
-                elif kind == "mixer":
-                    ev.update(key=hit.group(2), db=_f(hit.group(4)), was_db=_f(hit.group(5)),
-                              who="external" if hit.group(6) else "")
-                elif kind == "mute":
-                    ev.update(kind="muted" if hit.group(4) == "on" else "unmuted", key=hit.group(2),
-                              who="external" if hit.group(5) else "")
-                elif kind == "auto":
-                    ev.update(key=hit.group(2), db=0.0, was_db=_f(hit.group(3)), who="auto")
-                elif kind == "set":
-                    ev.update(key=hit.group(2), db=_f(hit.group(3)), who=hit.group(4))
-                else:
-                    ev.update(who="user")
-                if key is None or ev["key"] == key or kind == "full_reset":
-                    events.append(ev)
-                break
+        file_events, ident = _file_events(cache, path)
+        if ident is not None:
+            seen.add(ident)
+        for ev in file_events:
+            if ev["time"] >= cutoff and (key is None or ev["key"] == key or ev["kind"] == "full_reset"):
+                events.append(dict(ev))
+    for ident in [i for i in cache if i not in seen]:
+        del cache[ident]                 # deleted or rotated out
     events.sort(key=lambda e: e["time"], reverse=True)
     return events[:limit]
 

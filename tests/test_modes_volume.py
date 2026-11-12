@@ -935,5 +935,132 @@ class TestSetHidden(unittest.TestCase):
         del app
 
 
+class TestHistoryIncremental(unittest.TestCase):
+    """#39: history() and the log tail read only what is new, with the same result as reading everything."""
+
+    def setUp(self):
+        import time as _t
+        import cinegain_volume as vol
+        self.vol, self._t = vol, _t
+        self.now = _t.time()
+        self.dir = tempfile.mkdtemp(prefix="cinegain-hist-")
+        self.log = os.path.join(self.dir, "cinegain.log")
+        self.n = 0
+        self.parsed = 0
+        self._orig = vol._parse_chunk
+
+        def counting(data):
+            self.parsed += len(data)
+            return self._orig(data)
+        vol._parse_chunk = counting
+        vol._HISTORY_CACHE.clear()
+
+    def tearDown(self):
+        self.vol._parse_chunk = self._orig
+        self.vol._HISTORY_CACHE.clear()
+
+    def line(self, db=-6.0, node=3):
+        self.n += 1
+        stamp = self._t.strftime("%Y-%m-%d %H:%M:%S", self._t.localtime(self.now - 600 + self.n))
+        return (f"{stamp}.001 1 gui WARNING cinegain.volume: hidden volume of node {node} (chrome, Chrome) is "
+                f"0.5 = {db - self.n / 10:.1f} dB (was 0.0 dB) [external]\n")
+
+    def noise(self):
+        return "garbage that is no log line\n"
+
+    def write(self, path, lines, mode="a"):
+        with open(path, mode, encoding="utf-8") as f:
+            f.write("".join(lines))
+
+    def full(self, **kw):
+        """The reference: every file read completely, every call."""
+        vol = self.vol
+        events = []
+        base = self.log
+        for path in [f"{base}.{i}" for i in range(4, 0, -1)] + [base]:
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    lines = f.readlines()
+            except OSError:
+                continue
+            events += [e for e in map(vol._parse_log_line, lines) if e]
+        cutoff = self.now - 7 * 86400
+        key = kw.get("key")
+        events = [e for e in events if e["time"] >= cutoff and (key is None or e["key"] == key
+                                                                 or e["kind"] == "full_reset")]
+        events.sort(key=lambda e: e["time"], reverse=True)
+        return events[:500]
+
+    def inc(self, **kw):
+        return self.vol.history(self.log, now=self.now, journal=False, **kw)
+
+    def test_appended_lines_are_the_only_ones_parsed(self):
+        self.write(self.log, [self.line() for _ in range(50)] + [self.noise()])
+        self.assertEqual(self.inc(), self.full())
+        first = self.parsed
+        self.assertGreater(first, 0)
+        self.assertEqual(self.inc(), self.full())
+        self.assertEqual(self.parsed, first)                  # unchanged file: nothing parsed again
+        self.write(self.log, [self.line(), self.line(node=4)])
+        self.assertEqual(self.inc(), self.full())
+        self.assertEqual(self.inc(key="chrome"), self.full(key="chrome"))
+        self.assertLess(self.parsed - first, 600)             # only the two new lines, not 50 again
+
+    def test_half_written_last_line_is_seen_and_completed_later(self):
+        whole = self.line()
+        self.write(self.log, [self.line(), whole[:60]])
+        self.assertEqual(self.inc(), self.full())
+        self.write(self.log, [whole[60:], self.line()])
+        self.assertEqual(self.inc(), self.full())
+        self.assertEqual(len(self.inc()), 3)
+
+    def test_rotation_keeps_the_events_and_parses_the_old_file_once(self):
+        self.write(self.log, [self.line() for _ in range(30)])
+        self.inc()
+        self.write(self.log, [self.line()])                   # arrives before the rotation, not yet read
+        os.rename(self.log, self.log + ".1")
+        self.write(self.log, [self.line() for _ in range(3)], mode="w")
+        before = self.parsed
+        self.assertEqual(self.inc(), self.full())
+        self.assertEqual(len(self.inc()), 34)
+        self.assertLess(self.parsed - before, 1000)           # the one late line plus the three new ones
+        os.rename(self.log + ".1", self.log + ".2")           # a second rotation shifts it again
+        self.assertEqual(self.inc(), self.full())
+        os.unlink(self.log + ".2")                            # rotated out: its events are gone
+        self.assertEqual(self.inc(), self.full())
+        self.assertEqual(len(self.inc()), 3)
+
+    def test_truncated_or_replaced_log_is_read_again(self):
+        self.write(self.log, [self.line() for _ in range(20)])
+        self.inc()
+        self.write(self.log, [self.line()], mode="w")         # truncated in place
+        self.assertEqual(self.inc(), self.full())
+        self.assertEqual(len(self.inc()), 1)
+        os.unlink(self.log)
+        self.assertEqual(self.inc(), [])
+
+    def test_returned_events_are_copies(self):
+        self.write(self.log, [self.line()])
+        self.inc()[0]["key"] = "tampered"
+        self.assertEqual(self.inc()[0]["key"], "chrome")
+
+    def test_tail_equals_readlines_tail(self):
+        import cinegain_log
+        text = "".join(f"line {i} ä€ {'x' * (i % 7)}\n" for i in range(3000)) + "last without newline"
+        self.write(self.log, [text], mode="w")
+        for lines in (1, 5, 400, 2999, 3001, 5000):
+            for block in (64, 4096, 65536):
+                with open(self.log, "r", encoding="utf-8") as f:
+                    expected = f.readlines()[-lines:]
+                self.assertEqual(cinegain_log.tail(self.log, lines=lines, block=block), expected, (lines, block))
+        self.write(self.log, ["a\r\nb\rc\n", "d\n"], mode="w")
+        with open(self.log, "r", encoding="utf-8") as f:
+            expected = f.readlines()
+        self.assertEqual(cinegain_log.tail(self.log, lines=10, block=2), expected)
+        self.assertEqual(cinegain_log.tail(self.log + ".missing"), [])
+        self.write(self.log, [], mode="w")
+        self.assertEqual(cinegain_log.tail(self.log), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
