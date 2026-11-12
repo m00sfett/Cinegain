@@ -506,6 +506,7 @@ class TestRouterVolume(tr.Base):
     def test_stream_is_ducked_before_it_moves_and_fades_in_on_the_new_sink(self):
         """#40.1: a stream moved onto a sink that is already boosted fades in instead of jumping."""
         from cinegain_volume import DUCK_VOLUME
+        modes.save_standard("fixed", {"fixed": {"input_db": 9.0}})
         self.stream(1, "Spotify", "spotify", node_id=41)
         self.volumes.nodes[41] = NodeVolume(41, "Spotify", "spotify", "Spotify", 1.0)
         events = self._record_order()
@@ -520,6 +521,23 @@ class TestRouterVolume(tr.Base):
         writes = [e[2] for e in events if e[0] == "set"]
         self.assertLessEqual(rises(writes[1:], writes[0]), MAX_STEP_DB + 1e-3)  # writes are rounded
         self.assertGreaterEqual(len(writes), 30)  # about 3 s at 100 ms steps, not a jump
+
+    def test_neutral_sink_move_does_not_duck(self):
+        """#61: moving to a 0 dB sink (or back to hardware from >= 0 dB) must not duck to -30.5 dB."""
+        modes.save_standard("fixed", {"fixed": {"input_db": 0.0}})
+        self.stream(1, "Spotify", "spotify", node_id=41)
+        self.volumes.nodes[41] = NodeVolume(41, "Spotify", "spotify", "Spotify", 1.0)
+        events = self._record_order()
+        self.router.tick()
+        self.assertEqual(events, [("move", "1")])
+        self.assertEqual(self.volumes.nodes[41].volume, 1.0)
+        self.assertNotIn(41, self.router.guard.fades)
+        # Returning to hardware from a 0 dB sink also must not duck.
+        events.clear()
+        self.registry.set_enabled("spotify::spotify", False)
+        self.router.tick()
+        self.assertEqual(events, [("move", "1")])
+        self.assertEqual(self.volumes.nodes[41].volume, 1.0)
 
     def test_duck_never_raises_a_quieter_stream_and_streams_without_node_id_still_move(self):
         self.stream(1, "Chromium", "ChatGPT", node_id=42)
