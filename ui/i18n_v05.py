@@ -1,5 +1,5 @@
 """
-Strings added in 0.5.0: view levels, overdrive, step buttons, analysis view.
+Strings added in 0.5.0: view levels, overdrive, step buttons, analysis view (0.5.2: more timeline events).
 Merged into i18n.TRANSLATIONS after the older tables; keys here override older
 values of the same name (subtitle and volume tooltip got the new scale).
 """
@@ -23,6 +23,9 @@ KEYS = (
     "analysis_ev_lowered", "analysis_ev_auto", "analysis_ev_set", "analysis_ev_full_reset",
     "analysis_by_auto", "analysis_by_user", "analysis_by_unknown",
     "log_title", "log_refresh",
+    # 0.5.2 (#44): more timeline events
+    "analysis_ev_raised", "analysis_ev_mixer", "analysis_ev_muted", "analysis_ev_unmuted",
+    "analysis_ev_link_failed", "analysis_by_external",
 )
 
 _TEXTS = {
@@ -63,6 +66,8 @@ _TEXTS = {
         "lowered to {db} (was {was})", "faded back from {db} to 0 dB", "set to {db}", "full volume reset",
         "automatic", "you", "unknown",
         "Debug log · {path}", "Refresh",
+        "raised to {db} (was {was})", "mixer {db} (was {was})",
+        "muted", "unmuted", "WirePlumber: link failed", "external",
     ),
     "de": (
         "Lauter als das System erlaubt, plus versteckte Lautstärken im Blick · Tasten: ↑↓ wählen, ←→ 1 dB (Shift 0,1 · Strg 5)",
@@ -102,6 +107,8 @@ _TEXTS = {
         "Lautstärke voll zurückgesetzt",
         "automatisch", "du", "unbekannt",
         "Debug-Log · {path}", "Aktualisieren",
+        "angehoben auf {db} (vorher {was})", "Mixer {db} (vorher {was})",
+        "stummgeschaltet", "Stumm aufgehoben", "WirePlumber: Verbindung fehlgeschlagen", "extern",
     ),
     "es": (
         "Más alto de lo que permite el sistema, y los volúmenes ocultos a la vista · Teclas: ↑↓ elegir, ←→ 1 dB (Shift 0,1 · Ctrl 5)",
@@ -140,6 +147,8 @@ _TEXTS = {
         "bajado a {db} (antes {was})", "devuelto de {db} a 0 dB", "ajustado a {db}", "restablecimiento completo",
         "automático", "tú", "desconocido",
         "Registro · {path}", "Actualizar",
+        "subido a {db} (antes {was})", "mezclador {db} (antes {was})",
+        "silenciado", "sonido activado", "WirePlumber: falló la conexión", "externo",
     ),
     "fr": (
         "Plus fort que le système ne le permet, et les volumes cachés en vue · Touches : ↑↓ choisir, ←→ 1 dB (Shift 0,1 · Ctrl 5)",
@@ -178,6 +187,8 @@ _TEXTS = {
         "baissé à {db} (avant {was})", "ramené de {db} à 0 dB", "réglé à {db}", "réinitialisation complète",
         "automatique", "vous", "inconnu",
         "Journal · {path}", "Actualiser",
+        "monté à {db} (avant {was})", "mixeur {db} (avant {was})",
+        "coupé", "son rétabli", "WirePlumber : échec de liaison", "externe",
     ),
     "it": (
         "Più forte di quanto permetta il sistema, e i volumi nascosti in vista · Tasti: ↑↓ scegli, ←→ 1 dB (Shift 0,1 · Ctrl 5)",
@@ -216,6 +227,8 @@ _TEXTS = {
         "abbassato a {db} (prima {was})", "riportato da {db} a 0 dB", "impostato a {db}", "ripristino completo",
         "automatico", "tu", "sconosciuto",
         "Log · {path}", "Aggiorna",
+        "alzato a {db} (prima {was})", "mixer {db} (prima {was})",
+        "silenziato", "audio riattivato", "WirePlumber: collegamento non riuscito", "esterno",
     ),
     "pt": (
         "Mais alto do que o sistema permite, e os volumes ocultos à vista · Teclas: ↑↓ escolher, ←→ 1 dB (Shift 0,1 · Ctrl 5)",
@@ -254,6 +267,8 @@ _TEXTS = {
         "baixado para {db} (antes {was})", "trazido de {db} para 0 dB", "ajustado para {db}", "redefinição completa",
         "automático", "você", "desconhecido",
         "Log · {path}", "Atualizar",
+        "aumentado para {db} (antes {was})", "mixer {db} (antes {was})",
+        "silenciado", "som reativado", "WirePlumber: falha na ligação", "externo",
     ),
     "nl": (
         "Luider dan het systeem toestaat, en verborgen volumes in beeld · Toetsen: ↑↓ kiezen, ←→ 1 dB (Shift 0,1 · Ctrl 5)",
@@ -292,6 +307,8 @@ _TEXTS = {
         "verlaagd naar {db} (was {was})", "van {db} terug naar 0 dB", "ingesteld op {db}", "volume volledig teruggezet",
         "automatisch", "jij", "onbekend",
         "Debuglog · {path}", "Vernieuwen",
+        "verhoogd naar {db} (was {was})", "mixer {db} (was {was})",
+        "gedempt", "dempen opgeheven", "WirePlumber: koppeling mislukt", "extern",
     ),
     "pl": (
         "Głośniej, niż pozwala system, i ukryte głośności na widoku · Klawisze: ↑↓ wybór, ←→ 1 dB (Shift 0,1 · Ctrl 5)",
@@ -330,6 +347,8 @@ _TEXTS = {
         "ściszono do {db} (wcześniej {was})", "przywrócono z {db} do 0 dB", "ustawiono na {db}", "pełny reset głośności",
         "automatycznie", "ty", "nieznany",
         "Dziennik · {path}", "Odśwież",
+        "podgłośniono do {db} (wcześniej {was})", "mikser {db} (wcześniej {was})",
+        "wyciszono", "wyłączono wyciszenie", "WirePlumber: połączenie nieudane", "zewnętrznie",
     ),
     "ru": (
         "Громче, чем позволяет система, и скрытая громкость на виду · Клавиши: ↑↓ выбор, ←→ 1 дБ (Shift 0,1 · Ctrl 5)",
@@ -368,6 +387,8 @@ _TEXTS = {
         "снижено до {db} (было {was})", "возвращено с {db} до 0 дБ", "задано {db}", "полный сброс громкости",
         "автоматически", "вы", "неизвестно",
         "Журнал · {path}", "Обновить",
+        "повышено до {db} (было {was})", "микшер {db} (было {was})",
+        "звук выключен", "звук включён", "WirePlumber: ошибка соединения", "извне",
     ),
     "tr": (
         "Sistemin izin verdiğinden daha yüksek, gizli ses seviyeleri de görünür · Tuşlar: ↑↓ seç, ←→ 1 dB (Shift 0,1 · Ctrl 5)",
@@ -406,6 +427,8 @@ _TEXTS = {
         "{db} seviyesine kısıldı (önce {was})", "{db} seviyesinden 0 dB'ye döndürüldü", "{db} olarak ayarlandı", "tam ses sıfırlama",
         "otomatik", "siz", "bilinmiyor",
         "Günlük · {path}", "Yenile",
+        "{db} seviyesine yükseltildi (önce {was})", "mikser {db} (önce {was})",
+        "sessize alındı", "ses açıldı", "WirePlumber: bağlantı başarısız", "harici",
     ),
     "uk": (
         "Гучніше, ніж дозволяє система, і прихована гучність на виду · Клавіші: ↑↓ вибір, ←→ 1 дБ (Shift 0,1 · Ctrl 5)",
@@ -444,6 +467,8 @@ _TEXTS = {
         "знижено до {db} (було {was})", "повернуто з {db} до 0 дБ", "задано {db}", "повне скидання гучності",
         "автоматично", "ви", "невідомо",
         "Журнал · {path}", "Оновити",
+        "підвищено до {db} (було {was})", "мікшер {db} (було {was})",
+        "звук вимкнено", "звук увімкнено", "WirePlumber: помилка з'єднання", "ззовні",
     ),
     "ar": (
         "أعلى مما يسمح به النظام، مع إظهار مستويات الصوت المخفية · المفاتيح: ↑↓ اختيار، ←→ 1 ديسيبل (Shift 0.1 · Ctrl 5)",
@@ -482,6 +507,8 @@ _TEXTS = {
         "خُفّض إلى {db} (كان {was})", "أُعيد من {db} إلى 0 ديسيبل", "ضُبط على {db}", "إعادة تعيين كاملة للصوت",
         "تلقائي", "أنت", "غير معروف",
         "سجل التصحيح · {path}", "تحديث",
+        "رُفع إلى {db} (كان {was})", "المازج {db} (كان {was})",
+        "كُتم الصوت", "أُلغي الكتم", "WirePlumber: فشل الربط", "خارجي",
     ),
     "hi": (
         "सिस्टम की सीमा से ज़्यादा तेज़, और छिपे वॉल्यूम सामने · कुंजियाँ: ↑↓ चुनें, ←→ 1 dB (Shift 0.1 · Ctrl 5)",
@@ -520,6 +547,8 @@ _TEXTS = {
         "{db} तक घटाया गया (पहले {was})", "{db} से 0 dB पर लौटाया गया", "{db} पर सेट", "पूरा वॉल्यूम रीसेट",
         "स्वचालित", "आप", "अज्ञात",
         "डीबग लॉग · {path}", "रीफ़्रेश",
+        "{db} तक बढ़ाया गया (पहले {was})", "मिक्सर {db} (पहले {was})",
+        "म्यूट किया गया", "म्यूट हटाया गया", "WirePlumber: लिंक विफल", "बाहरी",
     ),
     "id": (
         "Lebih keras dari batas sistem, plus volume tersembunyi terlihat jelas · Tombol: ↑↓ pilih, ←→ 1 dB (Shift 0,1 · Ctrl 5)",
@@ -558,6 +587,8 @@ _TEXTS = {
         "diturunkan ke {db} (sebelumnya {was})", "dikembalikan dari {db} ke 0 dB", "diatur ke {db}", "reset volume penuh",
         "otomatis", "kamu", "tidak diketahui",
         "Log debug · {path}", "Segarkan",
+        "dinaikkan ke {db} (sebelumnya {was})", "mixer {db} (sebelumnya {was})",
+        "dibisukan", "bisu dimatikan", "WirePlumber: tautan gagal", "eksternal",
     ),
     "ja": (
         "システムの上限より大きく、隠れた音量も見える · キー: ↑↓ 選択, ←→ 1 dB (Shift 0.1 · Ctrl 5)",
@@ -596,6 +627,8 @@ _TEXTS = {
         "{db} に下げられた (前 {was})", "{db} から 0 dB に戻した", "{db} に設定", "音量の完全リセット",
         "自動", "あなた", "不明",
         "デバッグログ · {path}", "更新",
+        "{db} に上げられた (前 {was})", "ミキサー {db} (前 {was})",
+        "ミュート", "ミュート解除", "WirePlumber: リンク失敗", "外部",
     ),
     "ko": (
         "시스템 한계보다 크게, 숨은 볼륨도 한눈에 · 키: ↑↓ 선택, ←→ 1 dB (Shift 0.1 · Ctrl 5)",
@@ -634,6 +667,8 @@ _TEXTS = {
         "{db}(으)로 낮아짐 (이전 {was})", "{db}에서 0 dB로 복원", "{db}(으)로 설정", "볼륨 전체 초기화",
         "자동", "사용자", "알 수 없음",
         "디버그 로그 · {path}", "새로 고침",
+        "{db}(으)로 높아짐 (이전 {was})", "믹서 {db} (이전 {was})",
+        "음소거됨", "음소거 해제", "WirePlumber: 연결 실패", "외부",
     ),
     "vi": (
         "To hơn mức hệ thống cho phép, và âm lượng ẩn hiện rõ · Phím: ↑↓ chọn, ←→ 1 dB (Shift 0,1 · Ctrl 5)",
@@ -672,6 +707,8 @@ _TEXTS = {
         "bị giảm xuống {db} (trước {was})", "đưa từ {db} về 0 dB", "đặt thành {db}", "đặt lại âm lượng hoàn toàn",
         "tự động", "bạn", "không rõ",
         "Nhật ký gỡ lỗi · {path}", "Làm mới",
+        "được tăng lên {db} (trước {was})", "bộ trộn {db} (trước {was})",
+        "đã tắt tiếng", "đã bật tiếng", "WirePlumber: liên kết thất bại", "bên ngoài",
     ),
     "zh-CN": (
         "比系统允许的更响，隐藏音量一目了然 · 按键: ↑↓ 选择, ←→ 1 dB (Shift 0.1 · Ctrl 5)",
@@ -710,6 +747,8 @@ _TEXTS = {
         "被调低到 {db} (之前 {was})", "从 {db} 恢复到 0 dB", "设置为 {db}", "完全重置音量",
         "自动", "您", "未知",
         "调试日志 · {path}", "刷新",
+        "被调高到 {db} (之前 {was})", "混音器 {db} (之前 {was})",
+        "已静音", "已取消静音", "WirePlumber: 连接失败", "外部",
     ),
     "zh-TW": (
         "比系統允許的更響，隱藏音量一目瞭然 · 按鍵: ↑↓ 選擇, ←→ 1 dB (Shift 0.1 · Ctrl 5)",
@@ -748,6 +787,8 @@ _TEXTS = {
         "被調低到 {db} (之前 {was})", "從 {db} 恢復到 0 dB", "設定為 {db}", "完全重設音量",
         "自動", "您", "未知",
         "除錯日誌 · {path}", "重新整理",
+        "被調高到 {db} (之前 {was})", "混音器 {db} (之前 {was})",
+        "已靜音", "已取消靜音", "WirePlumber: 連接失敗", "外部",
     ),
 }
 

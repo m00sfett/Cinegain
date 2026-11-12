@@ -357,9 +357,17 @@ class AnalysisPanel(QWidget):
         for i, ev in enumerate(events):
             when = time.strftime("%d.%m. %H:%M:%S", time.localtime(ev["time"]))
             name = labels.get(ev["key"], ev["key"]) or "—"
+            was = _fmt_db(ev["was_db"]) if ev["was_db"] is not None else "?"
             if ev["kind"] == "lowered":
-                text = t("analysis_ev_lowered", db=_fmt_db(ev["db"]),
-                         was=_fmt_db(ev["was_db"]) if ev["was_db"] is not None else "?")
+                text = t("analysis_ev_lowered", db=_fmt_db(ev["db"]), was=was)
+            elif ev["kind"] == "raised":
+                text = t("analysis_ev_raised", db=_fmt_db(ev["db"]), was=was)
+            elif ev["kind"] == "mixer":
+                text = t("analysis_ev_mixer", db=_fmt_db(ev["db"]), was=was)
+            elif ev["kind"] in ("muted", "unmuted"):
+                text = t(f"analysis_ev_{ev['kind']}")
+            elif ev["kind"] == "link_failed":
+                text = t("analysis_ev_link_failed")
             elif ev["kind"] == "auto":
                 text = t("analysis_ev_auto", db=_fmt_db(ev["was_db"]))
             elif ev["kind"] == "set":
@@ -367,6 +375,7 @@ class AnalysisPanel(QWidget):
             else:
                 text = t("analysis_ev_full_reset")
             who = {"auto": t("analysis_by_auto"), "user": t("analysis_by_user"), "cli": "CLI",
+                   "external": t("analysis_by_external"), "wireplumber": "WirePlumber",
                    "": t("analysis_by_unknown")}.get(ev["who"], ev["who"])
             for c, value in enumerate((when, name, text, who)):
                 item = QTableWidgetItem(value)

@@ -148,6 +148,72 @@ def scan_nodes():
         return []
 
 
+# -- who changed it? (#44) -----------------------------------------------------------
+# Every hidden-volume write of this process is remembered for a few seconds, so the
+# guard can tell its own (and the analysis view's) changes from external ones.
+OWN_WRITE_S = 3.0
+LOG_DEBOUNCE_S = 2.0    # at most one log line per node and level within this time
+_own_writes = {}        # node id -> [(monotonic time, linear value), ...]
+
+
+def note_own_write(node_id, value):
+    now = time.monotonic()
+    writes = [w for w in _own_writes.get(node_id, ()) if now - w[0] <= OWN_WRITE_S][-50:]
+    writes.append((now, float(value)))
+    _own_writes[node_id] = writes
+
+
+def is_own_write(node_id, value):
+    """True if this process wrote (about) this value to the node within OWN_WRITE_S."""
+    now = time.monotonic()
+    db = to_db(value)
+    return any(now - t <= OWN_WRITE_S and abs(to_db(v) - db) < 0.05 for t, v in _own_writes.get(node_id, ()))
+
+
+class ChangeLog:
+    """
+    Debounced change logging per subject (node and level): the first change after a
+    quiet phase is logged at once, further ones within LOG_DEBOUNCE_S are merged into
+    one line with the last logged and the latest value (#44). Both directions count.
+    """
+
+    def __init__(self, debounce=LOG_DEBOUNCE_S):
+        self.debounce = debounce
+        self.state = {}  # subject -> [logged value, time of the last line, pending emit or None]
+
+    def known(self, subject):
+        return subject in self.state
+
+    def sync(self, subject, value):
+        """Takes over a value without a line (first sight, or a change Cinegain logged itself)."""
+        st = self.state.setdefault(subject, [value, float("-inf"), None])
+        st[0], st[2] = value, None
+
+    def observe(self, subject, value, now, emit):
+        st = self.state.get(subject)
+        if st is None:
+            self.sync(subject, value)
+            return
+        if value == st[0]:
+            st[2] = None
+        elif now - st[1] >= self.debounce:
+            emit(st[0], value)
+            st[0], st[1], st[2] = value, now, None
+        else:
+            st[2] = (value, emit)
+
+    def flush(self, now):
+        for st in self.state.values():
+            if st[2] is not None and now - st[1] >= self.debounce:
+                value, emit = st[2]
+                emit(st[0], value)
+                st[0], st[1], st[2] = value, now, None
+
+    def forget(self, keep):
+        for subject in [s for s in self.state if s[0] not in keep]:
+            self.state.pop(subject, None)
+
+
 def set_node_volume(node_id, value):
     try:
         res = subprocess.run(["pw-cli", "s", str(node_id), "Props", json.dumps({"volume": float(value)})],
@@ -158,6 +224,7 @@ def set_node_volume(node_id, value):
     if res.returncode != 0:
         log.warning("setting hidden volume of node %s failed: %s", node_id, (res.stderr or "").strip())
         return False
+    note_own_write(node_id, value)
     return True
 
 
@@ -188,6 +255,7 @@ class VolumeGuard:
         self._last = {}      # node id -> last seen or written hidden volume
         self.nodes = []      # playback streams of the last scan
         self.sinks = []      # sinks of the last scan (hardware and Cinegain)
+        self.changes = ChangeLog()
 
     def known_volume(self, node_id, current=None):
         """
@@ -215,19 +283,19 @@ class VolumeGuard:
         if target <= start * 1.0001:
             ok = self.setter(node_id, target)
             if ok:
-                self._last[node_id] = target
+                self._wrote(node_id, target)
             return ok
         if apply_start:
             if not self.setter(node_id, start):
                 return False
-            self._last[node_id] = start
+            self._wrote(node_id, start)
         target_db = 0.0 if target >= 1.0 else to_db(target)
 
         def apply(db, final, node_id=node_id, target=target):
             value = target if final else from_db(db)
             ok = self.setter(node_id, value)
             if ok:
-                self._last[node_id] = value
+                self._wrote(node_id, value)
             return ok
 
         self.fades[node_id] = Fade(to_db(start), target_db, now, apply, what or f"node {node_id}")
@@ -284,14 +352,12 @@ class VolumeGuard:
         self.sinks = [n for n in scanned if n.is_sink]
         hidden = {}
         seen = set()
+        try:
+            self._log_changes(scanned, now)
+        except Exception:
+            log.exception("volume change log failed")
         for n in self.nodes:
             seen.add(n.id)
-            last = self._last.get(n.id)
-            if last is None or abs(last - n.volume) > 1e-4:
-                if n.volume < HIDDEN_EPS and n.id not in self.fades:
-                    log.warning("hidden volume of node %s (%s, %s) is %.6f = %.1f dB%s", n.id, n.key,
-                                n.node_name, n.volume, n.db,
-                                "" if last is None else f" (was {to_db(last):.1f} dB)")
             if n.id not in self.fades:
                 self._last[n.id] = n.volume
             if n.volume >= HIDDEN_EPS or n.id in self.fades:
@@ -320,6 +386,8 @@ class VolumeGuard:
                     self.fades.pop(key, None)
                 if final and ok:
                     log.info("%s at %.1f dB (fade done)", fade.what, fade.target_db)
+                    if isinstance(key, tuple) and key[0] == "mixer" and isinstance(key[1], int):
+                        self.note_mixer(key[1], from_db(fade.target_db))
 
     def run_fades(self, sleep=time.sleep, interval=0.05):
         """Blocking: steps until every fade is done (one-shot CLI use without a GUI timer)."""
@@ -331,9 +399,64 @@ class VolumeGuard:
     def reset_now(self, node_id):
         self.fades.pop(node_id, None)
         if self.setter(node_id, 1.0):
-            self._last[node_id] = 1.0
+            self._wrote(node_id, 1.0)
             return True
         return False
+
+    def _wrote(self, node_id, value):
+        self._last[node_id] = value
+        note_own_write(node_id, value)
+        self.changes.sync((node_id, "hidden"), round(to_db(value), 1))
+
+    def note_mixer(self, node_id, linear):
+        """A mixer volume Cinegain set itself (logged where it was done)."""
+        self.changes.sync((node_id, "mixer"), round(to_db(linear), 1))
+
+    # -- change log (#44) ------------------------------------------------------
+    def _log_changes(self, scanned, now):
+        """
+        Logs every change of the hidden volume, the mixer volume and mute of streams
+        and sinks, both directions, at most once per LOG_DEBOUNCE_S and node/level.
+        Changes Cinegain made are logged where they are made; what is left here is
+        external (WirePlumber, a mixer, the program itself).
+        """
+        for n in scanned:
+            what = f"{n.id} ({n.key}, {n.node_name})"
+            hidden = (n.id, "hidden")
+            if n.id in self.fades:
+                pass  # Cinegain is fading it; the fade logs start and end
+            elif not self.changes.known(hidden):
+                self.changes.sync(hidden, round(n.db, 1))
+                if n.volume < HIDDEN_EPS:
+                    log.warning("hidden volume of node %s is %.6f = %.1f dB", what, n.volume, n.db)
+            elif is_own_write(n.id, n.volume):
+                self.changes.sync(hidden, round(n.db, 1))
+            else:
+                self.changes.observe(hidden, round(n.db, 1), now, lambda was, db, what=what, v=n.volume: (
+                    log.warning if db < was else log.info)(
+                    "hidden volume of node %s is %.6f = %.1f dB (was %.1f dB) [external]", what, v, db, was))
+            mixer = (n.id, "mixer")
+            mdb = round(to_db(n.mixer), 1)
+            if ("mixer", n.id) in self.fades:
+                pass
+            elif not self.changes.known(mixer):
+                self.changes.sync(mixer, mdb)
+                if n.is_sink and n.mixer < HIDDEN_EPS:
+                    log.info("mixer volume of node %s is %.1f dB = %.0f %%", what, mdb, mixer_pct(mdb))
+            else:
+                self.changes.observe(mixer, mdb, now, lambda was, db, what=what: log.info(
+                    "mixer volume of node %s is %.1f dB = %.0f %% (was %.1f dB) [external]",
+                    what, db, mixer_pct(db), was))
+            mute = (n.id, "mute")
+            if not self.changes.known(mute):
+                self.changes.sync(mute, n.mute)
+                if n.is_sink and n.mute:
+                    log.info("mute of node %s is on", what)
+            else:
+                self.changes.observe(mute, n.mute, now, lambda was, on, what=what: log.info(
+                    "mute of node %s is %s (was %s) [external]", what, "on" if on else "off", "on" if was else "off"))
+        self.changes.flush(now)
+        self.changes.forget({n.id for n in scanned})
 
 
 def _is_cinegain_sink_entry(line):
@@ -607,8 +730,14 @@ def set_hidden(node_id, fraction, label="", who="user", current=None, guard=None
     return ok
 
 
+_DB = r"(-?[0-9.]+|-inf)"
 _HIST_PATTERNS = (
-    ("lowered", re.compile(r"hidden volume of node (\d+) \(([^,]*), ([^)]*)\) is [0-9.]+ = (-?[0-9.]+|-inf) dB(?: \(was (-?[0-9.]+) dB\))?")),
+    ("lowered", re.compile(r"hidden volume of node (\d+) \(([^,]*), ([^)]*)\) is [0-9.]+ = " + _DB
+                           + r" dB(?: \(was " + _DB + r" dB\))?( \[external\])?")),
+    ("mixer", re.compile(r"mixer volume of node (\d+) \(([^,]*), ([^)]*)\) is " + _DB
+                         + r" dB = [0-9]+ %(?: \(was " + _DB + r" dB\))?( \[external\])?")),
+    ("mute", re.compile(r"mute of node (\d+) \(([^,]*), ([^)]*)\) is (on|off)(?: \(was (?:on|off)\))?"
+                        r"( \[external\])?")),
     ("auto", re.compile(r"fading node (\d+) \(([^)]*)\) from (-?[0-9.]+) dB")),
     ("set", re.compile(r"hidden volume of node (\d+) \(([^)]*)\) set to [0-9.]+ = (-?[0-9.]+|-inf) dB by (\w+)")),
     ("full_reset", re.compile(r"full volume reset done")),
@@ -616,15 +745,45 @@ _HIST_PATTERNS = (
 _LOG_LINE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)[.,]\d+ \d+ \S+ \S+\s+(\S+): (.*)$")
 
 
-def history(log_path=None, days=7, limit=500, key=None, now=None):
+def wireplumber_events(since, runner=subprocess.run):
     """
-    Hidden-volume events from the debug log (and its rotated files), newest first:
-    dicts with time (epoch), kind (lowered/auto/set/full_reset), key, db, was_db, who.
+    "link failed" errors of WirePlumber from the user journal since `since` (epoch),
+    as timeline events (#44). One cheap journalctl call (the unit logs a few lines a
+    day); empty if the journal is not readable.
+    """
+    try:
+        res = runner(["journalctl", "--user", "-u", "wireplumber", "--since", f"@{int(since)}",
+                      "-o", "json", "--no-pager", "-q"], capture_output=True, text=True, timeout=3)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    events = []
+    for line in (res.stdout or "").splitlines():
+        try:
+            obj = json.loads(line)
+            msg = obj.get("MESSAGE")
+            ts = int(obj.get("__REALTIME_TIMESTAMP")) / 1e6
+        except (ValueError, TypeError):
+            continue
+        if isinstance(msg, str) and "link failed" in msg:
+            events.append({"time": ts, "kind": "link_failed", "key": "", "db": None, "was_db": None,
+                           "who": "wireplumber"})
+    return events
+
+
+def history(log_path=None, days=7, limit=500, key=None, now=None, journal=None):
+    """
+    Volume events from the debug log (and its rotated files), newest first: dicts
+    with time (epoch), kind (lowered/raised/mixer/muted/unmuted/auto/set/full_reset,
+    plus link_failed from WirePlumber's journal), key, db, was_db, who (auto, user,
+    cli, external, wireplumber or "" for old lines). The journal is read for the
+    real log only (journal=None) or when asked.
     """
     base = log_path or paths.LOG_FILE
     files = [f"{base}.{i}" for i in range(4, 0, -1)] + [base]
     cutoff = (now or time.time()) - days * 86400
     events = []
+    if journal if journal is not None else log_path is None:
+        events.extend(wireplumber_events(cutoff))
     for path in files:
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as f:
@@ -648,7 +807,16 @@ def history(log_path=None, days=7, limit=500, key=None, now=None):
                     continue
                 ev = {"time": ts, "kind": kind, "key": "", "db": None, "was_db": None, "who": ""}
                 if kind == "lowered":
-                    ev.update(key=hit.group(2), db=_f(hit.group(4)), was_db=_f(hit.group(5)))
+                    ev.update(key=hit.group(2), db=_f(hit.group(4)), was_db=_f(hit.group(5)),
+                              who="external" if hit.group(6) else "")
+                    if ev["was_db"] is not None and ev["db"] is not None and ev["db"] > ev["was_db"]:
+                        ev["kind"] = "raised"
+                elif kind == "mixer":
+                    ev.update(key=hit.group(2), db=_f(hit.group(4)), was_db=_f(hit.group(5)),
+                              who="external" if hit.group(6) else "")
+                elif kind == "mute":
+                    ev.update(kind="muted" if hit.group(4) == "on" else "unmuted", key=hit.group(2),
+                              who="external" if hit.group(5) else "")
                 elif kind == "auto":
                     ev.update(key=hit.group(2), db=0.0, was_db=_f(hit.group(3)), who="auto")
                 elif kind == "set":

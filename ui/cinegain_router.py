@@ -458,10 +458,15 @@ class Router:
         """Fades a stream's mixer volume (all channels) to 100 % from its quietest channel."""
         from cinegain_volume import mixer_db, mixer_pct
 
-        def apply(db, final, index=st.index):
-            return self.pulse.set_volume_pct(index, 100.0 if final else mixer_pct(db))
+        def apply(db, final, index=st.index, node_id=st.node_id):
+            pct = 100.0 if final else mixer_pct(db)
+            ok = self.pulse.set_volume_pct(index, pct)
+            if ok and node_id is not None:
+                guard.note_mixer(node_id, (pct / 100.0) ** 3)  # own change, not "external" (#44)
+            return ok
 
-        fade = guard.add_fade(("mixer", st.index), mixer_db(st.volume_min_pct), 0.0, apply, now,
+        key = ("mixer", st.node_id if st.node_id is not None else f"#{st.index}")
+        fade = guard.add_fade(key, mixer_db(st.volume_min_pct), 0.0, apply, now,
                               what=f"mixer of stream #{st.index}")
         log.info("full reset: fading mixer of stream #%s (%s) from %d %% to 100 %% over %.1f s",
                  st.index, st.display_name, st.volume_min_pct, fade.duration)

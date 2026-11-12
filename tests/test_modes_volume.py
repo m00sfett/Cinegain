@@ -194,6 +194,157 @@ SAMPLE_STREAM_PROPERTIES = (
 )
 
 
+class TestChangeLog(unittest.TestCase):
+    """#44: every volume change on every level, both directions, with its source, without flooding."""
+
+    def setUp(self):
+        import cinegain_volume as vol
+        self.vol = vol
+        vol._own_writes.clear()
+        self.clock = tr.Clock(1000.0)
+        self.fake = FakeVolumes([
+            NodeVolume(1, "Google Chrome", "chrome", "Google Chrome", 0.25),
+            NodeVolume(53, "", "", "alsa_output.analog-stereo", 1.0, is_sink=True),
+        ])
+        self.guard = VolumeGuard(scanner=self.fake.scan, setter=self.fake.set, clock=self.clock, auto=False)
+
+    def tick(self, dt=1.5):
+        self.clock.t += dt
+        self.guard.update()
+
+    def logged(self, fn):
+        with self.assertLogs("cinegain.volume", level="DEBUG") as cm:
+            self.vol.log.debug("probe")
+            fn()
+        return [line for line in cm.output if "probe" not in line]
+
+    def test_raise_and_lowering_from_outside_are_both_logged(self):
+        first = self.logged(self.tick)
+        self.assertTrue(any("hidden volume of node 1 (chrome::google chrome, Google Chrome) is 0.250000 = -12.0 dB"
+                            in line for line in first))
+        self.fake.nodes[1].volume = 1.0                       # raised by someone else (the 20:23 case)
+        up = self.logged(self.tick)
+        self.assertEqual(len(up), 1)
+        self.assertIn("INFO", up[0])
+        self.assertIn("is 1.000000 = 0.0 dB (was -12.0 dB) [external]", up[0])
+        self.clock.t += 5
+        self.fake.nodes[1].volume = 0.5                       # and lowered again
+        down = self.logged(self.tick)
+        self.assertIn("WARNING", down[0])
+        self.assertIn("= -6.0 dB (was 0.0 dB) [external]", down[0])
+
+    def test_rapid_changes_are_merged_not_flooded_and_none_is_lost(self):
+        self.tick()
+        values = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+
+        def burst():
+            for v in values:
+                self.fake.nodes[1].volume = v
+                self.tick(0.25)                               # 8 changes within 2 s
+            self.tick(2.0)                                    # quiet: the merged line comes
+        lines = [line for line in self.logged(burst) if "node 1 " in line]
+        self.assertEqual(len(lines), 2)
+        self.assertIn("= -10.5 dB (was -12.0 dB)", lines[0])  # the first change at once
+        self.assertIn("= 0.0 dB (was -10.5 dB)", lines[1])    # the rest merged up to the latest value
+
+    def test_mixer_mute_and_sink_changes_are_logged(self):
+        self.tick()
+        self.fake.nodes[1].mixer = 0.125                     # -18 dB = 50 % on the cubic mixer scale
+        self.fake.nodes[1].mute = True
+        self.fake.nodes[53].mixer = 0.5
+        self.fake.nodes[53].volume = 0.5
+        text = "\n".join(self.logged(self.tick))
+        self.assertIn("mixer volume of node 1 (chrome::google chrome, Google Chrome) is -18.1 dB = 50 % "
+                      "(was 0.0 dB) [external]", text)
+        self.assertIn("mute of node 1 (chrome::google chrome, Google Chrome) is on (was off) [external]", text)
+        self.assertIn("hidden volume of node 53 (::alsa_output.analog-stereo, alsa_output.analog-stereo) is "
+                      "0.500000 = -6.0 dB (was 0.0 dB) [external]", text)
+        self.assertIn("mixer volume of node 53", text)
+
+    def test_cinegain_changes_are_not_reported_as_external(self):
+        self.tick()
+        self.guard.fade_hidden(1, 0.25, 1.0)                 # our own fade-in
+        drain(self.guard, self.clock)
+        self.vol.note_own_write(53, 0.7)                      # e.g. the analysis view's own guard
+        self.fake.nodes[53].volume = 0.7
+        lines = self.logged(lambda: (self.tick(), self.tick(3.0)))
+        self.assertEqual([line for line in lines if "[external]" in line], [])
+
+    def test_history_reads_the_new_events(self):
+        import time as _t
+        vol = self.vol
+        now = _t.time()
+        stamp = _t.strftime("%Y-%m-%d %H:%M:%S", _t.localtime(now - 60))
+        lines = [
+            f"{stamp}.001 1 gui INFO  cinegain.volume: hidden volume of node 3 (chrome, Chrome) is 1.000000 = 0.0 dB "
+            "(was -12.0 dB) [external]",
+            f"{stamp}.002 1 gui WARNING cinegain.volume: hidden volume of node 3 (chrome, Chrome) is 0.500000 = -6.0 dB "
+            "(was 0.0 dB) [external]",
+            f"{stamp}.003 1 gui INFO  cinegain.volume: mixer volume of node 3 (chrome, Chrome) is -18.1 dB = 50 % "
+            "(was 0.0 dB) [external]",
+            f"{stamp}.004 1 gui INFO  cinegain.volume: mute of node 3 (chrome, Chrome) is on (was off) [external]",
+            f"{stamp}.005 1 gui INFO  cinegain.volume: mute of node 3 (chrome, Chrome) is off (was on) [external]",
+        ]
+        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".log") as f:
+            f.write("\n".join(lines) + "\n")
+        journal = [{"time": now - 30, "kind": "link_failed", "key": "", "db": None, "was_db": None,
+                    "who": "wireplumber"}]
+        orig = vol.wireplumber_events
+        vol.wireplumber_events = lambda since: list(journal)
+        try:
+            ev = vol.history(f.name, now=now, journal=True)
+            self.assertNotIn("link_failed", [e["kind"] for e in vol.history(f.name, now=now)])  # test log: no journal
+        finally:
+            vol.wireplumber_events = orig
+            os.unlink(f.name)
+        kinds = [(e["kind"], e["db"], e["was_db"], e["who"]) for e in sorted(ev, key=lambda e: e["time"])]
+        self.assertEqual(kinds, [
+            ("raised", 0.0, -12.0, "external"), ("lowered", -6.0, 0.0, "external"),
+            ("mixer", -18.1, 0.0, "external"), ("muted", None, None, "external"),
+            ("unmuted", None, None, "external"), ("link_failed", None, None, "wireplumber")])
+
+    def test_timeline_shows_the_new_events(self):
+        try:
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+            from PyQt6.QtWidgets import QApplication
+            import analysis_panel
+            from i18n import t
+        except ImportError as e:  # pragma: no cover - PyQt6 missing
+            self.skipTest(f"PyQt6 not available: {e}")
+        app = QApplication.instance() or QApplication([])
+
+        def ev(kind, db=None, was=None, who="external"):
+            return {"time": 1e9, "kind": kind, "key": "chrome", "db": db, "was_db": was, "who": who}
+        events = [ev("raised", 0.0, -12.0), ev("mixer", -18.1, 0.0), ev("muted"), ev("unmuted"),
+                  ev("link_failed", who="wireplumber")]
+        panel = analysis_panel.AnalysisPanel(scanner=lambda: [], setter=lambda *a: True,
+                                             history=lambda key=None: list(events))
+        panel.refresh_history(force=True)
+        cells = [(panel.timeline.item(i, 2).text(), panel.timeline.item(i, 3).text()) for i in range(5)]
+        self.assertEqual(cells, [
+            (t("analysis_ev_raised", db="+0.0 dB", was="−12.0 dB"), t("analysis_by_external")),
+            (t("analysis_ev_mixer", db="−18.1 dB", was="+0.0 dB"), t("analysis_by_external")),
+            (t("analysis_ev_muted"), t("analysis_by_external")),
+            (t("analysis_ev_unmuted"), t("analysis_by_external")),
+            (t("analysis_ev_link_failed"), "WirePlumber")])
+        del app
+
+    def test_journal_link_failures_become_events(self):
+        import json as _json
+
+        class Res:
+            returncode, stderr = 0, ""
+            stdout = "\n".join(_json.dumps(o) for o in (
+                {"__REALTIME_TIMESTAMP": "1794425959369580",
+                 "MESSAGE": "wp-event-dispatcher: <WpSiStandardLink:0x5> link failed: 1 of 1 PipeWire links failed"},
+                {"__REALTIME_TIMESTAMP": "1794425897811626", "MESSAGE": "wp_properties_get: assertion failed"},
+                {"__REALTIME_TIMESTAMP": "x", "MESSAGE": "link failed"}))
+        calls = []
+        ev = self.vol.wireplumber_events(1794400000, runner=lambda cmd, **kw: calls.append(cmd) or Res())
+        self.assertEqual([(round(e["time"]), e["kind"]) for e in ev], [(1794425959, "link_failed")])
+        self.assertEqual(calls[0][:4], ["journalctl", "--user", "-u", "wireplumber"])
+
+
 class TestSavedVolumes(unittest.TestCase):
     """#26: the full reset did not hold: Audio/Sink entries, stale targets, WirePlumber's copy in memory."""
 
@@ -473,6 +624,20 @@ class TestRouterVolume(tr.Base):
         self.assertEqual(self._writes(62), [])
         self.assertIn("cinegain_sink", seen["sinks"])           # targets on running sinks may stay
         self.assertEqual(report["wireplumber"], "skipped")
+
+    def test_full_reset_mixer_fade_is_not_reported_as_external(self):
+        self.stream(1, "Spotify", "spotify", volume_pct=50, node_id=21)
+        self.volumes.nodes[21] = NodeVolume(21, "Spotify", "spotify", "Spotify", 1.0, mixer=0.125)
+        self.router.guard.update()
+        self.router.full_volume_reset()
+        drain(self.router.guard, self.clock)
+        self.volumes.nodes[21].mixer = 1.0                   # PipeWire now shows what pactl set
+        with self.assertLogs("cinegain.volume", level="DEBUG") as cm:
+            import cinegain_volume
+            cinegain_volume.log.debug("probe")
+            self.clock.t += 3
+            self.router.guard.update()
+        self.assertEqual([line for line in cm.output if "[external]" in line], [])
 
     def test_reset_of_one_program_leaves_others(self):
         self.stream(1, "Chromium", "ChatGPT")
