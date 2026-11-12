@@ -3,6 +3,7 @@
 DSP stage tests for src/cinegain.c: high-pass off switch, fast leveler cut and the
 meter file the GUI reads. Builds the plugin into a temp dir; needs gcc only.
 """
+import atexit
 import ctypes as C
 import math
 import os
@@ -16,6 +17,12 @@ import unittest
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 RATE = 48000
 BLOCK = 256
+
+# No plugin instance of an offline test may touch the runtime dir of a running
+# Cinegain (#54): every meter file goes to a private temp dir for this module.
+_METER_TMP = tempfile.mkdtemp(prefix="cinegain-test-meter-")
+os.environ["CINEGAIN_METER_DIR"] = _METER_TMP
+atexit.register(shutil.rmtree, _METER_TMP, True)
 
 
 class Desc(C.Structure):
@@ -124,7 +131,7 @@ class StageTests(unittest.TestCase):
                 self.desc.cleanup(h)
                 self.assertFalse(os.path.exists(path))
             finally:
-                del os.environ["CINEGAIN_METER_DIR"]
+                os.environ["CINEGAIN_METER_DIR"] = _METER_TMP
 
     def _open(self):
         """New activated instance with neutral controls; returns (handle, controls)."""
@@ -170,7 +177,7 @@ class StageTests(unittest.TestCase):
                 self.desc.cleanup(new)
                 self.assertEqual(os.listdir(d), [])  # owner removes it, no temp files left
             finally:
-                del os.environ["CINEGAIN_METER_DIR"]
+                os.environ["CINEGAIN_METER_DIR"] = _METER_TMP
 
     def _run_steps(self, steps, base=None):
         """
@@ -390,7 +397,7 @@ class StageTests(unittest.TestCase):
                 self.assertAlmostEqual(ramp, 10.0, delta=0.5)
                 self.desc.cleanup(h)
             finally:
-                del os.environ["CINEGAIN_METER_DIR"]
+                os.environ["CINEGAIN_METER_DIR"] = _METER_TMP
 
     def assertSameSamples(self, a, b, msg=None):
         """List equality without unittest's (very slow) diff of long sample lists."""
